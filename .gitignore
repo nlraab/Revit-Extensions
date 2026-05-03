@@ -10,6 +10,8 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
+~$*
+*_bash_write_test.txt
 
 # Build artifacts
 dist/
