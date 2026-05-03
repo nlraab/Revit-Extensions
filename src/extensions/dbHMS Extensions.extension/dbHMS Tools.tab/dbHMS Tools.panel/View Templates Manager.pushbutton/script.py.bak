@@ -1,0 +1,2513 @@
+# -*- coding: utf-8 -*-
+"""View Templates Manager — All-in-one view template management for Revit.
+
+Features:
+  - List all view templates with type, scale, and usage count
+  - Rename, duplicate, and delete view templates
+  - Apply view templates to views in the project
+  - Properties tab: edit scale, detail level, discipline, parts visibility
+  - VG Overrides tab: show/hide model and annotation categories per template
+  - Revit Links tab: view and set per-link display type (By Host View / By Linked View)
+  - Bulk Edit tab: apply setting changes across ALL selected templates at once
+      * Scale, detail level
+      * Hide/show specific categories
+      * Set Revit links to By Host View (inheriting host VG settings)
+  - Usage tab: see which views use each template
+"""
+__title__ = "View Templates\nManager"
+__doc__ = "Manage view templates: edit, duplicate, apply, and bulk-modify across the project."
+
+import clr
+import re
+import sys
+import traceback
+
+clr.AddReference("RevitAPI")
+clr.AddReference("RevitAPIUI")
+clr.AddReference("PresentationFramework")
+clr.AddReference("PresentationCore")
+clr.AddReference("WindowsBase")
+clr.AddReference("System")
+
+from Autodesk.Revit.DB import (
+    FilteredElementCollector, View, ViewType, ViewSheet, Viewport,
+    Transaction, TransactionGroup, BuiltInParameter, BuiltInCategory,
+    ElementId, CategoryType, Category, OverrideGraphicSettings,
+    RevitLinkInstance
+)
+
+try:
+    from Autodesk.Revit.DB import RevitLinkGraphicsSettings
+    _HAS_LINK_GRAPHICS = True
+except ImportError:
+    _HAS_LINK_GRAPHICS = False
+
+from Autodesk.Revit.UI import TaskDialog, TaskDialogCommonButtons, TaskDialogResult
+
+import System
+from System.Windows import (
+    Window, Thickness, HorizontalAlignment, VerticalAlignment,
+    Visibility, RoutedEventHandler, MessageBox, MessageBoxButton,
+    MessageBoxResult, MessageBoxImage
+)
+from System.Windows.Controls import (
+    DataGrid, DataGridCheckBoxColumn, DataGridTextColumn,
+    DataGridTemplateColumn, DataGridLength,
+    ComboBox, ComboBoxItem, TextBox, ListBox, ListBoxItem,
+    Button, CheckBox, RadioButton, StackPanel, Grid, Border,
+    TextBlock, ScrollViewer, Expander, TabControl, TabItem,
+    WrapPanel, Orientation, Label, Separator
+)
+from System.Windows.Controls.Primitives import ToggleButton
+from System.Windows.Threading import DispatcherPriority
+from System import Action
+from System.Windows.Media import SolidColorBrush, Color
+from System.Windows.Data import (
+    CollectionViewSource, Binding, BindingMode
+)
+from System.Collections.ObjectModel import ObservableCollection
+from System.Collections.Generic import List
+from System.ComponentModel import (
+    INotifyPropertyChanged, PropertyChangedEventArgs,
+    SortDescription, ListSortDirection
+)
+import System.Windows.Markup as Markup
+from System.Windows.Interop import WindowInteropHelper
+
+doc   = __revit__.ActiveUIDocument.Document
+uidoc = __revit__.ActiveUIDocument
+
+
+# ═══════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def eid_int(eid):
+    try:
+        return eid.Value
+    except AttributeError:
+        return eid.IntegerValue
+
+
+def viewtype_label(vt):
+    """Return a short human-readable string for a ViewType enum value."""
+    mapping = {
+        ViewType.FloorPlan:          "Floor Plan",
+        ViewType.CeilingPlan:        "Ceiling Plan",
+        ViewType.Elevation:          "Elevation",
+        ViewType.Section:            "Section",
+        ViewType.Detail:             "Detail",
+        ViewType.ThreeD:             "3D",
+        ViewType.Schedule:           "Schedule",
+        ViewType.DraftingView:       "Drafting",
+        ViewType.Legend:             "Legend",
+        ViewType.EngineeringPlan:    "Mech Plan",
+        ViewType.AreaPlan:           "Area Plan",
+        ViewType.Walkthrough:        "Walkthrough",
+        ViewType.Rendering:          "Rendering",
+    }
+    return mapping.get(vt, str(vt))
+
+
+def scale_label(scale):
+    if not scale or scale <= 0:
+        return "-"
+    return "1:{}".format(scale)
+
+
+def get_detail_level_name(val):
+    return {1: "Coarse", 2: "Medium", 3: "Fine"}.get(val, "-")
+
+
+def get_parts_visibility_name(val):
+    return {0: "Show Original", 1: "Show Parts", 2: "Show Both"}.get(val, "-")
+
+
+def get_discipline_name(val):
+    return {
+        0:  "Architectural",
+        1:  "Structural",
+        2:  "Mechanical",
+        3:  "Electrical",
+        4:  "Plumbing",
+        255: "Coordination",
+    }.get(val, str(val))
+
+
+def get_all_templates(doc):
+    """Return list of all view templates sorted by name."""
+    result = []
+    for v in FilteredElementCollector(doc).OfClass(View):
+        if v.IsTemplate:
+            result.append(v)
+    return sorted(result, key=lambda v: v.Name.lower())
+
+
+def build_usage_map(doc):
+    """Return dict: template ElementId.IntegerValue → count of views using it."""
+    usage = {}
+    for v in FilteredElementCollector(doc).OfClass(View):
+        if v.IsTemplate:
+            continue
+        try:
+            tid = v.ViewTemplateId
+            if tid and eid_int(tid) != -1:
+                k = eid_int(tid)
+                usage[k] = usage.get(k, 0) + 1
+        except Exception:
+            pass
+    return usage
+
+
+def get_link_instances(doc):
+    """Return list of all RevitLinkInstance elements."""
+    try:
+        return list(FilteredElementCollector(doc).OfClass(RevitLinkInstance))
+    except Exception:
+        return []
+
+
+def get_link_name(link):
+    """Return the display name of a Revit link instance."""
+    try:
+        p = link.get_Parameter(BuiltInParameter.RVT_LINK_INSTANCE_NAME)
+        if p:
+            return p.AsString() or link.Name
+    except Exception:
+        pass
+    try:
+        return link.Name
+    except Exception:
+        return "Link"
+
+
+def get_link_display_type(view_template, link_id):
+    """Return a human-readable string for the link's display type in this template."""
+    if not _HAS_LINK_GRAPHICS:
+        return "N/A"
+    try:
+        settings = view_template.GetLinkOverrides(link_id)
+        vt = settings.GetLinkViewType()
+        # LinkedFileWireframeType or similar enum
+        vt_str = str(vt)
+        if "ByHostView" in vt_str or "0" == vt_str:
+            return "By Host View"
+        elif "ByLinkedView" in vt_str or "1" == vt_str:
+            return "By Linked View"
+        else:
+            return vt_str
+    except Exception:
+        return "By Host View"
+
+
+def get_mech_categories(doc):
+    """Return sorted list of (name, ElementId) for model categories relevant to MEP."""
+    result = []
+    try:
+        cats = doc.Settings.Categories
+        for cat in cats:
+            if cat.CategoryType != CategoryType.Model:
+                continue
+            name = cat.Name
+            result.append((name, cat.Id))
+    except Exception:
+        pass
+    return sorted(result, key=lambda x: x[0])
+
+
+def get_annotation_categories(doc):
+    """Return sorted list of (name, ElementId) for annotation categories."""
+    result = []
+    try:
+        cats = doc.Settings.Categories
+        for cat in cats:
+            if cat.CategoryType != CategoryType.Annotation:
+                continue
+            result.append((cat.Name, cat.Id))
+    except Exception:
+        pass
+    return sorted(result, key=lambda x: x[0])
+
+
+def category_can_be_hidden(view, cat_id):
+    """Check if category visibility can be controlled in this view."""
+    try:
+        return view.CanCategoryBeHidden(cat_id)
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# DATA MODELS
+# ═══════════════════════════════════════════════════════════════
+
+class TemplateItem(INotifyPropertyChanged):
+    def __init__(self, view, usage_count=0):
+        self._view         = view
+        self._is_selected  = False
+        self._usage_count  = usage_count
+        self._handlers     = []
+
+    # INotifyPropertyChanged
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def View(self):
+        return self._view
+
+    @property
+    def Id(self):
+        return self._view.Id
+
+    @property
+    def Name(self):
+        return self._view.Name
+
+    @property
+    def ViewTypeName(self):
+        try:
+            return viewtype_label(self._view.ViewType)
+        except Exception:
+            return "-"
+
+    @property
+    def Scale(self):
+        try:
+            s = self._view.Scale
+            return scale_label(s)
+        except Exception:
+            return "-"
+
+    @property
+    def UsedBy(self):
+        return self._usage_count
+
+    @property
+    def IsSelected(self):
+        return self._is_selected
+
+    @IsSelected.setter
+    def IsSelected(self, value):
+        if self._is_selected != value:
+            self._is_selected = value
+            self._notify("IsSelected")
+
+
+class CategoryVisItem(INotifyPropertyChanged):
+    def __init__(self, name, cat_id, is_hidden):
+        self._name      = name
+        self._cat_id    = cat_id
+        self._is_hidden = is_hidden
+        self._handlers  = []
+
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def Name(self):   return self._name
+    @property
+    def CatId(self):  return self._cat_id
+    @property
+    def IsHidden(self): return self._is_hidden
+    @IsHidden.setter
+    def IsHidden(self, v):
+        if self._is_hidden != v:
+            self._is_hidden = v
+            self._notify("IsHidden")
+    @property
+    def IsVisible(self): return not self._is_hidden
+    @IsVisible.setter
+    def IsVisible(self, v):
+        self.IsHidden = not v
+
+
+class LinkDisplayItem(INotifyPropertyChanged):
+    def __init__(self, link_name, link_id, display_type):
+        self._link_name    = link_name
+        self._link_id      = link_id
+        self._display_type = display_type
+        self._handlers     = []
+
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def LinkName(self):    return self._link_name
+    @property
+    def LinkId(self):      return self._link_id
+    @property
+    def DisplayType(self): return self._display_type
+
+
+class BulkCatItem(INotifyPropertyChanged):
+    """Represents one category override row in the Bulk Edit panel."""
+    def __init__(self, name, cat_id, hide=True):
+        self._name     = name
+        self._cat_id   = cat_id
+        self._hide     = hide
+        self._handlers = []
+
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def Name(self):  return self._name
+    @property
+    def CatId(self): return self._cat_id
+    @property
+    def Hide(self):  return self._hide
+    @Hide.setter
+    def Hide(self, v):
+        if self._hide != v:
+            self._hide = v
+            self._notify("Hide")
+    @property
+    def ActionLabel(self): return "Hide" if self._hide else "Show"
+
+
+class BulkLinkItem(INotifyPropertyChanged):
+    """Represents one Revit Link in the bulk-edit link panel."""
+    def __init__(self, name, link_id, apply=False):
+        self._name     = name
+        self._link_id  = link_id
+        self._apply    = apply
+        self._handlers = []
+
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def Name(self):   return self._name
+    @property
+    def LinkId(self): return self._link_id
+    @property
+    def Apply(self):  return self._apply
+    @Apply.setter
+    def Apply(self, v):
+        if self._apply != v:
+            self._apply = v
+            self._notify("Apply")
+
+
+# ═══════════════════════════════════════════════════════════════
+# SHARED RESOURCES (matches Sheet Manager / Revisions Manager)
+# ═══════════════════════════════════════════════════════════════
+#   Background: #F7FAFC      Header bar: #2D3748
+#   Cards: White / #E2E8F0   Primary btn: #2B6CB0
+#   Text: #1A202C / #4A5568  Helper: #718096
+
+SHARED_RESOURCES = """
+    <Style x:Key="SectionHeader" TargetType="TextBlock">
+      <Setter Property="FontSize"   Value="13"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="#1A202C"/>
+      <Setter Property="Margin"     Value="0,0,0,6"/>
+    </Style>
+    <Style x:Key="FieldLabel" TargetType="TextBlock">
+      <Setter Property="FontSize"   Value="11"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="#4A5568"/>
+      <Setter Property="Margin"     Value="0,6,0,2"/>
+    </Style>
+    <Style x:Key="HelperText" TargetType="TextBlock">
+      <Setter Property="FontSize"     Value="11"/>
+      <Setter Property="Foreground"   Value="#718096"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <!-- Primary (filled blue) button -->
+    <Style x:Key="PrimaryBtn" TargetType="Button">
+      <Setter Property="Background"    Value="#2B6CB0"/>
+      <Setter Property="Foreground"    Value="White"/>
+      <Setter Property="FontWeight"    Value="SemiBold"/>
+      <Setter Property="FontSize"      Value="12"/>
+      <Setter Property="Padding"       Value="14,6"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor"        Value="Hand"/>
+      <Setter Property="Margin"        Value="0,0,6,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#2C5282"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#2A4365"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="bd" Property="Background" Value="#A0AEC0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <!-- Secondary (ghost) button -->
+    <Style x:Key="SecondaryBtn" TargetType="Button">
+      <Setter Property="Background"    Value="#EDF2F7"/>
+      <Setter Property="Foreground"    Value="#2D3748"/>
+      <Setter Property="FontSize"      Value="12"/>
+      <Setter Property="Padding"       Value="12,5"/>
+      <Setter Property="BorderBrush"   Value="#CBD5E0"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Cursor"        Value="Hand"/>
+      <Setter Property="Margin"        Value="0,0,6,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#E2E8F0"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#CBD5E0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <!-- Danger (red) button -->
+    <Style x:Key="DangerBtn" TargetType="Button">
+      <Setter Property="Background"    Value="#FC8181"/>
+      <Setter Property="Foreground"    Value="White"/>
+      <Setter Property="FontSize"      Value="12"/>
+      <Setter Property="Padding"       Value="12,5"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor"        Value="Hand"/>
+      <Setter Property="Margin"        Value="0,0,6,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#E53E3E"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Foreground"    Value="#1A202C"/>
+      <Setter Property="BorderBrush"   Value="#CBD5E0"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"       Value="8,4"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="CaretBrush"    Value="#2B6CB0"/>
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground"    Value="#1A202C"/>
+      <Setter Property="BorderBrush"   Value="#CBD5E0"/>
+      <Setter Property="Padding"       Value="6,4"/>
+      <Setter Property="Height"        Value="28"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground"    Value="#1A202C"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style TargetType="TabControl">
+      <Setter Property="Background"    Value="Transparent"/>
+      <Setter Property="BorderBrush"   Value="#E2E8F0"/>
+      <Setter Property="BorderThickness" Value="0,1,0,0"/>
+      <Setter Property="Padding"       Value="0"/>
+    </Style>
+    <Style TargetType="TabItem">
+      <Setter Property="Foreground"    Value="#4A5568"/>
+      <Setter Property="FontSize"      Value="12"/>
+      <Setter Property="Padding"       Value="14,8"/>
+      <Setter Property="Background"    Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter ContentSource="Header"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="#2B6CB0"/>
+                <Setter Property="Foreground" Value="#2B6CB0"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#EDF2F7"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <!-- DataGrid base style -->
+    <Style TargetType="DataGrid">
+      <Setter Property="Background"               Value="White"/>
+      <Setter Property="Foreground"               Value="#1A202C"/>
+      <Setter Property="BorderBrush"              Value="#E2E8F0"/>
+      <Setter Property="BorderThickness"          Value="1"/>
+      <Setter Property="RowBackground"            Value="White"/>
+      <Setter Property="AlternatingRowBackground" Value="#F7FAFC"/>
+      <Setter Property="GridLinesVisibility"      Value="None"/>
+      <Setter Property="HeadersVisibility"        Value="Column"/>
+      <Setter Property="SelectionMode"            Value="Single"/>
+      <Setter Property="SelectionUnit"            Value="FullRow"/>
+      <Setter Property="CanUserAddRows"           Value="False"/>
+      <Setter Property="CanUserDeleteRows"        Value="False"/>
+      <Setter Property="AutoGenerateColumns"      Value="False"/>
+      <Setter Property="CanUserResizeRows"        Value="False"/>
+      <Setter Property="RowHeight"                Value="28"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background"      Value="#EDF2F7"/>
+      <Setter Property="Foreground"      Value="#2D3748"/>
+      <Setter Property="FontSize"        Value="11"/>
+      <Setter Property="FontWeight"      Value="SemiBold"/>
+      <Setter Property="Padding"         Value="8,6"/>
+      <Setter Property="BorderBrush"     Value="#E2E8F0"/>
+      <Setter Property="BorderThickness" Value="0,0,1,1"/>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Setter Property="Foreground"      Value="#1A202C"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#EDF2F7"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#BEE3F8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness"  Value="0"/>
+      <Setter Property="Foreground"       Value="#1A202C"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="Foreground" Value="#1A202C"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="RowCheck" TargetType="CheckBox">
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment"   Value="Center"/>
+      <Setter Property="Margin" Value="0"/>
+    </Style>
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN WINDOW XAML
+# ═══════════════════════════════════════════════════════════════
+
+MAIN_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="View Templates Manager" Width="1200" Height="780"
+        WindowStartupLocation="CenterScreen"
+        Background="#F7FAFC" Foreground="#1A202C"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+  <Window.Resources>
+""" + SHARED_RESOURCES + """
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>   <!-- 0: header -->
+      <RowDefinition Height="Auto"/>   <!-- 1: toolbar -->
+      <RowDefinition Height="*"/>      <!-- 2: main content -->
+      <RowDefinition Height="Auto"/>   <!-- 3: status bar -->
+    </Grid.RowDefinitions>
+
+    <!-- ═══ HEADER BAR ═══ -->
+    <Border Grid.Row="0" Background="#2D3748" Padding="20,14">
+      <Grid>
+        <StackPanel Orientation="Vertical" HorizontalAlignment="Left">
+          <StackPanel Orientation="Horizontal">
+            <!-- Tool icon: colorful VT indicator -->
+            <Border Background="#2B6CB0" CornerRadius="4"
+                    Width="36" Height="36" Margin="0,0,12,0"
+                    VerticalAlignment="Center">
+              <Grid>
+                <Rectangle Fill="#00BFFF" Width="24" Height="4"
+                           VerticalAlignment="Top" Margin="6,8,6,0" RadiusX="1" RadiusY="1"/>
+                <Rectangle Fill="#48BB78" Width="24" Height="4"
+                           VerticalAlignment="Center" Margin="6,0" RadiusX="1" RadiusY="1"/>
+                <Rectangle Fill="#ED8936" Width="24" Height="4"
+                           VerticalAlignment="Bottom" Margin="6,0,6,8" RadiusX="1" RadiusY="1"/>
+              </Grid>
+            </Border>
+            <StackPanel Orientation="Vertical" VerticalAlignment="Center">
+              <TextBlock Text="View Templates Manager" Foreground="White"
+                         FontSize="20" FontWeight="Bold"/>
+              <TextBlock Text="Edit, duplicate, apply, and bulk-modify view templates across the project."
+                         Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                    VerticalAlignment="Center" Opacity="0.85">
+          <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
+                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
+          <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
+                     FontWeight="Light" VerticalAlignment="Center"/>
+          <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
+                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ═══ TOOLBAR ═══ -->
+    <Border Grid.Row="1" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="16,10">
+      <Grid>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <!-- Search -->
+          <Grid Width="220" Margin="0,0,8,0">
+            <TextBox x:Name="txt_search" Height="30"/>
+            <TextBlock x:Name="ph_search" Text="🔍  Search templates…"
+                       Foreground="#A0AEC0" FontSize="12" IsHitTestVisible="False"
+                       VerticalAlignment="Center" Margin="10,0"/>
+          </Grid>
+          <!-- Type filter -->
+          <ComboBox x:Name="cmb_type_filter" Width="140" Height="30"
+                    Margin="0,0,16,0" ToolTip="Filter by view type"/>
+          <!-- Divider -->
+          <Separator Width="1" Height="22" Background="#E2E8F0" Margin="0,0,12,0"/>
+          <!-- Action buttons -->
+          <Button x:Name="btn_new"     Content="＋ New"          Style="{StaticResource SecondaryBtn}" Height="30" ToolTip="Create a new view template (copy of selected)"/>
+          <Button x:Name="btn_rename"  Content="✎ Rename"        Style="{StaticResource SecondaryBtn}" Height="30" ToolTip="Rename selected template"/>
+          <Button x:Name="btn_dup"     Content="⧉ Duplicate"     Style="{StaticResource SecondaryBtn}" Height="30" ToolTip="Duplicate selected template"/>
+          <Button x:Name="btn_delete"  Content="🗑 Delete"        Style="{StaticResource DangerBtn}"    Height="30" ToolTip="Delete selected template(s)"/>
+          <Separator Width="1" Height="22" Background="#E2E8F0" Margin="0,0,12,0"/>
+          <Button x:Name="btn_apply"   Content="▶ Apply to Views" Style="{StaticResource PrimaryBtn}"  Height="30" ToolTip="Apply selected template to chosen views"/>
+        </StackPanel>
+        <!-- Right side: select all / none -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                    VerticalAlignment="Center">
+          <Button x:Name="btn_sel_all"  Content="Select All"  Style="{StaticResource SecondaryBtn}" Height="26" FontSize="11"/>
+          <Button x:Name="btn_sel_none" Content="Select None" Style="{StaticResource SecondaryBtn}" Height="26" FontSize="11"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ═══ MAIN CONTENT (two-panel) ═══ -->
+    <Grid Grid.Row="2">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="380" MinWidth="260"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- ── LEFT: Template List ── -->
+      <Border Grid.Column="0" Background="White"
+              BorderBrush="#E2E8F0" BorderThickness="0,0,1,0">
+        <DataGrid x:Name="dg_templates"
+                  SelectionMode="Single"
+                  Background="White"
+                  BorderThickness="0"
+                  GridLinesVisibility="Horizontal"
+                  HorizontalGridLinesBrush="#F0F4F8"
+                  EnableRowVirtualization="True"
+                  EnableColumnVirtualization="True">
+          <DataGrid.Columns>
+            <!-- Checkbox column -->
+            <DataGridTemplateColumn Header="" Width="34" CanUserResize="False" CanUserSort="False">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                            Style="{StaticResource RowCheck}" Cursor="Hand"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTextColumn Header="Name"  Binding="{Binding Name}"         Width="*"   IsReadOnly="True"/>
+            <DataGridTextColumn Header="Type"  Binding="{Binding ViewTypeName}" Width="90"  IsReadOnly="True"/>
+            <DataGridTextColumn Header="Scale" Binding="{Binding Scale}"        Width="60"  IsReadOnly="True"/>
+            <DataGridTextColumn Header="Used"  Binding="{Binding UsedBy}"       Width="46"  IsReadOnly="True"/>
+          </DataGrid.Columns>
+        </DataGrid>
+      </Border>
+
+      <!-- Splitter -->
+      <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center"
+                    VerticalAlignment="Stretch" Background="#E2E8F0" Cursor="SizeWE"/>
+
+      <!-- ── RIGHT: Detail / Edit Tabs ── -->
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>  <!-- selected template label -->
+          <RowDefinition Height="*"/>     <!-- tab control -->
+        </Grid.RowDefinitions>
+
+        <!-- "Editing: [Name]" label strip -->
+        <Border Grid.Row="0" Background="#EDF2F7"
+                BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="16,8">
+          <TextBlock x:Name="lbl_selected_header"
+                     Text="Select a template on the left to view or edit its settings."
+                     Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
+        </Border>
+
+        <!-- Tab Control -->
+        <TabControl Grid.Row="1" x:Name="tab_main"
+                    Background="#F7FAFC" BorderThickness="0">
+          <!-- ── PROPERTIES TAB ── -->
+          <TabItem Header="Properties">
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Padding="20">
+              <StackPanel x:Name="pnl_props" Margin="0,4,0,16">
+                <TextBlock Text="Template Properties" Style="{StaticResource SectionHeader}"/>
+                <!-- Name -->
+                <TextBlock Text="Name" Style="{StaticResource FieldLabel}"/>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBox x:Name="txt_prop_name" Height="30" Grid.Column="0" Margin="0,0,8,0"/>
+                  <Button x:Name="btn_prop_rename" Content="Rename" Grid.Column="1"
+                          Style="{StaticResource SecondaryBtn}" Height="30"/>
+                </Grid>
+                <!-- View Type (read-only) -->
+                <TextBlock Text="View Type" Style="{StaticResource FieldLabel}"/>
+                <TextBlock x:Name="lbl_prop_type" Foreground="#4A5568" FontSize="12"/>
+                <!-- Scale -->
+                <TextBlock Text="View Scale" Style="{StaticResource FieldLabel}"/>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <ComboBox x:Name="cmb_prop_scale" Grid.Column="0"/>
+                </Grid>
+                <!-- Detail Level -->
+                <TextBlock Text="Detail Level" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="cmb_prop_detail" Width="160" HorizontalAlignment="Left">
+                  <ComboBoxItem Content="Coarse" Tag="1"/>
+                  <ComboBoxItem Content="Medium" Tag="2"/>
+                  <ComboBoxItem Content="Fine"   Tag="3"/>
+                </ComboBox>
+                <!-- Parts Visibility -->
+                <TextBlock Text="Parts Visibility" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="cmb_prop_parts" Width="180" HorizontalAlignment="Left">
+                  <ComboBoxItem Content="Show Original" Tag="0"/>
+                  <ComboBoxItem Content="Show Parts"    Tag="1"/>
+                  <ComboBoxItem Content="Show Both"     Tag="2"/>
+                </ComboBox>
+                <!-- Discipline -->
+                <TextBlock Text="Discipline" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="cmb_prop_discipline" Width="180" HorizontalAlignment="Left">
+                  <ComboBoxItem Content="Architectural"  Tag="0"/>
+                  <ComboBoxItem Content="Structural"     Tag="1"/>
+                  <ComboBoxItem Content="Mechanical"     Tag="2"/>
+                  <ComboBoxItem Content="Electrical"     Tag="3"/>
+                  <ComboBoxItem Content="Plumbing"       Tag="4"/>
+                  <ComboBoxItem Content="Coordination"   Tag="255"/>
+                </ComboBox>
+                <!-- Save button -->
+                <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                  <Button x:Name="btn_prop_save" Content="💾  Save Properties"
+                          Style="{StaticResource PrimaryBtn}" Height="32"/>
+                </StackPanel>
+                <TextBlock x:Name="lbl_prop_status" Text="" Foreground="#48BB78"
+                           FontSize="11" Margin="0,6,0,0"/>
+              </StackPanel>
+            </ScrollViewer>
+          </TabItem>
+
+          <!-- ── VG OVERRIDES TAB ── -->
+          <TabItem Header="VG Overrides">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <!-- Sub-tab selector -->
+              <Border Grid.Row="0" Background="White"
+                      BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="12,6">
+                <StackPanel Orientation="Horizontal">
+                  <RadioButton x:Name="rb_vg_model" Content="Model Categories"
+                               IsChecked="True" GroupName="vg_type"
+                               Margin="0,0,16,0" VerticalContentAlignment="Center"/>
+                  <RadioButton x:Name="rb_vg_ann" Content="Annotation Categories"
+                               GroupName="vg_type" Margin="0,0,16,0"
+                               VerticalContentAlignment="Center"/>
+                  <Button x:Name="btn_vg_reload" Content="↺ Reload"
+                          Style="{StaticResource SecondaryBtn}" Height="24"
+                          FontSize="11" Margin="16,0,0,0"/>
+                  <TextBlock x:Name="lbl_vg_info" Text="  Click Reload to load categories for the selected template."
+                             Foreground="#718096" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Border>
+              <!-- Category list -->
+              <Grid Grid.Row="1">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Background="White"
+                        BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="10,6">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="200" Grid.Column="0" HorizontalAlignment="Left">
+                      <TextBox x:Name="txt_vg_search" Height="26"/>
+                      <TextBlock Text="Filter categories…" Foreground="#A0AEC0"
+                                 FontSize="11" IsHitTestVisible="False"
+                                 VerticalAlignment="Center" Margin="8,0"/>
+                    </Grid>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                      <Button x:Name="btn_vg_show_all"  Content="Show All"  Style="{StaticResource SecondaryBtn}" Height="26" FontSize="11"/>
+                      <Button x:Name="btn_vg_hide_all"  Content="Hide All"  Style="{StaticResource SecondaryBtn}" Height="26" FontSize="11"/>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+                <DataGrid Grid.Row="1" x:Name="dg_vg_cats"
+                          BorderThickness="0"
+                          EnableRowVirtualization="True">
+                  <DataGrid.Columns>
+                    <DataGridTemplateColumn Header="Visible" Width="60" CanUserResize="False">
+                      <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                          <CheckBox IsChecked="{Binding IsVisible, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                    Style="{StaticResource RowCheck}" Cursor="Hand"
+                                    x:Name="chk_vis"/>
+                        </DataTemplate>
+                      </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Category" Binding="{Binding Name}" Width="*" IsReadOnly="True"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </Grid>
+            </Grid>
+          </TabItem>
+
+          <!-- ── REVIT LINKS TAB ── -->
+          <TabItem Header="Revit Links">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="#EDF2F7"
+                      BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="16,10">
+                <TextBlock Style="{StaticResource HelperText}">
+                  Shows the display setting for each linked Revit model in the selected template.
+                  Setting a link to <Run FontWeight="SemiBold">By Host View</Run> makes it inherit all
+                  visibility/graphics settings (including category visibility) from this template.
+                  This is the recommended approach for hiding annotation categories from linked models.
+                </TextBlock>
+              </Border>
+              <DataGrid Grid.Row="1" x:Name="dg_links" BorderThickness="0">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Linked Model"    Binding="{Binding LinkName}"    Width="*"   IsReadOnly="True"/>
+                  <DataGridTextColumn Header="Display Setting" Binding="{Binding DisplayType}" Width="160" IsReadOnly="True"/>
+                </DataGrid.Columns>
+              </DataGrid>
+              <Border Grid.Row="2" Background="White"
+                      BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,10">
+                <StackPanel Orientation="Horizontal">
+                  <Button x:Name="btn_link_set_host" Content="Set Selected → By Host View"
+                          Style="{StaticResource PrimaryBtn}" Height="30"
+                          ToolTip="Set the selected link to By Host View for this template"/>
+                  <Button x:Name="btn_links_reload"  Content="↺ Reload"
+                          Style="{StaticResource SecondaryBtn}" Height="30"/>
+                  <TextBlock x:Name="lbl_links_status" Text=""
+                             Foreground="#48BB78" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </TabItem>
+
+          <!-- ── BULK EDIT TAB ── -->
+          <TabItem Header="⚡ Bulk Edit">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
+
+              <!-- Header strip -->
+              <Border Grid.Row="0" Background="#FEFCBF"
+                      BorderBrush="#F6E05E" BorderThickness="0,0,0,1" Padding="16,10">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="⚡ " FontSize="16" VerticalAlignment="Center"/>
+                  <StackPanel>
+                    <TextBlock x:Name="lbl_bulk_header"
+                               Text="Configure settings below, then click Apply to push changes to ALL checked templates."
+                               Foreground="#744210" FontWeight="SemiBold" FontSize="12"/>
+                    <TextBlock x:Name="lbl_bulk_count"
+                               Text="No templates selected — use the checkboxes on the left to choose which templates to modify."
+                               Foreground="#975A16" FontSize="11"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <!-- Scrollable settings area -->
+              <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled" Padding="16,8">
+                <StackPanel>
+
+                  <!-- ─ Section 1: Basic Properties ─ -->
+                  <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                          CornerRadius="4" Padding="14" Margin="0,0,0,10">
+                    <StackPanel>
+                      <TextBlock Text="Basic Properties" Style="{StaticResource SectionHeader}"/>
+                      <Grid>
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="Auto"/>
+                          <ColumnDefinition Width="160"/>
+                          <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                          <RowDefinition Height="Auto"/>
+                          <RowDefinition Height="Auto"/>
+                          <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <CheckBox x:Name="chk_bulk_scale" Content="View Scale:"
+                                  Grid.Row="0" Grid.Column="0" Margin="0,0,10,8" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cmb_bulk_scale" Grid.Row="0" Grid.Column="1" Margin="0,0,0,8"/>
+                        <CheckBox x:Name="chk_bulk_detail" Content="Detail Level:"
+                                  Grid.Row="1" Grid.Column="0" Margin="0,0,10,8" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cmb_bulk_detail" Grid.Row="1" Grid.Column="1" Margin="0,0,0,8">
+                          <ComboBoxItem Content="Coarse" Tag="1"/>
+                          <ComboBoxItem Content="Medium" Tag="2"/>
+                          <ComboBoxItem Content="Fine"   Tag="3"/>
+                        </ComboBox>
+                        <CheckBox x:Name="chk_bulk_parts" Content="Parts Visibility:"
+                                  Grid.Row="2" Grid.Column="0" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cmb_bulk_parts" Grid.Row="2" Grid.Column="1">
+                          <ComboBoxItem Content="Show Original" Tag="0"/>
+                          <ComboBoxItem Content="Show Parts"    Tag="1"/>
+                          <ComboBoxItem Content="Show Both"     Tag="2"/>
+                        </ComboBox>
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                  <!-- ─ Section 2: Category Visibility ─ -->
+                  <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                          CornerRadius="4" Padding="14" Margin="0,0,0,10">
+                    <StackPanel>
+                      <TextBlock Text="Category Visibility" Style="{StaticResource SectionHeader}"/>
+                      <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,8">
+                        Add categories to hide or show across all selected templates.
+                        This applies to the host model. Links set to <Run FontWeight="SemiBold">By Host View</Run>
+                        will also inherit these changes.
+                      </TextBlock>
+                      <!-- Category override list -->
+                      <DataGrid x:Name="dg_bulk_cats"
+                                MaxHeight="180" BorderThickness="1"
+                                BorderBrush="#E2E8F0"
+                                EnableRowVirtualization="True">
+                        <DataGrid.Columns>
+                          <DataGridTextColumn Header="Category" Binding="{Binding Name}"        Width="*"   IsReadOnly="True"/>
+                          <DataGridTextColumn Header="Action"   Binding="{Binding ActionLabel}" Width="70"  IsReadOnly="True"/>
+                        </DataGrid.Columns>
+                      </DataGrid>
+                      <!-- Add / remove buttons -->
+                      <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button x:Name="btn_bulk_add_hide_cat"   Content="＋ Add Category to Hide"
+                                Style="{StaticResource SecondaryBtn}" Height="28" FontSize="11"/>
+                        <Button x:Name="btn_bulk_add_show_cat"   Content="＋ Add Category to Show"
+                                Style="{StaticResource SecondaryBtn}" Height="28" FontSize="11"/>
+                        <Button x:Name="btn_bulk_remove_cat"     Content="✕ Remove"
+                                Style="{StaticResource DangerBtn}"    Height="28" FontSize="11"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <!-- ─ Section 3: Revit Link Display ─ -->
+                  <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                          CornerRadius="4" Padding="14" Margin="0,0,0,10">
+                    <StackPanel>
+                      <TextBlock Text="Revit Link Display" Style="{StaticResource SectionHeader}"/>
+                      <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,8">
+                        Check the links you want to set to <Run FontWeight="SemiBold">By Host View</Run>
+                        in all selected templates. This ensures linked models inherit the host template's
+                        visibility settings — the most efficient way to hide annotation categories
+                        from linked models across multiple templates at once.
+                      </TextBlock>
+                      <DataGrid x:Name="dg_bulk_links"
+                                MaxHeight="180" BorderThickness="1"
+                                BorderBrush="#E2E8F0">
+                        <DataGrid.Columns>
+                          <DataGridTemplateColumn Header="Apply" Width="50" CanUserResize="False">
+                            <DataGridTemplateColumn.CellTemplate>
+                              <DataTemplate>
+                                <CheckBox IsChecked="{Binding Apply, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Style="{StaticResource RowCheck}" Cursor="Hand"/>
+                              </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                          </DataGridTemplateColumn>
+                          <DataGridTextColumn Header="Linked Model" Binding="{Binding Name}" Width="*" IsReadOnly="True"/>
+                        </DataGrid.Columns>
+                      </DataGrid>
+                    </StackPanel>
+                  </Border>
+
+                </StackPanel>
+              </ScrollViewer>
+
+              <!-- Apply button bar -->
+              <Border Grid.Row="2" Background="White"
+                      BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,12">
+                <Grid>
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                    <Button x:Name="btn_bulk_apply"
+                            Content="⚡  Apply to Selected Templates"
+                            Style="{StaticResource PrimaryBtn}" Height="34" FontSize="13"/>
+                    <TextBlock x:Name="lbl_bulk_status" Text=""
+                               Foreground="#48BB78" FontSize="11"
+                               VerticalAlignment="Center"/>
+                  </StackPanel>
+                </Grid>
+              </Border>
+            </Grid>
+          </TabItem>
+
+          <!-- ── USAGE TAB ── -->
+          <TabItem Header="Usage">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="#EDF2F7"
+                      BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="16,10">
+                <TextBlock x:Name="lbl_usage_header" Style="{StaticResource HelperText}"
+                           Text="Select a template to see which views use it."/>
+              </Border>
+              <DataGrid Grid.Row="1" x:Name="dg_usage" BorderThickness="0">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="View Name"  Binding="{Binding ViewName}"  Width="*"   IsReadOnly="True"/>
+                  <DataGridTextColumn Header="View Type"  Binding="{Binding ViewType}"  Width="110" IsReadOnly="True"/>
+                  <DataGridTextColumn Header="On Sheet"   Binding="{Binding SheetRef}"  Width="130" IsReadOnly="True"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Grid>
+          </TabItem>
+        </TabControl>
+      </Grid>
+    </Grid>
+
+    <!-- ═══ STATUS BAR ═══ -->
+    <Border Grid.Row="3" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,8">
+      <Grid>
+        <TextBlock x:Name="lbl_status" Text="" Foreground="#4A5568"
+                   VerticalAlignment="Center" FontSize="11"/>
+        <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+                   Text="dbHMS Tools — View Templates Manager"
+                   Foreground="#A0AEC0" FontSize="10"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# RENAME DIALOG XAML
+# ═══════════════════════════════════════════════════════════════
+
+RENAME_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Rename Template" Width="400" Height="170"
+        WindowStartupLocation="CenterOwner"
+        Background="#F7FAFC" FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="NoResize">
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" Text="New template name:" Foreground="#4A5568"
+               FontWeight="SemiBold" Margin="0,0,0,6"/>
+    <TextBox Grid.Row="1" x:Name="txt_new_name" Height="30"
+             BorderBrush="#CBD5E0" Padding="8,4"/>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right"
+                Margin="0,10,0,0">
+      <Button x:Name="btn_ok"     Content="Rename" Width="80" Height="30" Margin="0,0,8,0"
+              Background="#2B6CB0" Foreground="White" FontWeight="SemiBold"
+              BorderThickness="0"/>
+      <Button x:Name="btn_cancel" Content="Cancel"  Width="70" Height="30"
+              Background="#EDF2F7" Foreground="#2D3748" BorderBrush="#CBD5E0" BorderThickness="1"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# APPLY TO VIEWS DIALOG XAML
+# ═══════════════════════════════════════════════════════════════
+
+APPLY_VIEWS_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Apply Template to Views" Width="600" Height="520"
+        WindowStartupLocation="CenterOwner"
+        Background="#F7FAFC" FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#2D3748" Padding="16,12">
+      <TextBlock x:Name="lbl_title" Text="Apply Template to Views"
+                 Foreground="White" FontSize="16" FontWeight="Bold"/>
+    </Border>
+    <Border Grid.Row="1" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="12,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Grid Width="220" HorizontalAlignment="Left">
+          <TextBox x:Name="txt_av_search" Height="28"/>
+          <TextBlock Text="Filter views…" Foreground="#A0AEC0" FontSize="11"
+                     IsHitTestVisible="False" VerticalAlignment="Center" Margin="8,0"/>
+        </Grid>
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button x:Name="btn_av_all"  Content="All"  Width="50" Height="28" Margin="0,0,6,0"
+                  Background="#EDF2F7" BorderBrush="#CBD5E0" BorderThickness="1"/>
+          <Button x:Name="btn_av_none" Content="None" Width="50" Height="28"
+                  Background="#EDF2F7" BorderBrush="#CBD5E0" BorderThickness="1"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <DataGrid Grid.Row="2" x:Name="dg_av_views"
+              Background="White" BorderThickness="0"
+              GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#F0F4F8"
+              RowHeight="26" CanUserAddRows="False" CanUserDeleteRows="False"
+              AutoGenerateColumns="False" SelectionMode="Single"
+              EnableRowVirtualization="True">
+      <DataGrid.Columns>
+        <DataGridTemplateColumn Header="" Width="34" CanUserResize="False">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate>
+              <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" Cursor="Hand"/>
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
+        <DataGridTextColumn Header="View Name"  Binding="{Binding ViewName}"  Width="*"  IsReadOnly="True"/>
+        <DataGridTextColumn Header="Type"       Binding="{Binding TypeLabel}" Width="100" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Current Template" Binding="{Binding CurrentTemplate}" Width="160" IsReadOnly="True"/>
+      </DataGrid.Columns>
+    </DataGrid>
+    <Border Grid.Row="3" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,10">
+      <Grid>
+        <TextBlock x:Name="lbl_av_status" Text="" Foreground="#4A5568"
+                   VerticalAlignment="Center" FontSize="11"/>
+        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+          <Button x:Name="btn_av_apply"  Content="Apply Template" Width="120" Height="30" Margin="0,0,8,0"
+                  Background="#2B6CB0" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
+          <Button x:Name="btn_av_cancel" Content="Cancel"          Width="70"  Height="30"
+                  Background="#EDF2F7" BorderBrush="#CBD5E0" BorderThickness="1"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# PICK CATEGORY DIALOG  (for Bulk Edit → Add Category)
+# ═══════════════════════════════════════════════════════════════
+
+PICK_CAT_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pick Category" Width="420" Height="500"
+        WindowStartupLocation="CenterOwner"
+        Background="#F7FAFC" FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#2D3748" Padding="14,10">
+      <TextBlock Text="Select a Category" Foreground="White" FontSize="14" FontWeight="Bold"/>
+    </Border>
+    <Border Grid.Row="1" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="10,8">
+      <StackPanel>
+        <Grid>
+          <TextBox x:Name="txt_cat_search" Height="28"/>
+          <TextBlock Text="Search categories…" Foreground="#A0AEC0" FontSize="11"
+                     IsHitTestVisible="False" VerticalAlignment="Center" Margin="8,0"/>
+        </Grid>
+        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+          <RadioButton x:Name="rb_cat_model" Content="Model" IsChecked="True"
+                       GroupName="cat_type" Margin="0,0,14,0"/>
+          <RadioButton x:Name="rb_cat_ann"   Content="Annotation"
+                       GroupName="cat_type"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+    <ListBox Grid.Row="2" x:Name="lb_cats"
+             Background="White" BorderThickness="0"/>
+    <Border Grid.Row="3" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="12,8">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button x:Name="btn_cat_ok"     Content="Select" Width="80" Height="28" Margin="0,0,8,0"
+                Background="#2B6CB0" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
+        <Button x:Name="btn_cat_cancel" Content="Cancel" Width="70" Height="28"
+                Background="#EDF2F7" BorderBrush="#CBD5E0" BorderThickness="1"/>
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# USAGE ROW  (plain object for usage DataGrid)
+# ═══════════════════════════════════════════════════════════════
+
+class UsageRow(object):
+    def __init__(self, view_name, view_type, sheet_ref):
+        self.ViewName  = view_name
+        self.ViewType  = view_type
+        self.SheetRef  = sheet_ref
+
+
+class ApplyViewRow(INotifyPropertyChanged):
+    def __init__(self, view, current_template_name):
+        self._view             = view
+        self._is_checked       = False
+        self._current_template = current_template_name
+        self._handlers         = []
+
+    def add_PropertyChanged(self, handler):
+        self._handlers.append(handler)
+    def remove_PropertyChanged(self, handler):
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+    def _notify(self, prop):
+        args = PropertyChangedEventArgs(prop)
+        for h in self._handlers:
+            h(self, args)
+
+    @property
+    def View(self):  return self._view
+    @property
+    def ViewName(self): return self._view.Name
+    @property
+    def TypeLabel(self): return viewtype_label(self._view.ViewType)
+    @property
+    def CurrentTemplate(self): return self._current_template
+    @property
+    def IsChecked(self): return self._is_checked
+    @IsChecked.setter
+    def IsChecked(self, v):
+        if self._is_checked != v:
+            self._is_checked = v
+            self._notify("IsChecked")
+
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN WINDOW CLASS
+# ═══════════════════════════════════════════════════════════════
+
+class ViewTemplateManagerWindow(Window):
+
+    def __init__(self):
+        # Parse XAML
+        self._root = Markup.XamlReader.Parse(MAIN_XAML)
+        self.Content         = self._root.Content
+        self.Width           = self._root.Width
+        self.Height          = self._root.Height
+        self.Title           = self._root.Title
+        self.WindowStartupLocation = self._root.WindowStartupLocation
+        self.Background      = self._root.Background
+        self.FontFamily      = self._root.FontFamily
+        self.FontSize        = self._root.FontSize
+        self.ResizeMode      = self._root.ResizeMode
+
+        # Bind to Revit window
+        try:
+            helper = WindowInteropHelper(self)
+            helper.Owner = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
+        except Exception:
+            pass
+
+        # Find controls
+        def F(name): return self._root.FindName(name)
+
+        self.txt_search          = F("txt_search")
+        self.ph_search           = F("ph_search")
+        self.cmb_type_filter     = F("cmb_type_filter")
+        self.btn_new             = F("btn_new")
+        self.btn_rename          = F("btn_rename")
+        self.btn_dup             = F("btn_dup")
+        self.btn_delete          = F("btn_delete")
+        self.btn_apply           = F("btn_apply")
+        self.btn_sel_all         = F("btn_sel_all")
+        self.btn_sel_none        = F("btn_sel_none")
+        self.dg_templates        = F("dg_templates")
+        self.lbl_selected_header = F("lbl_selected_header")
+        self.tab_main            = F("tab_main")
+        # Properties
+        self.txt_prop_name       = F("txt_prop_name")
+        self.btn_prop_rename     = F("btn_prop_rename")
+        self.lbl_prop_type       = F("lbl_prop_type")
+        self.cmb_prop_scale      = F("cmb_prop_scale")
+        self.cmb_prop_detail     = F("cmb_prop_detail")
+        self.cmb_prop_parts      = F("cmb_prop_parts")
+        self.cmb_prop_discipline = F("cmb_prop_discipline")
+        self.btn_prop_save       = F("btn_prop_save")
+        self.lbl_prop_status     = F("lbl_prop_status")
+        # VG
+        self.rb_vg_model         = F("rb_vg_model")
+        self.rb_vg_ann           = F("rb_vg_ann")
+        self.btn_vg_reload       = F("btn_vg_reload")
+        self.lbl_vg_info         = F("lbl_vg_info")
+        self.txt_vg_search       = F("txt_vg_search")
+        self.btn_vg_show_all     = F("btn_vg_show_all")
+        self.btn_vg_hide_all     = F("btn_vg_hide_all")
+        self.dg_vg_cats          = F("dg_vg_cats")
+        # Links
+        self.dg_links            = F("dg_links")
+        self.btn_link_set_host   = F("btn_link_set_host")
+        self.btn_links_reload    = F("btn_links_reload")
+        self.lbl_links_status    = F("lbl_links_status")
+        # Bulk
+        self.lbl_bulk_header     = F("lbl_bulk_header")
+        self.lbl_bulk_count      = F("lbl_bulk_count")
+        self.chk_bulk_scale      = F("chk_bulk_scale")
+        self.cmb_bulk_scale      = F("cmb_bulk_scale")
+        self.chk_bulk_detail     = F("chk_bulk_detail")
+        self.cmb_bulk_detail     = F("cmb_bulk_detail")
+        self.chk_bulk_parts      = F("chk_bulk_parts")
+        self.cmb_bulk_parts      = F("cmb_bulk_parts")
+        self.dg_bulk_cats        = F("dg_bulk_cats")
+        self.btn_bulk_add_hide_cat  = F("btn_bulk_add_hide_cat")
+        self.btn_bulk_add_show_cat  = F("btn_bulk_add_show_cat")
+        self.btn_bulk_remove_cat    = F("btn_bulk_remove_cat")
+        self.dg_bulk_links       = F("dg_bulk_links")
+        self.btn_bulk_apply      = F("btn_bulk_apply")
+        self.lbl_bulk_status     = F("lbl_bulk_status")
+        # Usage
+        self.lbl_usage_header    = F("lbl_usage_header")
+        self.dg_usage            = F("dg_usage")
+        self.lbl_status          = F("lbl_status")
+
+        # Collections
+        self._all_items      = ObservableCollection[object]()
+        self._filtered_items = ObservableCollection[object]()
+        self._vg_items       = ObservableCollection[object]()
+        self._vg_all         = []   # full unfiltered list
+        self._link_items     = ObservableCollection[object]()
+        self._bulk_cat_items = ObservableCollection[object]()
+        self._bulk_link_items= ObservableCollection[object]()
+        self._usage_items    = ObservableCollection[object]()
+        self._av_items       = ObservableCollection[object]()
+
+        # State
+        self._usage_map      = {}
+        self._all_templates  = []
+        self._link_instances = []
+        self._model_cats     = []
+        self._ann_cats       = []
+        self._current_template = None   # single-selected
+        self._suppress_vg_changes = False
+        self._scales = [
+            ("1:1",1),("1:2",2),("1:5",5),("1:10",10),("1:20",20),
+            ("1:25",25),("1:30",30),("1:40",40),("1:50",50),("1:60",60),
+            ("1:75",75),("1:100",100),("1:120",120),("1:150",150),
+            ("1:200",200),("1:240",240),("1:250",250),("1:300",300),
+            ("1:400",400),("1:500",500),("1:600",600),("1:800",800),
+            ("1:1000",1000),("1:1250",1250),("1:2000",2000),
+        ]
+
+        # Wire events
+        self.dg_templates.SelectionChanged += self._on_template_selection_changed
+        self.txt_search.TextChanged        += self._on_search_changed
+        self.txt_search.GotFocus           += lambda s, e: setattr(self.ph_search, 'Visibility', Visibility.Collapsed)
+        self.txt_search.LostFocus          += lambda s, e: self._toggle_placeholder()
+        self.cmb_type_filter.SelectionChanged += self._on_type_filter_changed
+
+        self.btn_new.Click           += self._on_new_click
+        self.btn_rename.Click        += self._on_rename_click
+        self.btn_dup.Click           += self._on_dup_click
+        self.btn_delete.Click        += self._on_delete_click
+        self.btn_apply.Click         += self._on_apply_to_views_click
+        self.btn_sel_all.Click       += lambda s, e: self._select_all(True)
+        self.btn_sel_none.Click      += lambda s, e: self._select_all(False)
+        self.tab_main.SelectionChanged += self._on_tab_changed
+
+        # Properties tab
+        self.btn_prop_rename.Click   += self._on_rename_click
+        self.btn_prop_save.Click     += self._on_prop_save_click
+
+        # VG tab
+        self.btn_vg_reload.Click     += self._on_vg_reload_click
+        self.rb_vg_model.Checked     += lambda s, e: self._reload_vg_list()
+        self.rb_vg_ann.Checked       += lambda s, e: self._reload_vg_list()
+        self.txt_vg_search.TextChanged += self._on_vg_search_changed
+        self.btn_vg_show_all.Click   += lambda s, e: self._vg_set_all(visible=True)
+        self.btn_vg_hide_all.Click   += lambda s, e: self._vg_set_all(visible=False)
+
+        # Links tab
+        self.btn_link_set_host.Click += self._on_link_set_host_click
+        self.btn_links_reload.Click  += lambda s, e: self._load_links_tab()
+
+        # Bulk tab
+        self.btn_bulk_add_hide_cat.Click += lambda s, e: self._bulk_add_cat(hide=True)
+        self.btn_bulk_add_show_cat.Click += lambda s, e: self._bulk_add_cat(hide=False)
+        self.btn_bulk_remove_cat.Click   += self._bulk_remove_cat
+        self.btn_bulk_apply.Click        += self._on_bulk_apply_click
+
+        # Bind collections
+        self.dg_templates.ItemsSource = self._filtered_items
+        self.dg_vg_cats.ItemsSource   = self._vg_items
+        self.dg_links.ItemsSource     = self._link_items
+        self.dg_bulk_cats.ItemsSource = self._bulk_cat_items
+        self.dg_bulk_links.ItemsSource= self._bulk_link_items
+        self.dg_usage.ItemsSource     = self._usage_items
+
+        # Populate scale combo for properties + bulk
+        for lbl, val in self._scales:
+            item = ComboBoxItem()
+            item.Content = lbl
+            item.Tag     = val
+            self.cmb_prop_scale.Items.Add(item)
+        for lbl, val in self._scales:
+            item = ComboBoxItem()
+            item.Content = lbl
+            item.Tag     = val
+            self.cmb_bulk_scale.Items.Add(item)
+
+        # Load data
+        self._load_all()
+
+    # ─────────────────────────────────────────────
+    # DATA LOADING
+    # ─────────────────────────────────────────────
+
+    def _load_all(self):
+        self._usage_map      = build_usage_map(doc)
+        self._all_templates  = get_all_templates(doc)
+        self._link_instances = get_link_instances(doc)
+        self._model_cats     = get_mech_categories(doc)
+        self._ann_cats       = get_annotation_categories(doc)
+
+        # Rebuild all_items
+        self._all_items.Clear()
+        for vt in self._all_templates:
+            usage = self._usage_map.get(eid_int(vt.Id), 0)
+            self._all_items.Add(TemplateItem(vt, usage))
+
+        # Populate type filter
+        types_seen = sorted(set(viewtype_label(v.ViewType) for v in self._all_templates))
+        self.cmb_type_filter.Items.Clear()
+        all_item = ComboBoxItem()
+        all_item.Content = "All Types"
+        all_item.Tag     = None
+        self.cmb_type_filter.Items.Add(all_item)
+        for t in types_seen:
+            ci = ComboBoxItem()
+            ci.Content = t
+            ci.Tag     = t
+            self.cmb_type_filter.Items.Add(ci)
+        self.cmb_type_filter.SelectedIndex = 0
+
+        # Populate bulk link list
+        self._bulk_link_items.Clear()
+        for li in self._link_instances:
+            name = get_link_name(li)
+            self._bulk_link_items.Add(BulkLinkItem(name, li.Id, apply=False))
+
+        self._apply_filter()
+        self._update_status()
+
+    def _apply_filter(self):
+        search = (self.txt_search.Text or "").strip().lower()
+        type_filter = None
+        if self.cmb_type_filter.SelectedItem:
+            ci = self.cmb_type_filter.SelectedItem
+            type_filter = ci.Tag if hasattr(ci, 'Tag') else None
+
+        self._filtered_items.Clear()
+        for item in self._all_items:
+            if search and search not in item.Name.lower():
+                continue
+            if type_filter and item.ViewTypeName != type_filter:
+                continue
+            self._filtered_items.Add(item)
+        self._update_status()
+
+    def _update_status(self):
+        total    = self._all_items.Count
+        filtered = self._filtered_items.Count
+        checked  = sum(1 for i in self._all_items if i.IsSelected)
+        if filtered == total:
+            self.lbl_status.Text = "{}  templates  |  {} selected".format(total, checked)
+        else:
+            self.lbl_status.Text = "Showing {}  of {}  templates  |  {} selected".format(
+                filtered, total, checked)
+        # Update bulk count label
+        if checked == 0:
+            self.lbl_bulk_count.Text = (
+                "No templates selected — use the checkboxes on the left to choose which templates to modify.")
+        else:
+            self.lbl_bulk_count.Text = (
+                "{} template{} selected and will be modified.".format(
+                    checked, "s" if checked != 1 else ""))
+
+    # ─────────────────────────────────────────────
+    # EVENT HANDLERS — LIST
+    # ─────────────────────────────────────────────
+
+    def _toggle_placeholder(self):
+        if not self.txt_search.Text:
+            self.ph_search.Visibility = Visibility.Visible
+
+    def _on_search_changed(self, sender, e):
+        self.ph_search.Visibility = (Visibility.Collapsed if self.txt_search.Text
+                                     else Visibility.Visible)
+        self._apply_filter()
+
+    def _on_type_filter_changed(self, sender, e):
+        self._apply_filter()
+
+    def _on_template_selection_changed(self, sender, e):
+        item = self.dg_templates.SelectedItem
+        if item is None:
+            self.lbl_selected_header.Text = "Select a template on the left to view or edit its settings."
+            self._current_template = None
+            return
+        self._current_template = item.View
+        self.lbl_selected_header.Text = "Editing:  {}  ({})".format(
+            item.Name, item.ViewTypeName)
+        # Refresh the active tab
+        self._refresh_active_tab()
+
+    def _on_tab_changed(self, sender, e):
+        self._refresh_active_tab()
+
+    def _refresh_active_tab(self):
+        if self._current_template is None:
+            return
+        idx = self.tab_main.SelectedIndex
+        if idx == 0:
+            self._load_properties_tab()
+        elif idx == 1:
+            pass  # VG tab is loaded on demand via "Reload"
+        elif idx == 2:
+            self._load_links_tab()
+        elif idx == 3:
+            pass  # Bulk edit has its own data loaded at startup
+        elif idx == 4:
+            self._load_usage_tab()
+
+    def _select_all(self, state):
+        for item in self._filtered_items:
+            item.IsSelected = state
+        self._update_status()
+
+    # ─────────────────────────────────────────────
+    # EVENT HANDLERS — TOOLBAR ACTIONS
+    # ─────────────────────────────────────────────
+
+    def _on_new_click(self, sender, e):
+        """Create a new blank template by duplicating the selected one (or first available)."""
+        base = self._current_template
+        if base is None and self._all_templates:
+            base = self._all_templates[0]
+        if base is None:
+            MessageBox.Show("No view templates found to base the new template on.",
+                            "No Templates", MessageBoxButton.OK, MessageBoxImage.Warning)
+            return
+        new_name = self._prompt_rename("New Template Name", base.Name + " Copy")
+        if new_name is None:
+            return
+        try:
+            t = Transaction(doc, "VTM: New Template")
+            t.Start()
+            new_id  = base.Duplicate(ViewDuplicateOption.Duplicate if hasattr(
+                base, 'Duplicate') else 0)
+            # Templates are not duplicated via Duplicate() — use ElementTransformUtils
+            # Instead: copy the view element
+            ids = List[ElementId]([base.Id])
+            import Autodesk.Revit.DB as DB
+            new_ids = DB.ElementTransformUtils.CopyElement(
+                doc, base.Id, DB.XYZ(0, 0, 0))
+            if new_ids and new_ids.Count > 0:
+                new_elem = doc.GetElement(new_ids[0])
+                if new_elem:
+                    new_elem.Name = new_name
+                    t.Commit()
+                    self._load_all()
+                    self._set_status("Created template: " + new_name)
+                    return
+            t.RollBack()
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Could not create template:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+
+    def _on_rename_click(self, sender=None, e=None):
+        item = self.dg_templates.SelectedItem
+        if item is None:
+            MessageBox.Show("Select a template first.", "No Selection",
+                            MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+        new_name = self._prompt_rename("Rename Template", item.Name)
+        if new_name is None or new_name == item.Name:
+            return
+        try:
+            t = Transaction(doc, "VTM: Rename Template")
+            t.Start()
+            item.View.Name = new_name
+            t.Commit()
+            # Refresh
+            self._usage_map     = build_usage_map(doc)
+            self._all_templates = get_all_templates(doc)
+            # Update in-place in _all_items
+            for i in self._all_items:
+                if eid_int(i.Id) == eid_int(item.Id):
+                    break
+            self._apply_filter()
+            self._set_status("Renamed to: " + new_name)
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Rename failed:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+
+    def _on_dup_click(self, sender, e):
+        item = self.dg_templates.SelectedItem
+        if item is None:
+            MessageBox.Show("Select a template to duplicate.", "No Selection",
+                            MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+        new_name = self._prompt_rename("Duplicate Template", item.Name + " Copy")
+        if new_name is None:
+            return
+        try:
+            import Autodesk.Revit.DB as DB
+            t = Transaction(doc, "VTM: Duplicate Template")
+            t.Start()
+            new_ids = DB.ElementTransformUtils.CopyElement(
+                doc, item.Id, DB.XYZ(0, 0, 0))
+            if new_ids and new_ids.Count > 0:
+                new_elem = doc.GetElement(new_ids[0])
+                if new_elem:
+                    new_elem.Name = new_name
+                    t.Commit()
+                    self._load_all()
+                    self._set_status("Duplicated as: " + new_name)
+                    return
+            t.RollBack()
+            MessageBox.Show("Could not duplicate — no element returned.",
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Duplicate failed:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+
+    def _on_delete_click(self, sender, e):
+        selected = [i for i in self._all_items if i.IsSelected]
+        if not selected:
+            item = self.dg_templates.SelectedItem
+            if item:
+                selected = [item]
+        if not selected:
+            MessageBox.Show("Select at least one template to delete.", "No Selection",
+                            MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+        names = "\n".join("  • " + i.Name for i in selected[:10])
+        if len(selected) > 10:
+            names += "\n  … and {} more".format(len(selected) - 10)
+        res = MessageBox.Show(
+            "Delete {} template{}?\n\n{}".format(
+                len(selected), "s" if len(selected) != 1 else "", names),
+            "Confirm Delete",
+            MessageBoxButton.YesNo, MessageBoxImage.Warning)
+        if res != MessageBoxResult.Yes:
+            return
+        deleted = 0
+        errors  = []
+        try:
+            t = Transaction(doc, "VTM: Delete Templates")
+            t.Start()
+            for item in selected:
+                try:
+                    if item.UsedBy > 0:
+                        errors.append("{} (used by {} views)".format(item.Name, item.UsedBy))
+                        continue
+                    doc.Delete(item.Id)
+                    deleted += 1
+                except Exception as ex:
+                    errors.append("{}: {}".format(item.Name, str(ex)))
+            t.Commit()
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Delete failed:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+            return
+        self._load_all()
+        msg = "Deleted {} template{}.".format(deleted, "s" if deleted != 1 else "")
+        if errors:
+            msg += "\n\nSkipped:\n" + "\n".join(errors)
+        self._set_status(msg)
+
+    def _on_apply_to_views_click(self, sender, e):
+        item = self.dg_templates.SelectedItem
+        if item is None:
+            # Look for a single checked item
+            checked = [i for i in self._all_items if i.IsSelected]
+            if len(checked) == 1:
+                item = checked[0]
+            elif len(checked) > 1:
+                MessageBox.Show(
+                    "Please select a single template in the list (click on it, not just check it).",
+                    "Multiple Templates", MessageBoxButton.OK, MessageBoxImage.Information)
+                return
+            else:
+                MessageBox.Show("Select a template first.", "No Selection",
+                                MessageBoxButton.OK, MessageBoxImage.Information)
+                return
+        self._show_apply_to_views_dialog(item)
+
+    # ─────────────────────────────────────────────
+    # PROPERTIES TAB
+    # ─────────────────────────────────────────────
+
+    def _load_properties_tab(self):
+        vt = self._current_template
+        if vt is None:
+            return
+        self.txt_prop_name.Text = vt.Name
+        # View type
+        try:
+            self.lbl_prop_type.Text = viewtype_label(vt.ViewType)
+        except Exception:
+            self.lbl_prop_type.Text = "-"
+        # Scale
+        try:
+            sc = vt.Scale
+            for i in range(self.cmb_prop_scale.Items.Count):
+                ci = self.cmb_prop_scale.Items[i]
+                if hasattr(ci, 'Tag') and ci.Tag == sc:
+                    self.cmb_prop_scale.SelectedIndex = i
+                    break
+        except Exception:
+            pass
+        # Detail level
+        try:
+            dl_param = vt.get_Parameter(BuiltInParameter.VIEW_DETAIL_LEVEL)
+            if dl_param:
+                dl = dl_param.AsInteger()
+                for i in range(self.cmb_prop_detail.Items.Count):
+                    ci = self.cmb_prop_detail.Items[i]
+                    if hasattr(ci, 'Tag') and ci.Tag == dl:
+                        self.cmb_prop_detail.SelectedIndex = i
+                        break
+        except Exception:
+            pass
+        # Parts visibility
+        try:
+            pv_param = vt.get_Parameter(BuiltInParameter.VIEW_PARTS_VISIBILITY)
+            if pv_param:
+                pv = pv_param.AsInteger()
+                for i in range(self.cmb_prop_parts.Items.Count):
+                    ci = self.cmb_prop_parts.Items[i]
+                    if hasattr(ci, 'Tag') and ci.Tag == pv:
+                        self.cmb_prop_parts.SelectedIndex = i
+                        break
+        except Exception:
+            pass
+        # Discipline
+        try:
+            disc = int(vt.Discipline)
+            for i in range(self.cmb_prop_discipline.Items.Count):
+                ci = self.cmb_prop_discipline.Items[i]
+                if hasattr(ci, 'Tag') and ci.Tag == disc:
+                    self.cmb_prop_discipline.SelectedIndex = i
+                    break
+        except Exception:
+            pass
+        self.lbl_prop_status.Text = ""
+
+    def _on_prop_save_click(self, sender, e):
+        vt = self._current_template
+        if vt is None:
+            return
+        errors = []
+        try:
+            t = Transaction(doc, "VTM: Save Template Properties")
+            t.Start()
+            # Scale
+            if self.cmb_prop_scale.SelectedItem:
+                ci = self.cmb_prop_scale.SelectedItem
+                if hasattr(ci, 'Tag') and ci.Tag:
+                    try:
+                        vt.Scale = int(ci.Tag)
+                    except Exception as ex:
+                        errors.append("Scale: " + str(ex))
+            # Detail level
+            if self.cmb_prop_detail.SelectedItem:
+                ci = self.cmb_prop_detail.SelectedItem
+                if hasattr(ci, 'Tag'):
+                    try:
+                        p = vt.get_Parameter(BuiltInParameter.VIEW_DETAIL_LEVEL)
+                        if p and not p.IsReadOnly:
+                            p.Set(int(ci.Tag))
+                    except Exception as ex:
+                        errors.append("Detail level: " + str(ex))
+            # Parts visibility
+            if self.cmb_prop_parts.SelectedItem:
+                ci = self.cmb_prop_parts.SelectedItem
+                if hasattr(ci, 'Tag'):
+                    try:
+                        p = vt.get_Parameter(BuiltInParameter.VIEW_PARTS_VISIBILITY)
+                        if p and not p.IsReadOnly:
+                            p.Set(int(ci.Tag))
+                    except Exception as ex:
+                        errors.append("Parts visibility: " + str(ex))
+            t.Commit()
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            self.lbl_prop_status.Foreground = SolidColorBrush(Color.FromRgb(197, 48, 48))
+            self.lbl_prop_status.Text = "Save failed: " + str(ex)
+            return
+
+        # Refresh the template item in list
+        self._usage_map     = build_usage_map(doc)
+        self._all_templates = get_all_templates(doc)
+        self._apply_filter()
+
+        if errors:
+            self.lbl_prop_status.Foreground = SolidColorBrush(Color.FromRgb(197, 48, 48))
+            self.lbl_prop_status.Text = "Partial save. Issues: " + "; ".join(errors)
+        else:
+            self.lbl_prop_status.Foreground = SolidColorBrush(Color.FromRgb(72, 187, 120))
+            self.lbl_prop_status.Text = "✓ Saved"
+        self._set_status("Properties saved for: " + vt.Name)
+
+    # ─────────────────────────────────────────────
+    # VG OVERRIDES TAB
+    # ─────────────────────────────────────────────
+
+    def _on_vg_reload_click(self, sender, e):
+        self._reload_vg_list()
+
+    def _reload_vg_list(self):
+        vt = self._current_template
+        if vt is None:
+            self.lbl_vg_info.Text = "  Select a template first."
+            return
+        use_model = self.rb_vg_model.IsChecked
+        cats = self._model_cats if use_model else self._ann_cats
+        self._vg_all = []
+        search = (self.txt_vg_search.Text or "").strip().lower()
+
+        # Temporarily suppress change events
+        self._suppress_vg_changes = True
+        self._vg_items.Clear()
+        for name, cat_id in cats:
+            try:
+                if not category_can_be_hidden(vt, cat_id):
+                    continue
+                is_hidden = vt.GetCategoryHidden(cat_id)
+                item = CategoryVisItem(name, cat_id, is_hidden)
+                # Wire change handler
+                item.add_PropertyChanged(self._on_vg_item_changed)
+                self._vg_all.append(item)
+                if not search or search in name.lower():
+                    self._vg_items.Add(item)
+            except Exception:
+                pass
+        self._suppress_vg_changes = False
+
+        cat_type = "Model" if use_model else "Annotation"
+        self.lbl_vg_info.Text = "  {} categories loaded for this template.".format(
+            len(self._vg_all))
+        self._set_status("Loaded {} {} categories for '{}'.".format(
+            len(self._vg_all), cat_type, vt.Name))
+
+    def _on_vg_search_changed(self, sender, e):
+        search = (self.txt_vg_search.Text or "").strip().lower()
+        self._vg_items.Clear()
+        for item in self._vg_all:
+            if not search or search in item.Name.lower():
+                self._vg_items.Add(item)
+
+    def _on_vg_item_changed(self, sender, e):
+        if self._suppress_vg_changes:
+            return
+        if e.PropertyName != "IsVisible" and e.PropertyName != "IsHidden":
+            return
+        vt = self._current_template
+        if vt is None:
+            return
+        item = sender
+        try:
+            t = Transaction(doc, "VTM: VG Category Visibility")
+            t.Start()
+            vt.SetCategoryHidden(item.CatId, item.IsHidden)
+            t.Commit()
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            # Revert the UI
+            self._suppress_vg_changes = True
+            item.IsHidden = not item.IsHidden
+            self._suppress_vg_changes = False
+
+    def _vg_set_all(self, visible):
+        vt = self._current_template
+        if vt is None:
+            return
+        hide = not visible
+        changed = 0
+        try:
+            t = Transaction(doc, "VTM: VG Set All {}".format("Visible" if visible else "Hidden"))
+            t.Start()
+            self._suppress_vg_changes = True
+            for item in self._vg_all:
+                try:
+                    vt.SetCategoryHidden(item.CatId, hide)
+                    item.IsHidden = hide
+                    changed += 1
+                except Exception:
+                    pass
+            self._suppress_vg_changes = False
+            t.Commit()
+        except Exception as ex:
+            self._suppress_vg_changes = False
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+        self._set_status("{} categories set to {} in '{}'.".format(
+            changed, "visible" if visible else "hidden", vt.Name))
+
+    # ─────────────────────────────────────────────
+    # REVIT LINKS TAB
+    # ─────────────────────────────────────────────
+
+    def _load_links_tab(self):
+        vt = self._current_template
+        self._link_items.Clear()
+        if not self._link_instances:
+            self.lbl_links_status.Text = "  No linked Revit models found in this project."
+            return
+        for link in self._link_instances:
+            name         = get_link_name(link)
+            display_type = get_link_display_type(vt, link.Id) if vt else "N/A"
+            self._link_items.Add(LinkDisplayItem(name, link.Id, display_type))
+        self.lbl_links_status.Text = ""
+
+    def _on_link_set_host_click(self, sender, e):
+        vt = self._current_template
+        if vt is None:
+            return
+        sel_row = self.dg_links.SelectedItem
+        if sel_row is None:
+            MessageBox.Show("Select a link row first.", "No Selection",
+                            MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+        if not _HAS_LINK_GRAPHICS:
+            MessageBox.Show("RevitLinkGraphicsSettings is not available in this Revit version.",
+                            "Not Supported", MessageBoxButton.OK, MessageBoxImage.Warning)
+            return
+        try:
+            t = Transaction(doc, "VTM: Set Link to By Host View")
+            t.Start()
+            settings = RevitLinkGraphicsSettings()
+            # Default constructor sets to ByHostView
+            vt.SetLinkOverrides(sel_row.LinkId, settings)
+            t.Commit()
+            self._load_links_tab()
+            self.lbl_links_status.Text = "✓ '{}' set to By Host View.".format(sel_row.LinkName)
+            self._set_status("Link '{}' set to By Host View in '{}'.".format(
+                sel_row.LinkName, vt.Name))
+        except Exception as ex:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Could not set link override:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+
+    # ─────────────────────────────────────────────
+    # BULK EDIT TAB
+    # ─────────────────────────────────────────────
+
+    def _bulk_add_cat(self, hide=True):
+        result = self._show_pick_category_dialog()
+        if result is None:
+            return
+        name, cat_id = result
+        # Avoid duplicates
+        for existing in self._bulk_cat_items:
+            if eid_int(existing.CatId) == eid_int(cat_id):
+                existing.Hide = hide
+                return
+        self._bulk_cat_items.Add(BulkCatItem(name, cat_id, hide=hide))
+
+    def _bulk_remove_cat(self, sender, e):
+        sel = self.dg_bulk_cats.SelectedItem
+        if sel is not None:
+            self._bulk_cat_items.Remove(sel)
+
+    def _on_bulk_apply_click(self, sender, e):
+        selected_templates = [i for i in self._all_items if i.IsSelected]
+        if not selected_templates:
+            MessageBox.Show(
+                "No templates selected. Use the checkboxes in the template list to choose which templates to modify.",
+                "No Templates Selected", MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+
+        # Gather what to apply
+        apply_scale  = self.chk_bulk_scale.IsChecked  and self.cmb_bulk_scale.SelectedItem
+        apply_detail = self.chk_bulk_detail.IsChecked and self.cmb_bulk_detail.SelectedItem
+        apply_parts  = self.chk_bulk_parts.IsChecked  and self.cmb_bulk_parts.SelectedItem
+        cat_overrides = list(self._bulk_cat_items)
+        link_overrides= [li for li in self._bulk_link_items if li.Apply]
+
+        if not apply_scale and not apply_detail and not apply_parts \
+                and not cat_overrides and not link_overrides:
+            MessageBox.Show("Nothing to apply — configure at least one setting above.",
+                            "Nothing Configured", MessageBoxButton.OK, MessageBoxImage.Information)
+            return
+
+        # Build summary
+        lines = ["Apply to {} template{}:".format(
+            len(selected_templates), "s" if len(selected_templates) != 1 else "")]
+        if apply_scale:
+            lines.append("  • Scale → " + self.cmb_bulk_scale.SelectedItem.Content)
+        if apply_detail:
+            lines.append("  • Detail Level → " + self.cmb_bulk_detail.SelectedItem.Content)
+        if apply_parts:
+            lines.append("  • Parts Visibility → " + self.cmb_bulk_parts.SelectedItem.Content)
+        for co in cat_overrides:
+            lines.append("  • {} → {}".format(co.Name, co.ActionLabel))
+        for lo in link_overrides:
+            lines.append("  • Link '{}' → By Host View".format(lo.Name))
+        lines.append("\nProceed?")
+
+        res = MessageBox.Show("\n".join(lines), "Confirm Bulk Apply",
+                              MessageBoxButton.YesNo, MessageBoxImage.Question)
+        if res != MessageBoxResult.Yes:
+            return
+
+        applied  = 0
+        errors   = []
+        new_scale = int(self.cmb_bulk_scale.SelectedItem.Tag)  if apply_scale  else None
+        new_detail= int(self.cmb_bulk_detail.SelectedItem.Tag) if apply_detail else None
+        new_parts = int(self.cmb_bulk_parts.SelectedItem.Tag)  if apply_parts  else None
+
+        try:
+            tg = TransactionGroup(doc, "VTM: Bulk Edit Templates")
+            tg.Start()
+            for tmpl_item in selected_templates:
+                vt = tmpl_item.View
+                try:
+                    t = Transaction(doc, "VTM: Bulk Edit - " + vt.Name)
+                    t.Start()
+                    # Scale
+                    if new_scale is not None:
+                        try:
+                            vt.Scale = new_scale
+                        except Exception as ex:
+                            errors.append("{}/Scale: {}".format(vt.Name, ex))
+                    # Detail level
+                    if new_detail is not None:
+                        try:
+                            p = vt.get_Parameter(BuiltInParameter.VIEW_DETAIL_LEVEL)
+                            if p and not p.IsReadOnly:
+                                p.Set(new_detail)
+                        except Exception as ex:
+                            errors.append("{}/DetailLevel: {}".format(vt.Name, ex))
+                    # Parts visibility
+                    if new_parts is not None:
+                        try:
+                            p = vt.get_Parameter(BuiltInParameter.VIEW_PARTS_VISIBILITY)
+                            if p and not p.IsReadOnly:
+                                p.Set(new_parts)
+                        except Exception as ex:
+                            errors.append("{}/PartsVis: {}".format(vt.Name, ex))
+                    # Category visibility
+                    for co in cat_overrides:
+                        try:
+                            if category_can_be_hidden(vt, co.CatId):
+                                vt.SetCategoryHidden(co.CatId, co.Hide)
+                        except Exception as ex:
+                            errors.append("{}/{}: {}".format(vt.Name, co.Name, ex))
+                    # Revit link overrides
+                    if link_overrides and _HAS_LINK_GRAPHICS:
+                        for lo in link_overrides:
+                            try:
+                                settings = RevitLinkGraphicsSettings()
+                                vt.SetLinkOverrides(lo.LinkId, settings)
+                            except Exception as ex:
+                                errors.append("{}/Link {}: {}".format(vt.Name, lo.Name, ex))
+                    t.Commit()
+                    applied += 1
+                except Exception as ex:
+                    try:
+                        t.RollBack()
+                    except Exception:
+                        pass
+                    errors.append(vt.Name + ": " + str(ex))
+            tg.Assimilate()
+        except Exception as ex:
+            try:
+                tg.RollBack()
+            except Exception:
+                pass
+            MessageBox.Show("Bulk apply failed:\n" + str(ex),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+            return
+
+        self._load_all()
+        if self._current_template:
+            self._refresh_active_tab()
+
+        msg = "✓ Applied to {} template{}.".format(applied, "s" if applied != 1 else "")
+        if errors:
+            msg += " ({} issue{})".format(len(errors), "s" if len(errors) != 1 else "")
+        self.lbl_bulk_status.Text = msg
+        self._set_status(msg)
+
+        if errors and len(errors) <= 10:
+            MessageBox.Show("Completed with issues:\n" + "\n".join(errors),
+                            "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning)
+
+    # ─────────────────────────────────────────────
+    # USAGE TAB
+    # ─────────────────────────────────────────────
+
+    def _load_usage_tab(self):
+        vt = self._current_template
+        self._usage_items.Clear()
+        if vt is None:
+            return
+        # Build a sheet map: view id → sheet ref string
+        sheet_map = {}
+        for sheet in FilteredElementCollector(doc).OfClass(ViewSheet):
+            try:
+                for vp_id in sheet.GetAllViewports():
+                    vp = doc.GetElement(vp_id)
+                    if vp:
+                        vid = eid_int(vp.ViewId)
+                        ref_str = "{} - {}".format(
+                            sheet.get_Parameter(BuiltInParameter.SHEET_NUMBER).AsString(),
+                            sheet.get_Parameter(BuiltInParameter.SHEET_NAME).AsString())
+                        sheet_map[vid] = ref_str
+            except Exception:
+                pass
+
+        count = 0
+        for v in FilteredElementCollector(doc).OfClass(View):
+            if v.IsTemplate:
+                continue
+            try:
+                if eid_int(v.ViewTemplateId) == eid_int(vt.Id):
+                    sheet_ref = sheet_map.get(eid_int(v.Id), "-")
+                    self._usage_items.Add(
+                        UsageRow(v.Name, viewtype_label(v.ViewType), sheet_ref))
+                    count += 1
+            except Exception:
+                pass
+        self.lbl_usage_header.Text = "{} view{} use template '{}'.".format(
+            count, "s" if count != 1 else "", vt.Name)
+
+    # ─────────────────────────────────────────────
+    # DIALOGS
+    # ─────────────────────────────────────────────
+
+    def _prompt_rename(self, title, default_name=""):
+        """Show rename dialog, return new name or None if cancelled."""
+        try:
+            win = Markup.XamlReader.Parse(RENAME_XAML)
+            win.Title = title
+            win.Owner = self
+            txt  = win.FindName("txt_new_name")
+            ok   = win.FindName("btn_ok")
+            canc = win.FindName("btn_cancel")
+            txt.Text = default_name
+            txt.SelectAll()
+            result = [None]
+
+            def on_ok(s, e):
+                result[0] = txt.Text.strip()
+                win.DialogResult = True
+                win.Close()
+
+            def on_cancel(s, e):
+                win.DialogResult = False
+                win.Close()
+
+            def on_key(s, e):
+                if e.Key == System.Windows.Input.Key.Return:
+                    on_ok(s, e)
+                elif e.Key == System.Windows.Input.Key.Escape:
+                    on_cancel(s, e)
+
+            ok.Click   += on_ok
+            canc.Click += on_cancel
+            txt.KeyDown += on_key
+            win.ShowDialog()
+            return result[0]
+        except Exception as ex:
+            MessageBox.Show("Rename dialog error:\n" + str(ex), "Error",
+                            MessageBoxButton.OK, MessageBoxImage.Error)
+            return None
+
+    def _show_apply_to_views_dialog(self, template_item):
+        """Show dialog to apply template_item to chosen views."""
+        try:
+            win = Markup.XamlReader.Parse(APPLY_VIEWS_XAML)
+            win.Owner = self
+            win.FindName("lbl_title").Text = "Apply Template: " + template_item.Name
+
+            dg       = win.FindName("dg_av_views")
+            txt_s    = win.FindName("txt_av_search")
+            btn_all  = win.FindName("btn_av_all")
+            btn_none = win.FindName("btn_av_none")
+            btn_appl = win.FindName("btn_av_apply")
+            btn_canc = win.FindName("btn_av_cancel")
+            lbl_stat = win.FindName("lbl_av_status")
+
+            # Build template name map
+            tmpl_map = {}
+            for vt in self._all_templates:
+                tmpl_map[eid_int(vt.Id)] = vt.Name
+
+            # Collect all non-template views
+            rows = ObservableCollection[object]()
+            all_rows = []
+            for v in FilteredElementCollector(doc).OfClass(View):
+                if v.IsTemplate:
+                    continue
+                if v.ViewType in (ViewType.Schedule, ViewType.Legend,
+                                  ViewType.DraftingView, ViewType.Walkthrough):
+                    continue
+                tid = eid_int(v.ViewTemplateId)
+                cur_tmpl = tmpl_map.get(tid, "<None>") if tid != -1 else "<None>"
+                row = ApplyViewRow(v, cur_tmpl)
+                all_rows.append(row)
+                rows.Add(row)
+            dg.ItemsSource = rows
+            lbl_stat.Text  = "{} views".format(len(all_rows))
+
+            def filter_rows():
+                search = (txt_s.Text or "").strip().lower()
+                rows.Clear()
+                for r in all_rows:
+                    if not search or search in r.ViewName.lower():
+                        rows.Add(r)
+                lbl_stat.Text = "{} of {} views".format(rows.Count, len(all_rows))
+
+            txt_s.TextChanged += lambda s, e: filter_rows()
+            btn_all.Click  += lambda s, e: [setattr(r, 'IsChecked', True)  for r in rows]
+            btn_none.Click += lambda s, e: [setattr(r, 'IsChecked', False) for r in rows]
+            btn_canc.Click += lambda s, e: win.Close()
+
+            def on_apply(s, e):
+                to_apply = [r for r in all_rows if r.IsChecked]
+                if not to_apply:
+                    MessageBox.Show("No views selected.", "Nothing to Do",
+                                    MessageBoxButton.OK, MessageBoxImage.Information)
+                    return
+                applied = 0
+                errors  = []
+                try:
+                    t = Transaction(doc, "VTM: Apply Template to Views")
+                    t.Start()
+                    for row in to_apply:
+                        try:
+                            row.View.ViewTemplateId = template_item.Id
+                            applied += 1
+                        except Exception as ex:
+                            errors.append("{}: {}".format(row.ViewName, str(ex)))
+                    t.Commit()
+                except Exception as ex:
+                    try:
+                        t.RollBack()
+                    except Exception:
+                        pass
+                    MessageBox.Show("Apply failed:\n" + str(ex), "Error",
+                                    MessageBoxButton.OK, MessageBoxImage.Error)
+                    return
+                self._load_all()
+                msg = "Applied to {} view{}.".format(applied, "s" if applied != 1 else "")
+                if errors:
+                    msg += " ({} errors)".format(len(errors))
+                lbl_stat.Text = msg
+                self._set_status(msg)
+                if not errors:
+                    win.Close()
+
+            btn_appl.Click += on_apply
+            win.ShowDialog()
+        except Exception as ex:
+            MessageBox.Show("Apply dialog error:\n" + traceback.format_exc(),
+                            "Error", MessageBoxButton.OK, MessageBoxImage.Error)
+
+    def _show_pick_category_dialog(self):
+        """Show dialog to pick a category. Returns (name, cat_id) or None."""
+        try:
+            win = Markup.XamlReader.Parse(PICK_CAT_XAML)
+            win.Owner = self
+
+            lb       = win.FindName("lb_cats")
+            txt_s    = win.FindName("txt_cat_search")
+            rb_model = win.FindName("rb_cat_model")
+            rb_ann   = win.FindName("rb_cat_ann")
+            btn_ok   = win.FindName("btn_cat_ok")
+            btn_canc = win.FindName("btn_cat_cancel")
+
+            result = [None]
+            _all_model = [(n, cid) for n, cid in self._model_cats]
+            _all_ann   = [(n, cid) for n, cid in self._ann_cats]
+
+            def populate():
+                search = (txt_s.Text or "").strip().lower()
+                source = _all_model if rb_model.IsChecked else _all_ann
+                lb.Items.Clear()
+                for name, cat_id in source:
+                    if search and search not in name.lower():
+                        continue
+                    item = ListBoxItem()
+                    item.Content = name
+                    item.Tag     = cat_id
+                    lb.Items.Add(item)
+
+            txt_s.TextChanged       += lambda s, e: populate()
+            rb_model.Checked        += lambda s, e: populate()
+            rb_ann.Checked          += lambda s, e: populate()
+
+            def on_ok(s, e):
+                sel = lb.SelectedItem
+                if sel is None:
+                    return
+                result[0] = (sel.Content, sel.Tag)
+                win.DialogResult = True
+                win.Close()
+
+            btn_ok.Click   += on_ok
+            btn_canc.Click += lambda s, e: win.Close()
+            lb.MouseDoubleClick += on_ok
+            populate()
+            win.ShowDialog()
+            return result[0]
+        except Exception as ex:
+            MessageBox.Show("Category picker error:\n" + str(ex), "Error",
+                            MessageBoxButton.OK, MessageBoxImage.Error)
+            return None
+
+    # ─────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────
+
+    def _set_status(self, msg):
+        self.lbl_status.Text = msg
+
+    def ShowDialog(self):
+        return super(ViewTemplateManagerWindow, self).ShowDialog()
+
+
+# ═══════════════════════════════════════════════════════════════
+# LAUNCH
+# ═══════════════════════════════════════════════════════════════
+
+try:
+    win = ViewTemplateManagerWindow()
+    win.ShowDialog()
+except Exception:
+    import traceback
+    TaskDialog.Show("View Templates Manager — Error",
+                    traceback.format_exc())

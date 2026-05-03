@@ -1,0 +1,67 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm Sheet Setup"
+        Height="640" Width="780"
+        WindowStartupLocation="CenterScreen"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+
+    <DockPanel>
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+            <Grid>
+                <StackPanel>
+                    <TextBlock Text="Review what will be created"
+                               Foreground="White" FontSize="18" FontWeight="Bold"/>
+                    <TextBlock x:Name="txt_summary"
+                               Foreground="#CBD5E0" FontSize="12"
+                               Margin="0,2,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btn_back" Content="Back to Form"
+                        Padding="14,6" MinWidth="120"
+                        Background="#EDF2F7" BorderBrush="#CBD5E0"
+                        Margin="0,0,8,0" Cursor="Hand"/>
+                <Button x:Name="btn_confirm" Content="Create Everything"
+                        Padding="14,6" MinWidth="160"
+                        Background="#2B6CB0" Foreground="White"
+                        FontWeight="SemiBold" BorderThickness="0"
+                        Cursor="Hand"/>
+            </StackPanel>
+        </Border>
+
+        <Grid Margin="20,16,20,16">
+            <Border Background="White" BorderBrush="#E2E8F0"
+                    BorderThickness="1" CornerRadius="4">
+                <DockPanel>
+                    <!-- Column header -->
+                    <Border DockPanel.Dock="Top" Background="#EDF2F7"
+                            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1"
+                            Padding="10,6">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="220"/>
+                                <ColumnDefinition Width="180"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Sheet #"  FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="1" Text="Sheet name" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="2" Text="View name" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="3" Text="Template"  FontWeight="SemiBold"/>
+                        </Grid>
+                    </Border>
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="pnl_rows"/>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>

@@ -1,0 +1,80 @@
+{
+    "_comment": "Firm-standard defaults for the Sheet Setup tool. Edit values directly here; the in-form 'Save as Default' button has been removed.",
+    "patterns": {
+        "sheet_number": "{prefix}{series}{level:02d}",
+        "sheet_name": "{level_label} - {plan_type}",
+        "view_name": "{level_label} - {plan_type}"
+    },
+    "options": {
+        "place_viewport_at_titleblock_center": true,
+        "set_browser_organization": true,
+        "browser_sub_discipline_param": "Sub-Discipline",
+        "auto_suffix_on_conflict": true,
+        "show_preview": true,
+        "tag_rooms_in_linked_models": true
+    },
+    "default_title_block_name": null,
+    "default_scope_box_name": null,
+    "default_room_tag_type_name": null,
+    "default_viewport_type_name": null,
+    "disciplines": [
+        {
+            "code": "M",
+            "name": "Mechanical",
+            "enabled": true,
+            "plan_types": [
+                {"name": "MECHANICAL SITE PLAN",        "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "0", "sheet_number_level_override": "10", "sheet_number_suffix_override": null},
+                {"name": "MECHANICAL DUCTWORK PLAN",    "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "MECHANICAL PIPING PLAN",      "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "MECHANICAL ROOF PLAN",        "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "MECHANICAL DUCTWORK DEMO PLAN","view_family": "FloorPlan",  "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "MD","sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "MECHANICAL PIPING DEMO PLAN", "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "MD","sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null}
+            ]
+        },
+        {
+            "code": "E",
+            "name": "Electrical",
+            "enabled": true,
+            "plan_types": [
+                {"name": "ELECTRICAL SITE PLAN",         "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "0", "sheet_number_level_override": "10", "sheet_number_suffix_override": null},
+                {"name": "ELECTRICAL POWER PLAN",        "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "ELECTRICAL LIGHTING PLAN",     "view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "ELECTRICAL POWER DEMO PLAN",   "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "ED","sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "ELECTRICAL LIGHTING DEMO PLAN","view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "ED","sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null}
+            ]
+        },
+        {
+            "code": "P",
+            "name": "Plumbing",
+            "enabled": true,
+            "plan_types": [
+                {"name": "UNDERGROUND PLUMBING PLAN", "view_family": "FloorPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": "00", "sheet_number_suffix_override": null},
+                {"name": "PLUMBING PLAN",             "view_family": "FloorPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "PLUMBING DEMO PLAN",        "view_family": "FloorPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "PD","sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null}
+            ]
+        },
+        {
+            "code": "FP",
+            "name": "Fire Protection",
+            "enabled": true,
+            "plan_types": [
+                {"name": "FIRE PROTECTION PLAN",      "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null,  "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "FIRE PROTECTION RCP",       "view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null,  "sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "FIRE PROTECTION DEMO PLAN", "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "FPD", "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "FIRE PROTECTION DEMO RCP",  "view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "FPD", "sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null}
+            ]
+        },
+        {
+            "code": "T",
+            "name": "Technology",
+            "enabled": true,
+            "plan_types": [
+                {"name": "TECHNOLOGY SITE PLAN",  "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "0", "sheet_number_level_override": "10", "sheet_number_suffix_override": null},
+                {"name": "TECHNOLOGY PLAN",       "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "TECHNOLOGY RCP",        "view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": null, "sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "TECHNOLOGY DEMO PLAN",  "view_family": "FloorPlan",   "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "TD","sheet_number_series_override": "1", "sheet_number_level_override": null, "sheet_number_suffix_override": null},
+                {"name": "TECHNOLOGY DEMO RCP",   "view_family": "CeilingPlan", "view_template_name": null, "enabled": true, "level_filter_uniqueids": null, "sheet_number_prefix_override": "TD","sheet_number_series_override": "2", "sheet_number_level_override": null, "sheet_number_suffix_override": null}
+            ]
+        }
+    ]
+}

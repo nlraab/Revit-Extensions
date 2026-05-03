@@ -1,0 +1,1669 @@
+# -*- coding: utf-8 -*-
+"""Sheet Manager — Comprehensive sheet management for Revit.
+
+Features:
+  - View all sheets grouped by prefix (matches project browser)
+  - Search / filter sheets
+  - Inline selection with checkboxes
+  - Rename (single) or batch renumber with live preview
+  - Duplicate sheets with views, preserving viewport alignment
+      - Per-sheet: new number, new name, new view name, view template
+      - Duplicate type: WithDetailing / Duplicate / AsDependent
+  - Revision management: add / remove revisions from selected sheets
+  - Navigate to sheet (open in canvas)
+  - Delete sheets with confirmation
+"""
+__title__ = "Sheet\nManager"
+__doc__ = "Manage sheets: group, rename, renumber, duplicate with views, revisions."
+
+import clr
+import re
+import sys
+
+clr.AddReference("RevitAPI")
+clr.AddReference("RevitAPIUI")
+clr.AddReference("PresentationFramework")
+clr.AddReference("PresentationCore")
+clr.AddReference("WindowsBase")
+clr.AddReference("System")
+
+from Autodesk.Revit.DB import (
+    FilteredElementCollector, ViewSheet, Viewport, View, ViewType,
+    ViewDuplicateOption, Transaction, BuiltInParameter, BuiltInCategory,
+    ElementId, ViewSchedule, ScheduleSheetInstance
+)
+from Autodesk.Revit.UI import TaskDialog, TaskDialogCommonButtons, TaskDialogResult
+
+import System
+from System import String
+from System.Windows import Window, Application, Thickness, HorizontalAlignment, VerticalAlignment, Visibility
+from System.Windows.Controls import (
+    DataGrid, DataGridCheckBoxColumn, DataGridTextColumn,
+    DataGridTemplateColumn, ComboBox, ComboBoxItem, TextBox,
+    ListBox, ListBoxItem, Button, CheckBox, RadioButton,
+    StackPanel, Grid, Border, TextBlock, ScrollViewer,
+    GroupStyle, Expander, TabControl, TabItem
+)
+from System.Windows.Media import SolidColorBrush, Color
+from System.Windows.Data import (
+    CollectionViewSource, PropertyGroupDescription,
+    Binding, BindingMode
+)
+from System.Collections.ObjectModel import ObservableCollection
+from System.ComponentModel import (
+    INotifyPropertyChanged, PropertyChangedEventArgs,
+    SortDescription, ListSortDirection
+)
+import System.Windows.Markup as Markup
+
+doc   = __revit__.ActiveUIDocument.Document
+uidoc = __revit__.ActiveUIDocument
+
+
+# ═══════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def get_prefix(sheet_number):
+    """Return the letter prefix before the first digit, e.g. 'E201' → 'E'."""
+    m = re.match(r"^([A-Za-z]+)", sheet_number.strip())
+    if m:
+        return m.group(1)
+    # If sheet starts with digit, group by first character
+    return sheet_number[0] if sheet_number else "?"
+
+
+def get_discipline(sheet):
+    """Return Sheet Discipline or Discipline parameter, fallback 'Other'."""
+    for param_name in ("Sheet Discipline", "Discipline"):
+        p = sheet.LookupParameter(param_name)
+        if p and p.AsString():
+            return p.AsString()
+    return "Other"
+
+
+def get_current_revision(sheet):
+    """Return the current revision string on a sheet."""
+    try:
+        p = sheet.get_Parameter(BuiltInParameter.SHEET_CURRENT_REVISION)
+        if p:
+            return p.AsString() or ""
+    except Exception:
+        pass
+    return ""
+
+
+def get_titleblock_id(doc, sheet):
+    """Return ElementId of the title block family type on a sheet."""
+    coll = FilteredElementCollector(doc, sheet.Id)
+    coll = coll.OfCategory(BuiltInCategory.OST_TitleBlocks).FirstElement()
+    if coll:
+        return coll.GetTypeId()
+    return ElementId.InvalidElementId
+
+
+def get_all_view_templates(doc):
+    """Return sorted list of (name, ElementId) tuples for all view templates."""
+    templates = [("<None>", ElementId.InvalidElementId)]
+    for v in FilteredElementCollector(doc).OfClass(View):
+        if v.IsTemplate:
+            templates.append((v.Name, v.Id))
+    templates[1:] = sorted(templates[1:], key=lambda x: x[0])
+    return templates
+
+
+def get_all_revisions(doc):
+    """Return list of revision elements sorted by sequence number."""
+    revs = list(
+        FilteredElementCollector(doc)
+        .OfCategory(BuiltInCategory.OST_Revisions)
+        .ToElements()
+    )
+    def seq(r):
+        try:
+            return r.get_Parameter(BuiltInParameter.PROJECT_REVISION_SEQUENCE_NUM).AsInteger()
+        except Exception:
+            return 0
+    return sorted(revs, key=seq)
+
+
+# ═══════════════════════════════════════════════════════════════
+# DATA MODELS
+# ═══════════════════════════════════════════════════════════════
+
+class SheetItem(INotifyPropertyChanged):
+    """Observable wrapper around a ViewSheet for WPF binding."""
+
+    PropertyChanged = None
+
+    def add_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Combine(self.PropertyChanged, value)
+
+    def remove_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Remove(self.PropertyChanged, value)
+
+    def _notify(self, name):
+        if self.PropertyChanged:
+            self.PropertyChanged(self, PropertyChangedEventArgs(name))
+
+    def __init__(self, sheet, doc):
+        self._sheet     = sheet
+        self._doc       = doc
+        self._selected  = False
+        self._number    = sheet.SheetNumber
+        self._name      = sheet.Name
+        self._prefix    = get_prefix(sheet.SheetNumber)
+        self._discipline = get_discipline(sheet)
+        self._revision  = get_current_revision(sheet)
+        try:
+            self._view_count = len(list(sheet.GetAllViewports()))
+        except Exception:
+            self._view_count = 0
+
+    # -- Sheet reference --
+    @property
+    def Sheet(self):      return self._sheet
+    @property
+    def ElementId(self):  return self._sheet.Id
+
+    # -- IsSelected (two-way) --
+    def _get_sel(self):   return self._selected
+    def _set_sel(self, v):
+        self._selected = bool(v)
+        self._notify("IsSelected")
+    IsSelected = property(_get_sel, _set_sel)
+
+    # -- Display properties --
+    @property
+    def SheetNumber(self): return self._number
+    @property
+    def SheetName(self):   return self._name
+    @property
+    def Prefix(self):      return self._prefix
+    @property
+    def Discipline(self):  return self._discipline
+    @property
+    def Revision(self):    return self._revision
+    @property
+    def ViewCount(self):   return self._view_count
+
+    # Group key used by CollectionViewSource grouping
+    @property
+    def GroupKey(self):    return self._prefix  # overridden when group mode changes
+
+
+class DuplicateRowItem(INotifyPropertyChanged):
+    """One row in the Duplicate dialog DataGrid."""
+
+    PropertyChanged = None
+
+    def add_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Combine(self.PropertyChanged, value)
+
+    def remove_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Remove(self.PropertyChanged, value)
+
+    def _notify(self, name):
+        if self.PropertyChanged:
+            self.PropertyChanged(self, PropertyChangedEventArgs(name))
+
+    def __init__(self, sheet_item, template_names):
+        self._source         = sheet_item
+        self._new_number     = sheet_item.SheetNumber + "-DUP"
+        self._new_name       = sheet_item.SheetName + " (Copy)"
+        self._new_view_name  = ""
+        self._template_name  = "<None>"
+        self.TemplateNames   = template_names   # List[str] for ComboBox
+
+    @property
+    def SourceNumber(self):  return self._source.SheetNumber
+    @property
+    def SourceName(self):    return self._source.SheetName
+    @property
+    def SourceSheet(self):   return self._source.Sheet
+
+    def _g_num(self): return self._new_number
+    def _s_num(self, v):
+        self._new_number = v; self._notify("NewNumber")
+    NewNumber = property(_g_num, _s_num)
+
+    def _g_nm(self): return self._new_name
+    def _s_nm(self, v):
+        self._new_name = v; self._notify("NewName")
+    NewName = property(_g_nm, _s_nm)
+
+    def _g_vn(self): return self._new_view_name
+    def _s_vn(self, v):
+        self._new_view_name = v; self._notify("NewViewName")
+    NewViewName = property(_g_vn, _s_vn)
+
+    def _g_tn(self): return self._template_name
+    def _s_tn(self, v):
+        self._template_name = v; self._notify("TemplateName")
+    TemplateName = property(_g_tn, _s_tn)
+
+
+# ═══════════════════════════════════════════════════════════════
+# XAML STRINGS
+# ═══════════════════════════════════════════════════════════════
+
+MAIN_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sheet Manager" Width="1000" Height="680"
+        WindowStartupLocation="CenterScreen"
+        Background="#1A1D2E" Foreground="White"
+        FontFamily="Segoe UI" FontSize="13"
+        ResizeMode="CanResizeWithGrip">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Bg"      Color="#1A1D2E"/>
+    <SolidColorBrush x:Key="Panel"   Color="#242740"/>
+    <SolidColorBrush x:Key="Head"    Color="#0F1120"/>
+    <SolidColorBrush x:Key="Accent"  Color="#4FC3F7"/>
+    <SolidColorBrush x:Key="Muted"   Color="#78909C"/>
+    <SolidColorBrush x:Key="Border2" Color="#2E3250"/>
+    <SolidColorBrush x:Key="Hover"   Color="#2A2F4A"/>
+    <SolidColorBrush x:Key="Sel"     Color="#1E3A5F"/>
+
+    <!-- Action button -->
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Background"   Value="#242740"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"      Value="12,5"/>
+      <Setter Property="Margin"       Value="3,0"/>
+      <Setter Property="Cursor"       Value="Hand"/>
+      <Setter Property="FontSize"     Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#363B60"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#4FC3F7"/>
+                <Setter Property="Foreground" Value="#1A1D2E"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.35"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Danger button -->
+    <Style x:Key="BtnDanger" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="BorderBrush" Value="#EF5350"/>
+    </Style>
+
+    <!-- Primary (accent-filled) button -->
+    <Style x:Key="BtnPrimary" TargetType="Button">
+      <Setter Property="Background"   Value="#4FC3F7"/>
+      <Setter Property="Foreground"   Value="#1A1D2E"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding"      Value="16,7"/>
+      <Setter Property="Margin"       Value="3,0"/>
+      <Setter Property="Cursor"       Value="Hand"/>
+      <Setter Property="FontSize"     Value="12"/>
+      <Setter Property="FontWeight"   Value="SemiBold"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#81D4FA"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#0288D1"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- TextBox -->
+    <Style x:Key="TBox" TargetType="TextBox">
+      <Setter Property="Background"   Value="#1E2235"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"      Value="8,6"/>
+      <Setter Property="CaretBrush"   Value="#4FC3F7"/>
+      <Setter Property="SelectionBrush" Value="#4FC3F7"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsFocused" Value="True">
+                <Setter Property="BorderBrush" Value="#4FC3F7"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- ComboBox (toolbar) -->
+    <Style x:Key="Combo" TargetType="ComboBox">
+      <Setter Property="Background"   Value="#1E2235"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="Padding"      Value="6,4"/>
+      <Setter Property="FontSize"     Value="12"/>
+    </Style>
+
+    <!-- DataGrid -->
+    <Style TargetType="DataGrid">
+      <Setter Property="Background"            Value="#1A1D2E"/>
+      <Setter Property="Foreground"            Value="#ECEFF1"/>
+      <Setter Property="BorderThickness"       Value="0"/>
+      <Setter Property="RowBackground"         Value="#1E2235"/>
+      <Setter Property="AlternatingRowBackground" Value="#20233A"/>
+      <Setter Property="GridLinesVisibility"   Value="Horizontal"/>
+      <Setter Property="HorizontalGridLinesBrush" Value="#252840"/>
+      <Setter Property="HeadersVisibility"     Value="Column"/>
+      <Setter Property="SelectionMode"         Value="Extended"/>
+      <Setter Property="SelectionUnit"         Value="FullRow"/>
+      <Setter Property="CanUserAddRows"        Value="False"/>
+      <Setter Property="CanUserDeleteRows"     Value="False"/>
+      <Setter Property="AutoGenerateColumns"   Value="False"/>
+      <Setter Property="CanUserResizeRows"     Value="False"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background"        Value="#0F1120"/>
+      <Setter Property="Foreground"        Value="#78909C"/>
+      <Setter Property="FontSize"          Value="11"/>
+      <Setter Property="FontWeight"        Value="SemiBold"/>
+      <Setter Property="Padding"           Value="10,8"/>
+      <Setter Property="BorderBrush"       Value="#2E3250"/>
+      <Setter Property="BorderThickness"   Value="0,0,0,1"/>
+      <Setter Property="SeparatorVisibility" Value="Visible"/>
+      <Setter Property="SeparatorBrush"    Value="#2E3250"/>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Setter Property="Foreground"      Value="#ECEFF1"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#2A2F4A"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#1E3A5F"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground"      Value="#ECEFF1"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="Foreground" Value="White"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Group header container style -->
+    <Style x:Key="GroupHdr" TargetType="GroupItem">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="GroupItem">
+            <Expander IsExpanded="True">
+              <Expander.Style>
+                <Style TargetType="Expander">
+                  <Setter Property="Background"     Value="#0D1025"/>
+                  <Setter Property="BorderBrush"    Value="#2E3250"/>
+                  <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                  <Setter Property="Foreground"     Value="#4FC3F7"/>
+                  <Setter Property="Template">
+                    <Setter.Value>
+                      <ControlTemplate TargetType="Expander">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                          <StackPanel>
+                            <ToggleButton x:Name="Hdr"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Background="Transparent" BorderThickness="0"
+                                          Cursor="Hand" Padding="10,7" HorizontalContentAlignment="Left">
+                              <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                  <Border Background="{TemplateBinding Background}"
+                                          BorderThickness="{TemplateBinding BorderThickness}"
+                                          Padding="{TemplateBinding Padding}">
+                                    <ContentPresenter/>
+                                  </Border>
+                                </ControlTemplate>
+                              </ToggleButton.Template>
+                              <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="arrow" Text="▾ " Foreground="#4FC3F7" FontSize="11"/>
+                                <TextBlock Text="{Binding Name}" Foreground="#4FC3F7"
+                                           FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center"/>
+                                <TextBlock Foreground="#505878" FontSize="11" VerticalAlignment="Center">
+                                  <Run Text="  "/>
+                                  <Run Text="{Binding ItemCount, Mode=OneWay}"/>
+                                  <Run Text=" sheets"/>
+                                </TextBlock>
+                              </StackPanel>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="body"/>
+                          </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsExpanded" Value="False">
+                            <Setter TargetName="body" Property="Visibility" Value="Collapsed"/>
+                            <Setter TargetName="arrow" Property="Text" Value="▸ "/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Setter.Value>
+                  </Setter>
+                </Style>
+              </Expander.Style>
+              <ItemsPresenter/>
+            </Expander>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="50"/>
+      <RowDefinition Height="50"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="42"/>
+    </Grid.RowDefinitions>
+
+    <!-- HEADER -->
+    <Border Grid.Row="0" Background="#0F1120" BorderBrush="#2E3250" BorderThickness="0,0,0,1">
+      <Grid Margin="16,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Canvas Width="22" Height="22" Margin="0,0,10,0" VerticalAlignment="Center">
+            <Rectangle Canvas.Left="0" Canvas.Top="0"  Width="14" Height="4" Fill="#4FC3F7"  RadiusX="2" RadiusY="2"/>
+            <Rectangle Canvas.Left="0" Canvas.Top="6"  Width="20" Height="4" Fill="#81D4FA" RadiusX="2" RadiusY="2"/>
+            <Rectangle Canvas.Left="0" Canvas.Top="12" Width="17" Height="4" Fill="#4DD0E1" RadiusX="2" RadiusY="2"/>
+            <Rectangle Canvas.Left="0" Canvas.Top="18" Width="11" Height="4" Fill="#26C6DA" RadiusX="2" RadiusY="2"/>
+          </Canvas>
+          <TextBlock Text="Sheet Manager" FontSize="16" FontWeight="SemiBold"
+                     Foreground="White" VerticalAlignment="Center"/>
+          <TextBlock x:Name="lbl_project" FontSize="12" Foreground="#505878"
+                     VerticalAlignment="Center" Margin="12,0,0,0"/>
+        </StackPanel>
+        <Button x:Name="btn_close" Grid.Column="1" Content="✕"
+                Width="30" Height="30" Background="Transparent"
+                BorderThickness="0" Foreground="#78909C"
+                FontSize="14" Cursor="Hand" VerticalAlignment="Center"/>
+      </Grid>
+    </Border>
+
+    <!-- TOOLBAR -->
+    <Border Grid.Row="1" Background="#14172A" BorderBrush="#2E3250" BorderThickness="0,0,0,1">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0">
+        <!-- Search -->
+        <Grid Width="210" Margin="0,0,8,0">
+          <TextBox x:Name="txt_search" Style="{StaticResource TBox}" Height="30"/>
+          <TextBlock x:Name="ph_search" Text="🔍  Search sheets…" Foreground="#404870"
+                     FontSize="12" IsHitTestVisible="False"
+                     VerticalAlignment="Center" Margin="10,0"/>
+        </Grid>
+        <!-- Group by -->
+        <TextBlock Text="Group:" Foreground="#78909C" FontSize="12"
+                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <ComboBox x:Name="cmb_group" Style="{StaticResource Combo}"
+                  Width="115" Height="30" SelectedIndex="0">
+          <ComboBoxItem Content="Prefix"/>
+          <ComboBoxItem Content="Discipline"/>
+          <ComboBoxItem Content="All Flat"/>
+        </ComboBox>
+        <Separator Width="1" Height="22" Background="#2E3250" Margin="12,0"/>
+        <!-- Action buttons -->
+        <Button x:Name="btn_open"      Content="↗ Open"      Style="{StaticResource Btn}"     Height="30" IsEnabled="False" ToolTip="Open selected sheet"/>
+        <Button x:Name="btn_rename"    Content="✎ Rename"    Style="{StaticResource Btn}"     Height="30" IsEnabled="False" ToolTip="Rename / renumber selected sheets"/>
+        <Button x:Name="btn_duplicate" Content="⎘ Duplicate" Style="{StaticResource Btn}"     Height="30" IsEnabled="False" ToolTip="Duplicate selected sheets with views"/>
+        <Button x:Name="btn_revisions" Content="⏱ Revisions" Style="{StaticResource Btn}"     Height="30" IsEnabled="False" ToolTip="Add or remove revisions on selected sheets"/>
+        <Button x:Name="btn_delete"    Content="🗑 Delete"   Style="{StaticResource BtnDanger}" Height="30" IsEnabled="False" ToolTip="Delete selected sheets"/>
+      </StackPanel>
+    </Border>
+
+    <!-- MAIN — DataGrid -->
+    <DataGrid x:Name="sheet_grid" Grid.Row="2"
+              VirtualizingPanel.IsVirtualizingWhenGrouping="True"
+              EnableRowVirtualization="True"
+              ScrollViewer.VerticalScrollBarVisibility="Auto"
+              ScrollViewer.HorizontalScrollBarVisibility="Auto">
+      <DataGrid.GroupStyle>
+        <GroupStyle ContainerStyle="{StaticResource GroupHdr}"/>
+      </DataGrid.GroupStyle>
+      <DataGrid.Columns>
+        <DataGridCheckBoxColumn Header=""
+                                Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                Width="36" MinWidth="36" IsReadOnly="False"/>
+        <DataGridTextColumn Header="Sheet #" Binding="{Binding SheetNumber}"
+                            Width="100" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Padding"     Value="10,8"/>
+              <Setter Property="Foreground"  Value="#4FC3F7"/>
+              <Setter Property="FontWeight"  Value="SemiBold"/>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
+        <DataGridTextColumn Header="Sheet Name" Binding="{Binding SheetName}"
+                            Width="*" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Padding" Value="10,8"/>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
+        <DataGridTextColumn Header="Views" Binding="{Binding ViewCount}"
+                            Width="58" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Padding"       Value="10,8"/>
+              <Setter Property="Foreground"    Value="#78909C"/>
+              <Setter Property="TextAlignment" Value="Center"/>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
+        <DataGridTextColumn Header="Group" Binding="{Binding Prefix}"
+                            Width="80" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Padding"    Value="10,8"/>
+              <Setter Property="Foreground" Value="#505878"/>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
+        <DataGridTextColumn Header="Rev" Binding="{Binding Revision}"
+                            Width="60" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Padding"    Value="10,8"/>
+              <Setter Property="Foreground" Value="#78909C"/>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
+      </DataGrid.Columns>
+    </DataGrid>
+
+    <!-- STATUS BAR -->
+    <Border Grid.Row="3" Background="#0F1120" BorderBrush="#2E3250" BorderThickness="0,1,0,0">
+      <Grid Margin="12,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="lbl_status" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <Button x:Name="btn_sel_all"   Grid.Column="1" Content="Select All"    Style="{StaticResource Btn}" Height="26" Margin="4,0"/>
+        <Button x:Name="btn_sel_group" Grid.Column="2" Content="Select Group"  Style="{StaticResource Btn}" Height="26" Margin="4,0"/>
+        <Button x:Name="btn_sel_none"  Grid.Column="3" Content="Clear"         Style="{StaticResource Btn}" Height="26" Margin="4,0"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+"""
+
+# ── Rename / Renumber dialog ──────────────────────────────────
+RENAME_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Rename / Renumber Sheets" Width="620" Height="520"
+        WindowStartupLocation="CenterOwner"
+        Background="#1A1D2E" Foreground="White"
+        FontFamily="Segoe UI" FontSize="13"
+        ResizeMode="NoResize">
+  <Window.Resources>
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Background"   Value="#242740"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"      Value="14,7"/>
+      <Setter Property="Cursor"       Value="Hand"/>
+      <Setter Property="FontSize"     Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#363B60"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#4FC3F7"/>
+                <Setter Property="Foreground" Value="#1A1D2E"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#4FC3F7"/>
+      <Setter Property="Foreground" Value="#1A1D2E"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style x:Key="TBox" TargetType="TextBox">
+      <Setter Property="Background"  Value="#1E2235"/>
+      <Setter Property="Foreground"  Value="#ECEFF1"/>
+      <Setter Property="BorderBrush" Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"     Value="8,6"/>
+      <Setter Property="CaretBrush"  Value="#4FC3F7"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsFocused" Value="True">
+                <Setter Property="BorderBrush" Value="#4FC3F7"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Mode tabs -->
+    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+      <RadioButton x:Name="rb_single" Content="Single Rename" IsChecked="True"
+                   Foreground="White" Margin="0,0,20,0" Cursor="Hand"/>
+      <RadioButton x:Name="rb_batch"  Content="Batch Renumber"
+                   Foreground="White" Cursor="Hand"/>
+    </StackPanel>
+
+    <!-- Single rename panel -->
+    <StackPanel x:Name="pnl_single" Grid.Row="1" Margin="0,0,0,12">
+      <TextBlock Text="Applies to the first selected sheet only when multiple are selected."
+                 Foreground="#78909C" FontSize="11" Margin="0,0,0,10"/>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="120"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="8"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="Sheet Number:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_new_number" Grid.Column="1" Style="{StaticResource TBox}" Height="32"/>
+        <TextBlock Grid.Row="2" Text="Sheet Name:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_new_name" Grid.Row="2" Grid.Column="1" Style="{StaticResource TBox}" Height="32"/>
+      </Grid>
+    </StackPanel>
+
+    <!-- Batch renumber panel -->
+    <StackPanel x:Name="pnl_batch" Grid.Row="1" Visibility="Collapsed" Margin="0,0,0,12">
+      <TextBlock Text="Renumbers all selected sheets in order by sheet number."
+                 Foreground="#78909C" FontSize="11" Margin="0,0,0,10"/>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="120"/>
+          <ColumnDefinition Width="100"/>
+          <ColumnDefinition Width="20"/>
+          <ColumnDefinition Width="120"/>
+          <ColumnDefinition Width="100"/>
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="8"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="8"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="Prefix:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_prefix" Grid.Column="1" Style="{StaticResource TBox}" Height="32"/>
+        <TextBlock Grid.Column="3" Text="Separator:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_sep" Grid.Column="4" Style="{StaticResource TBox}" Height="32"/>
+        <TextBlock Grid.Row="2" Text="Start #:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_start" Grid.Row="2" Grid.Column="1" Style="{StaticResource TBox}" Height="32" Text="100"/>
+        <TextBlock Grid.Row="2" Grid.Column="3" Text="Increment:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_inc" Grid.Row="2" Grid.Column="4" Style="{StaticResource TBox}" Height="32" Text="1"/>
+        <TextBlock Grid.Row="4" Text="Suffix:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center"/>
+        <TextBox x:Name="txt_suffix" Grid.Row="4" Grid.Column="1" Style="{StaticResource TBox}" Height="32"/>
+        <Button x:Name="btn_preview" Grid.Row="4" Grid.Column="3" Grid.ColumnSpan="2"
+                Content="Preview Changes" Style="{StaticResource Btn}" Height="32"/>
+      </Grid>
+    </StackPanel>
+
+    <!-- Preview list -->
+    <Border Grid.Row="2" Background="#0D1025" CornerRadius="6"
+            BorderBrush="#2E3250" BorderThickness="1" Margin="0,0,0,16">
+      <ScrollViewer>
+        <ListBox x:Name="lst_preview" Background="Transparent" BorderThickness="0"
+                 Foreground="#ECEFF1" FontSize="12" Margin="4"/>
+      </ListBox>
+    </ScrollViewer>
+
+    <!-- Footer -->
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource Btn}"/>
+      <Button x:Name="btn_apply"  Content="Apply"  Style="{StaticResource BtnPrimary}" Margin="8,0,0,0"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"""
+
+# ── Duplicate dialog ──────────────────────────────────────────
+DUPLICATE_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Duplicate Sheets with Views" Width="820" Height="560"
+        WindowStartupLocation="CenterOwner"
+        Background="#1A1D2E" Foreground="White"
+        FontFamily="Segoe UI" FontSize="13"
+        ResizeMode="CanResizeWithGrip">
+  <Window.Resources>
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Background"   Value="#242740"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"      Value="14,7"/>
+      <Setter Property="Cursor"       Value="Hand"/>
+      <Setter Property="FontSize"     Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#363B60"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#4FC3F7"/>
+                <Setter Property="Foreground" Value="#1A1D2E"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#4FC3F7"/>
+      <Setter Property="Foreground" Value="#1A1D2E"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="Background"            Value="#1A1D2E"/>
+      <Setter Property="Foreground"            Value="#ECEFF1"/>
+      <Setter Property="BorderThickness"       Value="0"/>
+      <Setter Property="RowBackground"         Value="#1E2235"/>
+      <Setter Property="AlternatingRowBackground" Value="#20233A"/>
+      <Setter Property="GridLinesVisibility"   Value="Horizontal"/>
+      <Setter Property="HorizontalGridLinesBrush" Value="#252840"/>
+      <Setter Property="HeadersVisibility"     Value="Column"/>
+      <Setter Property="CanUserAddRows"        Value="False"/>
+      <Setter Property="CanUserDeleteRows"     Value="False"/>
+      <Setter Property="AutoGenerateColumns"   Value="False"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background"      Value="#0F1120"/>
+      <Setter Property="Foreground"      Value="#78909C"/>
+      <Setter Property="FontSize"        Value="11"/>
+      <Setter Property="FontWeight"      Value="SemiBold"/>
+      <Setter Property="Padding"         Value="8,7"/>
+      <Setter Property="BorderBrush"     Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="0,0,0,1"/>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Setter Property="Foreground" Value="#ECEFF1"/>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground"      Value="#ECEFF1"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Instructions -->
+    <TextBlock Grid.Row="0" Margin="0,0,0,12" FontSize="12" Foreground="#78909C"
+               Text="Edit the new sheet number, name, view name, and view template for each sheet to duplicate. Double-click a cell to edit."/>
+
+    <!-- Table -->
+    <Border Grid.Row="1" Background="#0D1025" CornerRadius="6"
+            BorderBrush="#2E3250" BorderThickness="1">
+      <DataGrid x:Name="dup_grid" Margin="0">
+        <DataGrid.Columns>
+          <DataGridTextColumn Header="Source #"   Binding="{Binding SourceNumber}" Width="90"  IsReadOnly="True">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock">
+                <Setter Property="Padding"    Value="8,8"/>
+                <Setter Property="Foreground" Value="#4FC3F7"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+              </Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="Source Name" Binding="{Binding SourceName}" Width="160" IsReadOnly="True">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock">
+                <Setter Property="Padding"    Value="8,8"/>
+                <Setter Property="Foreground" Value="#78909C"/>
+              </Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="New Sheet #" Binding="{Binding NewNumber, UpdateSourceTrigger=PropertyChanged}"
+                              Width="110">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock"><Setter Property="Padding" Value="8,8"/></Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="New Sheet Name" Binding="{Binding NewName, UpdateSourceTrigger=PropertyChanged}"
+                              Width="*">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock"><Setter Property="Padding" Value="8,8"/></Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="New View Name" Binding="{Binding NewViewName, UpdateSourceTrigger=PropertyChanged}"
+                              Width="160">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock"><Setter Property="Padding" Value="8,8"/></Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTemplateColumn Header="View Template" Width="170">
+            <DataGridTemplateColumn.CellTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding TemplateName}" Padding="8,8" Foreground="#ECEFF1"/>
+              </DataTemplate>
+            </DataGridTemplateColumn.CellTemplate>
+            <DataGridTemplateColumn.CellEditingTemplate>
+              <DataTemplate>
+                <ComboBox ItemsSource="{Binding TemplateNames}"
+                          SelectedItem="{Binding TemplateName, UpdateSourceTrigger=PropertyChanged}"
+                          Background="#1E2235" Foreground="#ECEFF1"
+                          BorderBrush="#2E3250" FontSize="12"/>
+              </DataTemplate>
+            </DataGridTemplateColumn.CellEditingTemplate>
+          </DataGridTemplateColumn>
+        </DataGrid.Columns>
+      </DataGrid>
+    </Border>
+
+    <!-- Options -->
+    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,14">
+      <TextBlock Text="Duplicate type:" Foreground="#78909C" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0"/>
+      <RadioButton x:Name="rb_with_det"    Content="With Detailing"    IsChecked="True" Foreground="White" Margin="0,0,16,0" Cursor="Hand"/>
+      <RadioButton x:Name="rb_without_det" Content="Without Detailing" Foreground="White" Margin="0,0,16,0" Cursor="Hand"/>
+      <RadioButton x:Name="rb_dependent"   Content="As Dependent"      Foreground="White" Margin="0,0,32,0" Cursor="Hand"/>
+      <CheckBox x:Name="chk_align" Content="Preserve view position on sheet"
+                IsChecked="True" Foreground="White" VerticalAlignment="Center" Cursor="Hand"/>
+    </StackPanel>
+
+    <!-- Footer -->
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="btn_cancel"    Content="Cancel"    Style="{StaticResource Btn}"/>
+      <Button x:Name="btn_duplicate" Content="Duplicate" Style="{StaticResource BtnPrimary}" Margin="8,0,0,0"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"""
+
+# ── Revisions dialog ─────────────────────────────────────────
+REVISION_XAML = """
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Revisions" Width="480" Height="420"
+        WindowStartupLocation="CenterOwner"
+        Background="#1A1D2E" Foreground="White"
+        FontFamily="Segoe UI" FontSize="13"
+        ResizeMode="NoResize">
+  <Window.Resources>
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Background"   Value="#242740"/>
+      <Setter Property="Foreground"   Value="#ECEFF1"/>
+      <Setter Property="BorderBrush"  Value="#2E3250"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"      Value="14,7"/>
+      <Setter Property="Cursor"       Value="Hand"/>
+      <Setter Property="FontSize"     Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#363B60"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#4FC3F7"/>
+                <Setter Property="Foreground" Value="#1A1D2E"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#4FC3F7"/>
+      <Setter Property="Foreground" Value="#1A1D2E"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0" Margin="0,0,0,10" FontSize="12" Foreground="#78909C"
+               Text="Check revisions to add to (or keep on) selected sheets. Uncheck to remove."/>
+
+    <Border Grid.Row="1" Background="#0D1025" CornerRadius="6"
+            BorderBrush="#2E3250" BorderThickness="1">
+      <ScrollViewer>
+        <ListBox x:Name="lst_revisions" Background="Transparent" BorderThickness="0"
+                 Foreground="#ECEFF1" FontSize="12">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                        Foreground="#ECEFF1" Margin="6,4" Cursor="Hand">
+                <CheckBox.Content>
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding SeqNum}" Foreground="#4FC3F7"
+                               FontWeight="SemiBold" Width="28"/>
+                    <TextBlock Text="{Binding Date}" Foreground="#78909C" Width="90"/>
+                    <TextBlock Text="{Binding Description}" Foreground="#ECEFF1"/>
+                  </StackPanel>
+                </CheckBox.Content>
+              </CheckBox>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </ScrollViewer>
+    </Border>
+
+    <TextBlock x:Name="lbl_rev_info" Grid.Row="2" Margin="0,8,0,12"
+               Foreground="#505878" FontSize="11"/>
+
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource Btn}"/>
+      <Button x:Name="btn_apply"  Content="Apply"  Style="{StaticResource BtnPrimary}" Margin="8,0,0,0"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# REVISION ROW (for revision dialog)
+# ═══════════════════════════════════════════════════════════════
+
+class RevisionRow(INotifyPropertyChanged):
+    PropertyChanged = None
+
+    def add_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Combine(self.PropertyChanged, value)
+
+    def remove_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Remove(self.PropertyChanged, value)
+
+    def _notify(self, name):
+        if self.PropertyChanged:
+            self.PropertyChanged(self, PropertyChangedEventArgs(name))
+
+    def __init__(self, rev_element, is_checked):
+        self._rev = rev_element
+        self._checked = is_checked
+        try:
+            self._seq = str(rev_element.get_Parameter(
+                BuiltInParameter.PROJECT_REVISION_SEQUENCE_NUM).AsInteger())
+        except Exception:
+            self._seq = "?"
+        try:
+            self._date = rev_element.get_Parameter(
+                BuiltInParameter.PROJECT_REVISION_REVISION_DATE).AsString() or ""
+        except Exception:
+            self._date = ""
+        try:
+            self._desc = rev_element.get_Parameter(
+                BuiltInParameter.PROJECT_REVISION_REVISION_DESCRIPTION).AsString() or ""
+        except Exception:
+            self._desc = ""
+
+    @property
+    def RevElement(self): return self._rev
+    @property
+    def SeqNum(self):     return self._seq
+    @property
+    def Date(self):       return self._date
+    @property
+    def Description(self): return self._desc
+
+    def _g_chk(self): return self._checked
+    def _s_chk(self, v):
+        self._checked = bool(v); self._notify("IsChecked")
+    IsChecked = property(_g_chk, _s_chk)
+
+
+# ═══════════════════════════════════════════════════════════════
+# RENAME DIALOG
+# ═══════════════════════════════════════════════════════════════
+
+class RenameDialog(object):
+    def __init__(self, owner, selected_items):
+        self._items   = selected_items
+        self._applied = False
+        w = Markup.XamlReader.Parse(RENAME_XAML)
+        self._w = w
+        w.Owner = owner
+
+        self._rb_single  = w.FindName("rb_single")
+        self._rb_batch   = w.FindName("rb_batch")
+        self._pnl_single = w.FindName("pnl_single")
+        self._pnl_batch  = w.FindName("pnl_batch")
+        self._txt_num    = w.FindName("txt_new_number")
+        self._txt_name   = w.FindName("txt_new_name")
+        self._txt_prefix = w.FindName("txt_prefix")
+        self._txt_sep    = w.FindName("txt_sep")
+        self._txt_start  = w.FindName("txt_start")
+        self._txt_inc    = w.FindName("txt_inc")
+        self._txt_suffix = w.FindName("txt_suffix")
+        self._lst        = w.FindName("lst_preview")
+        self._btn_prev   = w.FindName("btn_preview")
+        self._btn_apply  = w.FindName("btn_apply")
+        self._btn_cancel = w.FindName("btn_cancel")
+
+        # Pre-fill single fields
+        if selected_items:
+            self._txt_num.Text  = selected_items[0].SheetNumber
+            self._txt_name.Text = selected_items[0].SheetName
+
+        # Events
+        self._rb_single.Checked   += self._on_mode
+        self._rb_batch.Checked    += self._on_mode
+        self._btn_prev.Click      += self._on_preview
+        self._btn_apply.Click     += self._on_apply
+        self._btn_cancel.Click    += lambda s, e: w.Close()
+        w.ShowDialog()
+
+    def _on_mode(self, sender, e):
+        is_single = self._rb_single.IsChecked
+        self._pnl_single.Visibility = Visibility.Visible if is_single else Visibility.Collapsed
+        self._pnl_batch.Visibility  = Visibility.Collapsed if is_single else Visibility.Visible
+
+    def _on_preview(self, sender, e):
+        self._lst.Items.Clear()
+        rows = self._build_batch_rows()
+        for old, new in rows:
+            lbi = System.Windows.Controls.ListBoxItem()
+            lbi.Content = "{0}  →  {1}".format(old, new)
+            lbi.Foreground = SolidColorBrush(Color.FromRgb(0xEC, 0xEF, 0xF1))
+            self._lst.Items.Add(lbi)
+
+    def _build_batch_rows(self):
+        prefix = self._txt_prefix.Text or ""
+        sep    = self._txt_sep.Text or ""
+        try:    start = int(self._txt_start.Text)
+        except: start = 100
+        try:    inc   = int(self._txt_inc.Text)
+        except: inc   = 1
+        suffix = self._txt_suffix.Text or ""
+        sorted_items = sorted(self._items, key=lambda x: x.SheetNumber)
+        rows = []
+        for i, item in enumerate(sorted_items):
+            new_num = "{0}{1}{2}{3}{4}".format(
+                prefix, sep, start + i * inc, sep, suffix).strip("-_")
+            rows.append((item.SheetNumber + "  " + item.SheetName, new_num))
+        return rows
+
+    def _on_apply(self, sender, e):
+        with Transaction(doc, "Sheet Manager: Rename/Renumber Sheets") as t:
+            t.Start()
+            try:
+                if self._rb_single.IsChecked:
+                    # Single rename — first selected item
+                    if self._items:
+                        sheet = self._items[0].Sheet
+                        new_num  = self._txt_num.Text.strip()
+                        new_name = self._txt_name.Text.strip()
+                        if new_num:  sheet.SheetNumber = new_num
+                        if new_name: sheet.Name = new_name
+                else:
+                    # Batch renumber
+                    prefix = self._txt_prefix.Text or ""
+                    sep    = self._txt_sep.Text or ""
+                    try:    start = int(self._txt_start.Text)
+                    except: start = 100
+                    try:    inc   = int(self._txt_inc.Text)
+                    except: inc   = 1
+                    suffix = self._txt_suffix.Text or ""
+                    sorted_items = sorted(self._items, key=lambda x: x.SheetNumber)
+                    # Pass 1: temp numbers to avoid duplicates
+                    for i, item in enumerate(sorted_items):
+                        item.Sheet.SheetNumber = "__tmp_{0}__".format(i)
+                    # Pass 2: real numbers
+                    for i, item in enumerate(sorted_items):
+                        new_num = "{0}{1}{2}{3}{4}".format(
+                            prefix, sep, start + i * inc, sep, suffix).strip("-_")
+                        item.Sheet.SheetNumber = new_num
+                t.Commit()
+                self._applied = True
+            except Exception as ex:
+                t.RollBack()
+                TaskDialog.Show("Rename Error", str(ex))
+        self._w.Close()
+
+    @property
+    def Applied(self): return self._applied
+
+
+# ═══════════════════════════════════════════════════════════════
+# DUPLICATE DIALOG
+# ═══════════════════════════════════════════════════════════════
+
+class DuplicateDialog(object):
+    def __init__(self, owner, selected_items, template_map):
+        """
+        template_map: list of (name, ElementId) tuples
+        """
+        self._items       = selected_items
+        self._template_map = template_map
+        self._success     = False
+        template_names    = [t[0] for t in template_map]
+
+        w = Markup.XamlReader.Parse(DUPLICATE_XAML)
+        self._w = w
+        w.Owner = owner
+
+        self._grid      = w.FindName("dup_grid")
+        self._rb_with   = w.FindName("rb_with_det")
+        self._rb_without = w.FindName("rb_without_det")
+        self._rb_dep    = w.FindName("rb_dependent")
+        self._chk_align = w.FindName("chk_align")
+        self._btn_dup   = w.FindName("btn_duplicate")
+        self._btn_cancel = w.FindName("btn_cancel")
+
+        # Build rows
+        self._rows = ObservableCollection[DuplicateRowItem]()
+        for item in selected_items:
+            row = DuplicateRowItem(item, template_names)
+            self._rows.Add(row)
+        self._grid.ItemsSource = self._rows
+
+        self._btn_dup.Click    += self._on_duplicate
+        self._btn_cancel.Click += lambda s, e: w.Close()
+        w.ShowDialog()
+
+    def _get_dup_option(self):
+        if self._rb_without.IsChecked:
+            return ViewDuplicateOption.Duplicate
+        if self._rb_dep.IsChecked:
+            return ViewDuplicateOption.AsDependent
+        return ViewDuplicateOption.WithDetailing
+
+    def _template_id(self, name):
+        for n, eid in self._template_map:
+            if n == name:
+                return eid
+        return ElementId.InvalidElementId
+
+    def _on_duplicate(self, sender, e):
+        dup_option  = self._get_dup_option()
+        preserve_pos = bool(self._chk_align.IsChecked)
+
+        errors = []
+        with Transaction(doc, "Sheet Manager: Duplicate Sheets") as t:
+            t.Start()
+            try:
+                for row in self._rows:
+                    src_sheet  = row.SourceSheet
+                    tb_id      = get_titleblock_id(doc, src_sheet)
+                    new_sheet  = ViewSheet.Create(doc, tb_id)
+                    # Apply number and name (guard against duplicates)
+                    try:
+                        new_sheet.SheetNumber = row.NewNumber
+                    except Exception:
+                        new_sheet.SheetNumber = row.NewNumber + "-1"
+                    new_sheet.Name = row.NewName
+
+                    tmpl_id = self._template_id(row.TemplateName)
+
+                    # Duplicate each viewport
+                    vp_ids = list(src_sheet.GetAllViewports())
+                    for vp_id in vp_ids:
+                        vp  = doc.GetElement(vp_id)
+                        if not vp:
+                            continue
+                        view = doc.GetElement(vp.ViewId)
+                        if not view:
+                            continue
+                        center = vp.GetBoxCenter() if preserve_pos else None
+
+                        # Determine new view
+                        new_view_id = None
+                        try:
+                            if view.ViewType == ViewType.Legend:
+                                # Place same legend (legends can appear on multiple sheets)
+                                new_view_id = view.Id
+                            elif hasattr(view, "Duplicate"):
+                                dup_id = view.Duplicate(dup_option)
+                                new_view_id = dup_id
+                                new_view = doc.GetElement(dup_id)
+                                # Set name
+                                if row.NewViewName:
+                                    try:
+                                        new_view.Name = row.NewViewName
+                                    except Exception:
+                                        pass
+                                # Set template
+                                if tmpl_id != ElementId.InvalidElementId:
+                                    try:
+                                        new_view.ViewTemplateId = tmpl_id
+                                    except Exception:
+                                        pass
+                        except Exception as ex:
+                            errors.append("View '{0}': {1}".format(
+                                view.Name if hasattr(view, "Name") else "?", str(ex)))
+                            continue
+
+                        if new_view_id:
+                            try:
+                                new_vp = Viewport.Create(
+                                    doc, new_sheet.Id, new_view_id,
+                                    center if center else System.Windows.Point())
+                                # Restore alignment
+                                if preserve_pos and center:
+                                    new_vp.SetBoxCenter(center)
+                            except Exception as ex:
+                                errors.append("Viewport: " + str(ex))
+
+                t.Commit()
+                self._success = True
+            except Exception as ex:
+                t.RollBack()
+                TaskDialog.Show("Duplicate Error", str(ex))
+                self._w.Close()
+                return
+
+        if errors:
+            TaskDialog.Show("Duplicate — Warnings",
+                            "Completed with warnings:\n" + "\n".join(errors[:10]))
+        self._w.Close()
+
+    @property
+    def Success(self): return self._success
+
+
+# ═══════════════════════════════════════════════════════════════
+# REVISION DIALOG
+# ═══════════════════════════════════════════════════════════════
+
+class RevisionDialog(object):
+    def __init__(self, owner, selected_items):
+        self._items   = selected_items
+        self._applied = False
+        revisions     = get_all_revisions(doc)
+
+        # Determine which revisions are on ALL selected sheets
+        def rev_on_sheet(rev, sheet):
+            try:
+                return sheet.IsRevisionCloudVisible(rev.Id)
+            except Exception:
+                return False
+
+        w = Markup.XamlReader.Parse(REVISION_XAML)
+        self._w = w
+        w.Owner = owner
+
+        self._lst   = w.FindName("lst_revisions")
+        self._lbl   = w.FindName("lbl_rev_info")
+        btn_apply   = w.FindName("btn_apply")
+        btn_cancel  = w.FindName("btn_cancel")
+
+        self._lbl.Text = "Applying to {0} sheet(s). Mixed state = not on all sheets.".format(
+            len(selected_items))
+
+        self._rows = ObservableCollection[RevisionRow]()
+        for rev in revisions:
+            on_all = all(rev_on_sheet(rev, it.Sheet) for it in selected_items)
+            self._rows.Add(RevisionRow(rev, on_all))
+        self._lst.ItemsSource = self._rows
+
+        btn_apply.Click  += self._on_apply
+        btn_cancel.Click += lambda s, e: w.Close()
+        w.ShowDialog()
+
+    def _on_apply(self, sender, e):
+        with Transaction(doc, "Sheet Manager: Update Revisions") as t:
+            t.Start()
+            try:
+                for row in self._rows:
+                    for item in self._items:
+                        sheet = item.Sheet
+                        try:
+                            ids = list(sheet.GetAdditionalRevisionIds())
+                            rid = row.RevElement.Id
+                            if row.IsChecked and rid not in ids:
+                                ids.append(rid)
+                                sheet.SetAdditionalRevisionIds(
+                                    System.Collections.Generic.ICollection[ElementId](ids))
+                            elif not row.IsChecked and rid in ids:
+                                ids.remove(rid)
+                                sheet.SetAdditionalRevisionIds(
+                                    System.Collections.Generic.ICollection[ElementId](ids))
+                        except Exception:
+                            pass
+                t.Commit()
+                self._applied = True
+            except Exception as ex:
+                t.RollBack()
+                TaskDialog.Show("Revision Error", str(ex))
+        self._w.Close()
+
+    @property
+    def Applied(self): return self._applied
+
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN WINDOW
+# ═══════════════════════════════════════════════════════════════
+
+class SheetManagerWindow(object):
+    def __init__(self):
+        self._all_items     = []       # All SheetItem objects
+        self._filtered      = []       # After search filter
+        self._template_map  = get_all_view_templates(doc)
+        self._group_prop    = "Prefix" # Current grouping property
+
+        w = Markup.XamlReader.Parse(MAIN_XAML)
+        self._w = w
+
+        # Find controls
+        self._lbl_project  = w.FindName("lbl_project")
+        self._txt_search   = w.FindName("txt_search")
+        self._ph_search    = w.FindName("ph_search")
+        self._cmb_group    = w.FindName("cmb_group")
+        self._grid         = w.FindName("sheet_grid")
+        self._lbl_status   = w.FindName("lbl_status")
+        self._btn_close    = w.FindName("btn_close")
+        self._btn_open     = w.FindName("btn_open")
+        self._btn_rename   = w.FindName("btn_rename")
+        self._btn_dup      = w.FindName("btn_duplicate")
+        self._btn_rev      = w.FindName("btn_revisions")
+        self._btn_del      = w.FindName("btn_delete")
+        self._btn_all      = w.FindName("btn_sel_all")
+        self._btn_grp      = w.FindName("btn_sel_group")
+        self._btn_none     = w.FindName("btn_sel_none")
+
+        # Project name label
+        try:
+            proj_info = doc.ProjectInformation
+            self._lbl_project.Text = "— " + (proj_info.Name or doc.Title)
+        except Exception:
+            pass
+
+        # Load sheets
+        self._load_sheets()
+        self._apply_view()
+        self._update_status()
+
+        # Wire events
+        self._txt_search.TextChanged += self._on_search
+        self._txt_search.TextChanged += self._on_search_placeholder
+        self._cmb_group.SelectionChanged += self._on_group_changed
+        self._grid.SelectionChanged      += self._on_grid_selection
+        self._btn_close.Click   += lambda s, e: w.Close()
+        self._btn_open.Click    += self._on_open
+        self._btn_rename.Click  += self._on_rename
+        self._btn_dup.Click     += self._on_duplicate
+        self._btn_rev.Click     += self._on_revisions
+        self._btn_del.Click     += self._on_delete
+        self._btn_all.Click     += self._on_select_all
+        self._btn_grp.Click     += self._on_select_group
+        self._btn_none.Click    += self._on_clear_selection
+
+        w.ShowDialog()
+
+    # ── Data loading ─────────────────────────────────────────
+
+    def _load_sheets(self):
+        sheets = (FilteredElementCollector(doc)
+                  .OfClass(ViewSheet)
+                  .ToElements())
+        self._all_items = []
+        for s in sheets:
+            try:
+                self._all_items.append(SheetItem(s, doc))
+            except Exception:
+                pass
+        self._all_items.sort(key=lambda x: x.SheetNumber)
+        self._filtered = list(self._all_items)
+
+    def _apply_view(self):
+        """Push filtered list into DataGrid with current grouping."""
+        col = ObservableCollection[SheetItem]()
+        for item in self._filtered:
+            col.Add(item)
+
+        view = CollectionViewSource.GetDefaultView(col)
+        view.GroupDescriptions.Clear()
+        view.GroupDescriptions.Add(PropertyGroupDescription(self._group_prop))
+        view.SortDescriptions.Clear()
+        view.SortDescriptions.Add(SortDescription("SheetNumber", ListSortDirection.Ascending))
+        view.Refresh()
+
+        self._grid.ItemsSource = view
+
+    def _update_status(self):
+        selected = [i for i in self._filtered if i.IsSelected]
+        self._lbl_status.Text = "{0} selected  |  {1} shown  |  {2} total".format(
+            len(selected), len(self._filtered), len(self._all_items))
+        has_sel = len(selected) > 0
+        self._btn_open.IsEnabled    = (len(selected) == 1)
+        self._btn_rename.IsEnabled  = has_sel
+        self._btn_dup.IsEnabled     = has_sel
+        self._btn_rev.IsEnabled     = has_sel
+        self._btn_del.IsEnabled     = has_sel
+
+    # ── Events ───────────────────────────────────────────────
+
+    def _on_search(self, sender, e):
+        q = self._txt_search.Text.strip().lower()
+        if not q:
+            self._filtered = list(self._all_items)
+        else:
+            self._filtered = [
+                i for i in self._all_items
+                if q in i.SheetNumber.lower() or q in i.SheetName.lower()
+            ]
+        self._apply_view()
+        self._update_status()
+
+    def _on_search_placeholder(self, sender, e):
+        self._ph_search.Visibility = (
+            Visibility.Collapsed if self._txt_search.Text else Visibility.Visible)
+
+    def _on_group_changed(self, sender, e):
+        idx = self._cmb_group.SelectedIndex
+        if idx == 0:   self._group_prop = "Prefix"
+        elif idx == 1: self._group_prop = "Discipline"
+        else:          self._group_prop = None
+        self._apply_view()
+
+    def _on_grid_selection(self, sender, e):
+        # Sync DataGrid row selection → IsSelected checkbox
+        for item in self._grid.SelectedItems:
+            if isinstance(item, SheetItem):
+                item.IsSelected = True
+        self._update_status()
+
+    def _get_selected(self):
+        return [i for i in self._filtered if i.IsSelected]
+
+    def _on_select_all(self, sender, e):
+        for i in self._filtered:
+            i.IsSelected = True
+        self._update_status()
+
+    def _on_select_group(self, sender, e):
+        """Select sheets in the same group as the first selected item."""
+        sel = self._get_selected()
+        if not sel:
+            return
+        group_val = getattr(sel[0], self._group_prop, None) if self._group_prop else None
+        for i in self._filtered:
+            if group_val is None or getattr(i, self._group_prop, None) == group_val:
+                i.IsSelected = True
+        self._update_status()
+
+    def _on_clear_selection(self, sender, e):
+        for i in self._filtered:
+            i.IsSelected = False
+        self._update_status()
+
+    def _on_open(self, sender, e):
+        sel = self._get_selected()
+        if not sel:
+            return
+        try:
+            uidoc.ActiveView = sel[0].Sheet
+            self._w.Close()
+        except Exception as ex:
+            TaskDialog.Show("Open Sheet", str(ex))
+
+    def _on_rename(self, sender, e):
+        sel = self._get_selected()
+        if not sel:
+            return
+        dlg = RenameDialog(self._w, sel)
+        if dlg.Applied:
+            self._load_sheets()
+            self._apply_view()
+            self._update_status()
+
+    def _on_duplicate(self, sender, e):
+        sel = self._get_selected()
+        if not sel:
+            return
+        dlg = DuplicateDialog(self._w, sel, self._template_map)
+        if dlg.Success:
+            self._load_sheets()
+            self._apply_view()
+            self._update_status()
+
+    def _on_revisions(self, sender, e):
+        sel = self._get_selected()
+        if not sel:
+            return
+        dlg = RevisionDialog(self._w, sel)
+        if dlg.Applied:
+            self._load_sheets()
+            self._apply_view()
+            self._update_status()
+
+    def _on_delete(self, sender, e):
+        sel = self._get_selected()
+        if not sel:
+            return
+        result = TaskDialog.Show(
+            "Delete Sheets",
+            "Delete {0} sheet(s)? Views placed on them will remain as unplaced views.".format(len(sel)),
+            TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No)
+        if result != TaskDialogResult.Yes:
+            return
+        with Transaction(doc, "Sheet Manager: Delete Sheets") as t:
+            t.Start()
+            try:
+                for item in sel:
+                    try:
+                        doc.Delete(item.ElementId)
+                    except Exception:
+                        pass
+                t.Commit()
+            except Exception as ex:
+                t.RollBack()
+                TaskDialog.Show("Delete Error", str(ex))
+        self._load_sheets()
+        self._apply_view()
+        self._update_status()
+
+
+# ═══════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    SheetManagerWindow()

@@ -1,0 +1,14 @@
+{
+    "_comment": "Defaults for the Align Views tool. The form mirrors these on first open and the 'Save as Default' button writes back here.",
+    "filters": {
+        "same_scale": true,
+        "same_titleblock": true,
+        "same_view_type": false,
+        "same_scope_box": false
+    },
+    "match": {
+        "viewport_position": true,
+        "title_position": true,
+        "title_line_length": true
+    }
+}

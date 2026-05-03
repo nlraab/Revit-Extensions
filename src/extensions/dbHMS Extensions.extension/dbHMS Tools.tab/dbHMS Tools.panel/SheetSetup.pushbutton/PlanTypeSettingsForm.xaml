@@ -1,0 +1,142 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Plan Type Settings"
+        Height="600" Width="540"
+        WindowStartupLocation="CenterOwner"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+
+    <DockPanel>
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="18,12">
+            <Grid>
+                <StackPanel>
+                    <TextBlock Text="Plan type settings"
+                               Foreground="White" FontSize="16" FontWeight="Bold"/>
+                    <TextBlock x:Name="txt_plan_name"
+                               Foreground="#CBD5E0" FontSize="12"
+                               Margin="0,2,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="18,10">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btn_cancel" Content="Cancel"
+                        Padding="14,6" MinWidth="100" Margin="0,0,8,0"
+                        Background="#EDF2F7" BorderBrush="#CBD5E0" Cursor="Hand"/>
+                <Button x:Name="btn_apply" Content="Apply"
+                        Padding="14,6" MinWidth="120"
+                        Background="#2B6CB0" Foreground="White"
+                        FontWeight="SemiBold" BorderThickness="0" Cursor="Hand"/>
+            </StackPanel>
+        </Border>
+
+        <Grid Margin="18,14,18,14">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Border Grid.Row="0" Background="White" BorderBrush="#E2E8F0"
+                    BorderThickness="1" CornerRadius="4" Padding="12">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <TextBlock Text="Levels this plan type applies to"
+                                   FontSize="13" FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal"
+                                    HorizontalAlignment="Right">
+                            <Button x:Name="btn_levels_all" Content="All"
+                                    Padding="8,2" Margin="0,0,4,0"
+                                    Background="#EDF2F7" BorderBrush="#CBD5E0"
+                                    Cursor="Hand"/>
+                            <Button x:Name="btn_levels_none" Content="None"
+                                    Padding="8,2"
+                                    Background="#EDF2F7" BorderBrush="#CBD5E0"
+                                    Cursor="Hand"/>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock Text="Only the levels you've checked in the main form appear here."
+                               DockPanel.Dock="Top" Foreground="#718096"
+                               FontSize="11" Margin="0,0,0,6"/>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="pnl_levels"/>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+
+            <Border Grid.Row="1" Background="White" BorderBrush="#E2E8F0"
+                    BorderThickness="1" CornerRadius="4" Padding="12"
+                    Margin="0,12,0,0">
+                <StackPanel>
+                    <TextBlock Text="Sheet number"
+                               FontSize="13" FontWeight="SemiBold"
+                               Margin="0,0,0,4"/>
+                    <TextBlock x:Name="txt_default_help"
+                               Foreground="#718096" FontSize="11"
+                               Margin="0,0,0,10"
+                               TextWrapping="Wrap"/>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Prefix"
+                                   FontWeight="SemiBold" FontSize="11"
+                                   Foreground="#4A5568" Margin="0,0,0,2"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="Series"
+                                   FontWeight="SemiBold" FontSize="11"
+                                   Foreground="#4A5568" Margin="0,0,0,2"/>
+                        <TextBlock Grid.Row="0" Grid.Column="4" Text="Level digits"
+                                   FontWeight="SemiBold" FontSize="11"
+                                   Foreground="#4A5568" Margin="0,0,0,2"/>
+                        <TextBlock Grid.Row="0" Grid.Column="6" Text="Suffix"
+                                   FontWeight="SemiBold" FontSize="11"
+                                   Foreground="#4A5568" Margin="0,0,0,2"/>
+                        <TextBox Grid.Row="1" Grid.Column="0" x:Name="txt_prefix_override"
+                                 Padding="6,3" Height="26" VerticalContentAlignment="Center"/>
+                        <TextBox Grid.Row="1" Grid.Column="2" x:Name="txt_series_override"
+                                 Padding="6,3" Height="26" VerticalContentAlignment="Center"/>
+                        <TextBox Grid.Row="1" Grid.Column="4" x:Name="txt_level_override"
+                                 Padding="6,3" Height="26" VerticalContentAlignment="Center"/>
+                        <TextBox Grid.Row="1" Grid.Column="6" x:Name="txt_suffix_override"
+                                 Padding="6,3" Height="26" VerticalContentAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0" x:Name="txt_prefix_hint"
+                                   Foreground="#A0AEC0" FontSize="10" Margin="0,2,0,0"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" x:Name="txt_series_hint"
+                                   Foreground="#A0AEC0" FontSize="10" Margin="0,2,0,0"/>
+                        <TextBlock Grid.Row="2" Grid.Column="4" x:Name="txt_level_hint"
+                                   Foreground="#A0AEC0" FontSize="10" Margin="0,2,0,0"/>
+                        <TextBlock Grid.Row="2" Grid.Column="6" x:Name="txt_suffix_hint"
+                                   Foreground="#A0AEC0" FontSize="10" Margin="0,2,0,0"/>
+                    </Grid>
+
+                    <Border Background="#F7FAFC" BorderBrush="#E2E8F0"
+                            BorderThickness="1" CornerRadius="3"
+                            Padding="10,6" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Preview" FontSize="10"
+                                       Foreground="#718096" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="txt_preview" FontSize="14"
+                                       FontFamily="Consolas" FontWeight="SemiBold"
+                                       Foreground="#2D3748" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>
