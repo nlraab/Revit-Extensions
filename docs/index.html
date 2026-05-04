@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dbHMS · AI-Developed Productivity Tools</title>
+<style>
+  /* ---------- Design tokens (match dbHMS tool dialogs) ---------- */
+  :root {
+    --bg-page:        #F7FAFC;
+    --bg-header:      #2D3748;
+    --bg-card:        #FFFFFF;
+    --border:         #E2E8F0;
+    --text:           #1A202C;
+    --text-muted:     #4A5568;
+    --text-on-dark:   #FFFFFF;
+    --subtitle:       #CBD5E0;
+    --accent:         #3182CE;
+    --accent-strong:  #2B6CB0;
+    --good:           #38A169;
+    --warn:           #DD6B20;
+    --danger:         #E53E3E;
+    --chip-bg:        #EDF2F7;
+    --chip-border:    #CBD5E0;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--text);
+    background: var(--bg-page);
+    line-height: 1.45;
+  }
+  a { color: var(--accent-strong); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ---------- Top dark header ---------- */
+  .app-header {
+    background: var(--bg-header);
+    color: var(--text-on-dark);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid #1A202C;
+  }
+  .app-header .title {
+    font-size: 20pt;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+  .app-header .subtitle {
+    font-size: 12pt;
+    color: var(--subtitle);
+    margin-top: 4px;
+  }
+  .logo-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+  .logo-mark {
+    background: var(--text-on-dark);
+    color: var(--bg-header);
+    font-weight: 800;
+    font-size: 14pt;
+    letter-spacing: 1px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    border: 1px solid #1A202C;
+  }
+  .logo-tag {
+    color: var(--subtitle);
+    font-size: 10pt;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* ---------- Layout ---------- */
+  main {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 16px 20px 0;
+  }
+  section { margin-bottom: 18px; }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin: 6px 4px 10px;
+  }
+  .section-num {
+    background: var(--bg-header);
+    color: var(--text-on-dark);
+    width: 28px; height: 28px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13pt;
+    flex: 0 0 auto;
+  }
+  .section-title {
+    font-size: 18pt;
+    font-weight: 700;
+    margin: 0;
+  }
+  .section-sub {
+    color: var(--text-muted);
+    font-size: 11pt;
+  }
+
+  /* ---------- Cards ---------- */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 13pt;
+  }
+  .card .meta {
+    color: var(--text-muted);
+    font-size: 10.5pt;
+  }
+
+  /* ---------- Hero strip ---------- */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr 1fr 1fr;
+    gap: 10px;
+  }
+  .hero .stat {
+    text-align: center;
+  }
+  .hero .stat .num {
+    font-size: 28pt;
+    font-weight: 800;
+    color: var(--accent-strong);
+    line-height: 1;
+  }
+  .hero .stat .lbl {
+    font-size: 10pt;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+  .hero .pitch {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .hero .pitch .h {
+    font-size: 14pt;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .hero .pitch .p {
+    font-size: 10.5pt;
+    color: var(--text-muted);
+  }
+
+  /* ---------- Tool grid ---------- */
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+  }
+  .tool {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tool .head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tool .icon {
+    width: 36px; height: 36px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18pt;
+    flex: 0 0 auto;
+    background: var(--bg-header);
+    color: var(--text-on-dark);
+  }
+  .tool .name {
+    font-size: 13pt;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+  .tool .one-liner {
+    color: var(--text-muted);
+    font-size: 10.5pt;
+  }
+
+  .from-to {
+    display: grid;
+    grid-template-columns: 1fr 18px 1fr;
+    align-items: center;
+    gap: 6px;
+    background: #F7FAFC;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    padding: 8px;
+  }
+  .from-to .col {
+    font-size: 9.5pt;
+  }
+  .from-to .col .lbl {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 8pt;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .from-to .col.from .lbl { color: var(--danger); }
+  .from-to .col.to   .lbl { color: var(--good); }
+  .from-to .arrow {
+    font-size: 14pt;
+    color: var(--accent);
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .saved {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .saved .lbl {
+    font-size: 9pt;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .saved .val {
+    font-weight: 700;
+    color: var(--good);
+    font-size: 11pt;
+  }
+  .quote {
+    border-left: 3px solid var(--accent);
+    padding: 4px 0 4px 8px;
+    color: var(--text-muted);
+    font-size: 9.5pt;
+    font-style: italic;
+  }
+  .quote .who { font-style: normal; color: var(--text); font-weight: 600; display: block; margin-top: 2px; font-size: 9pt; }
+
+  /* ---------- AI Generated section ---------- */
+  .ai-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .ai-card .h {
+    font-size: 13pt;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .ai-card .body { color: var(--text-muted); font-size: 10.5pt; }
+  .ai-card .accent {
+    color: var(--accent-strong);
+    font-weight: 700;
+  }
+
+  /* ---------- Summary three-column ---------- */
+  .three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+  }
+  .col-card .h {
+    font-size: 13pt;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .col-card.opportunity .h::before { content: "▲"; color: var(--good); }
+  .col-card.challenges  .h::before { content: "■"; color: var(--warn); }
+  .col-card.recs        .h::before { content: "●"; color: var(--accent); }
+  .col-card ul {
+    margin: 0;
+    padding-left: 16px;
+    color: var(--text-muted);
+    font-size: 10.5pt;
+  }
+  .col-card ul li { margin-bottom: 4px; }
+  .col-card .sub {
+    margin-top: 8px;
+    font-size: 10pt;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  /* ---------- Footer bar ---------- */
+  .app-footer {
+    background: #FFFFFF;
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .app-footer .status {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 10.5pt;
+  }
+  .btn {
+    border-radius: 4px;
+    padding: 8px 14px;
+    font-size: 10.5pt;
+    border: 1px solid var(--border);
+    background: #FFFFFF;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+    color: var(--text-on-dark);
+    margin-left: 6px;
+  }
+
+  @media (max-width: 900px) {
+    .hero, .tool-grid, .ai-row, .three-col { grid-template-columns: 1fr 1fr; }
+    .hero .pitch { grid-column: 1 / -1; }
+  }
+  @media (max-width: 620px) {
+    .hero, .tool-grid, .ai-row, .three-col { grid-template-columns: 1fr; }
+    .app-header { flex-direction: column; align-items: flex-start; }
+    .logo-block { align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- Top dark header -->
+  <header class="app-header">
+    <div>
+      <div class="title">AI-Developed Productivity Tools</div>
+      <div class="subtitle">by Nathan Raab &middot; dbHMS BIM Tools for Revit</div>
+    </div>
+    <div class="logo-block">
+      <div class="logo-mark">dbHMS</div>
+      <div class="logo-tag">BIM Tools</div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Hero / at-a-glance stats -->
+    <section>
+      <div class="card hero">
+        <div class="pitch">
+          <div class="h">Six in-house Revit tools, built by one BIM tech with AI as a co-developer.</div>
+          <div class="p">Targeted at the most repetitive parts of an MEP engineer's day &mdash; sheet setup, view alignment, revisions, view templates &mdash; with the look and feel of a single product.</div>
+        </div>
+        <div class="stat"><div class="num">6</div><div class="lbl">Live Tools</div></div>
+        <div class="stat"><div class="num">~10&times;</div><div class="lbl">Faster on Setup</div></div>
+        <div class="stat"><div class="num">$0</div><div class="lbl">3rd-party License</div></div>
+      </div>
+    </section>
+
+    <!-- Section 1: Productivity tools -->
+    <section>
+      <div class="section-head">
+        <span class="section-num">1</span>
+        <h2 class="section-title">Tools that dramatically boost productivity</h2>
+        <span class="section-sub">From &rarr; To &nbsp;&middot;&nbsp; Time saved &nbsp;&middot;&nbsp; Engineer feedback</span>
+      </div>
+
+      <div class="tool-grid">
+
+        <!-- Sheet Setup -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">▦</div>
+            <div>
+              <div class="name">Sheet Setup</div>
+              <div class="one-liner">One-click MEP sheet &amp; view scaffolding</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Manually create plans + sheets per level &times; discipline; place each viewport
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              Pick title block, scope box, levels, trades &mdash; tool builds, numbers, places
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~4&ndash;6 hrs / project</span></div>
+          <div class="quote">"What used to be a half-day of clicking is done before lunch."<span class="who">&mdash; Project Engineer</span></div>
+        </div>
+
+        <!-- Sheet Manager -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">▤</div>
+            <div>
+              <div class="name">Sheet Manager</div>
+              <div class="one-liner">Bulk rename, renumber, duplicate, revise</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Edit sheets one at a time in the project browser; lose viewport alignment on duplicate
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              Group by prefix, multi-select, live preview; duplicate keeps viewports aligned
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~1&ndash;2 hrs / package</span></div>
+          <div class="quote">"Renumbering a sheet set is finally not painful."<span class="who">&mdash; Senior Designer</span></div>
+        </div>
+
+        <!-- Align Views -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">⊞</div>
+            <div>
+              <div class="name">Align Views</div>
+              <div class="one-liner">Match viewport &amp; title position across sheets</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Nudge each viewport so plans land in the same XY across a sheet set
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              Pick a master, check matching sheets, snap viewport + title in one go
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~30&ndash;60 min / set</span></div>
+          <div class="quote">"Replaces a paid add-in we used to pay per seat for."<span class="who">&mdash; BIM Lead</span></div>
+        </div>
+
+        <!-- Revisions Manager -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">⟳</div>
+            <div>
+              <div class="name">Revisions Manager</div>
+              <div class="one-liner">Revisions + sheet coverage + cloud finder</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Bounce between Revit's revision dialog, browser, and clouds to verify coverage
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              One panel: edit revisions, apply to selected sheets, jump to any cloud
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~1 hr / issuance</span></div>
+          <div class="quote">"I trust the revision schedule for the first time."<span class="who">&mdash; Project Manager</span></div>
+        </div>
+
+        <!-- View Range Helper -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">◫</div>
+            <div>
+              <div class="name">View Range Helper</div>
+              <div class="one-liner">Live plan + section preview of view range</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Trial-and-error with numeric Top/Cut/Bottom dialog until walls show right
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              Drag colored planes on a live section preview; template locks handled
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~15 min / problem view</span></div>
+          <div class="quote">"Junior engineers actually understand view range now."<span class="who">&mdash; Mentor / Reviewer</span></div>
+        </div>
+
+        <!-- View Templates Manager -->
+        <div class="card tool">
+          <div class="head">
+            <div class="icon">▣</div>
+            <div>
+              <div class="name">View Templates Manager</div>
+              <div class="one-liner">Single + bulk-edit view templates</div>
+            </div>
+          </div>
+          <div class="from-to">
+            <div class="col from">
+              <div class="lbl">From</div>
+              Open each template, change the same VG override, repeat 30+ times
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="col to">
+              <div class="lbl">To</div>
+              Multi-select templates, build override once, apply to all
+            </div>
+          </div>
+          <div class="saved"><span class="lbl">Time saved</span><span class="val">~2&ndash;4 hrs / standard update</span></div>
+          <div class="quote">"Standards rollouts went from a project to an afternoon."<span class="who">&mdash; QA / Standards</span></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Section 2: AI Generated -->
+    <section>
+      <div class="section-head">
+        <span class="section-num">2</span>
+        <h2 class="section-title">Built with AI</h2>
+        <span class="section-sub">How one BIM tech ships six tools</span>
+      </div>
+
+      <div class="ai-row">
+        <div class="card ai-card">
+          <div class="h">AI <span class="accent">democratizes</span> tool-building</div>
+          <div class="body">
+            You no longer need a software engineer to automate Revit. A BIM tech who
+            understands the workflow can describe the problem in plain English and
+            collaborate with AI on Python + WPF code, ship a real tool, and iterate
+            with the engineers who use it.
+          </div>
+        </div>
+        <div class="card ai-card">
+          <div class="h">AI makes it <span class="accent">extremely fast</span></div>
+          <div class="body">
+            What used to be a "we'll buy that someday" wishlist becomes a Tuesday
+            afternoon prototype. Each of these six tools went from idea to in-house
+            beta in days, not months &mdash; including the consistent header, footer,
+            and card styling you see throughout this page.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Summary & Discussion -->
+    <section>
+      <div class="section-head">
+        <span class="section-num">3</span>
+        <h2 class="section-title">Summary &amp; Discussion</h2>
+        <span class="section-sub">Opportunity &nbsp;&middot;&nbsp; Challenges &nbsp;&middot;&nbsp; Recommendations</span>
+      </div>
+
+      <div class="three-col">
+
+        <div class="card col-card opportunity">
+          <div class="h">Opportunity</div>
+          <ul>
+            <li>Reduce time spent on repetitive tasks</li>
+            <li>Democratize automation &mdash; and, eventually, engineering itself</li>
+            <li>Free up time for more projects, new skills, and creativity</li>
+          </ul>
+        </div>
+
+        <div class="card col-card challenges">
+          <div class="h">AI Challenges</div>
+          <ul>
+            <li><strong>Tool anarchy</strong> &mdash; duplication, overlapping scope, inconsistent UI</li>
+            <li><strong>Limited code knowledge</strong> &mdash; tools become hard to maintain or debug</li>
+            <li><strong>Hallucinations</strong> &mdash; quietly introduced errors, unintended changes</li>
+          </ul>
+        </div>
+
+        <div class="card col-card recs">
+          <div class="h">Recommendations</div>
+          <div class="sub">Near-term</div>
+          <ul>
+            <li>More prototyping and experimentation</li>
+            <li>Validation and iteration with engineers</li>
+            <li>AI funding (tokens) and training</li>
+          </ul>
+          <div class="sub">Forward-looking</div>
+          <ul>
+            <li>Tool strategy &mdash; organization, standards, look &amp; feel, no redundancy</li>
+            <li>Development process &mdash; rigorous test &amp; release so live tools don't break</li>
+            <li>Governance &mdash; quality, consistency, usability, coverage</li>
+            <li>Investigate tools for other roles in the firm</li>
+          </ul>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Bottom footer bar -->
+  <footer class="app-footer">
+    <div class="status">Status: 6 tools in production &middot; consistent header / footer / card styling across the suite.</div>
+    <div>
+      <button class="btn">Cancel</button>
+      <button class="btn primary">Discuss Roadmap</button>
+    </div>
+  </footer>
+
+</body>
+</html>
