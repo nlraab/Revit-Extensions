@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="View Range Helper"
-        Height="820" Width="1280"
+        Height="980" Width="1600"
         WindowStartupLocation="CenterScreen"
         Background="#F7FAFC"
         FontFamily="Segoe UI" FontSize="12"
@@ -157,8 +157,6 @@
                                VerticalAlignment="Center" FontStyle="Italic"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <CheckBox x:Name="chk_snap_6in" Content="Snap to nearest 6&quot;"
-                              IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     <Button x:Name="btn_revert" Content="Revert" Style="{StaticResource SecondaryButton}"/>
                     <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
                     <Button x:Name="btn_apply" Content="Apply to View" Style="{StaticResource PrimaryButton}"/>
@@ -271,6 +269,23 @@
                     </StackPanel>
                 </Border>
 
+                <Border DockPanel.Dock="Top"
+                        Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                        CornerRadius="4" Padding="10,4" Margin="0,0,0,10">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="72"/>
+                        </Grid.ColumnDefinitions>
+                        <CheckBox x:Name="chk_snap" Grid.Column="0" Content="Snap to nearest"
+                                  IsChecked="True" VerticalAlignment="Center"/>
+                        <TextBox  x:Name="txt_snap_distance" Grid.Column="2"
+                                  Height="22" VerticalAlignment="Center"
+                                  ToolTip="Snap distance for plane drags, far clip, and section extent. Accepts feet/inches (6&quot;, 1'-0&quot;, 0.5)."/>
+                    </Grid>
+                </Border>
+
                 <Border Style="{StaticResource CardBorder}">
                     <StackPanel>
                         <TextBlock Text="Tips" Style="{StaticResource SectionHeader}"/>
@@ -313,15 +328,28 @@
                         <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
                             <TextBlock Text="Plan (Active View)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="btn_reset_zoom" Content="Reset zoom"
+                                        Style="{StaticResource MiniButton}" ToolTip="Reset plan zoom and pan to default"/>
                                 <Button x:Name="btn_recenter_section"  Content="Recenter section line"
                                         Style="{StaticResource MiniButton}" ToolTip="Reset section line to span the crop region"/>
                             </StackPanel>
                         </Grid>
                         <TextBlock x:Name="txt_plan_hint" DockPanel.Dock="Bottom"
                                    Style="{StaticResource HelperText}" Margin="0,6,0,0"
-                                   Text="Drag the red section line to slide it. Drag an endpoint to rotate or extend it. Click the &#x21BB; icon next to the bubble to flip the view direction."/>
-                        <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="#F7FAFC" CornerRadius="3">
-                            <Canvas x:Name="cnv_plan" Background="Transparent" ClipToBounds="True"/>
+                                   Text="Mouse wheel = zoom. Middle-click drag = pan. Drag the red section line / bubbles / far-clip handle as usual."/>
+                        <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="White" CornerRadius="3"
+                                ClipToBounds="True">
+                            <Grid x:Name="grd_plan">
+                                <Grid.RenderTransform>
+                                    <TransformGroup>
+                                        <ScaleTransform     x:Name="trf_plan_scale" ScaleX="1" ScaleY="1"/>
+                                        <TranslateTransform x:Name="trf_plan_pan"   X="0" Y="0"/>
+                                    </TransformGroup>
+                                </Grid.RenderTransform>
+                                <Image  x:Name="img_plan" Stretch="Uniform"
+                                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+                                <Canvas x:Name="cnv_plan" Background="Transparent" ClipToBounds="False"/>
+                            </Grid>
                         </Border>
                     </DockPanel>
                 </Border>
@@ -332,6 +360,9 @@
                         <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
                             <TextBlock Text="Section" Style="{StaticResource SectionHeader}" VerticalAlignment="Center"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="btn_reset_section_zoom" Content="Reset zoom"
+                                        Style="{StaticResource MiniButton}"
+                                        ToolTip="Reset section zoom and pan to default"/>
                                 <Button x:Name="btn_refresh_render" Content="&#x21BB; Refresh"
                                         Style="{StaticResource MiniButton}"
                                         ToolTip="Re-render the Revit section now (also auto-refreshes after section line / far clip drags)"/>
@@ -339,12 +370,29 @@
                         </Grid>
                         <TextBlock x:Name="txt_section_hint" DockPanel.Dock="Bottom"
                                    Style="{StaticResource HelperText}" Margin="0,6,0,0"
-                                   Text="Drag the colored lines to move each view-range plane. Drag the gray triangles on the right edge to set how much above / below to show."/>
-                        <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="White" CornerRadius="3">
+                                   Text="Drag the colored lines to move each view-range plane. Mouse wheel zoom, middle-click to pan."/>
+                        <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="White" CornerRadius="3"
+                                ClipToBounds="True">
                             <Grid>
-                                <Image x:Name="img_section" Stretch="Uniform"
-                                       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
-                                <Canvas x:Name="cnv_section" Background="Transparent" ClipToBounds="True"/>
+                                <!-- Inner grid: image + content overlay, transformed together so
+                                     model-anchored elements (plane lines, A/B chips, levels)
+                                     scale + pan with the rendered image. -->
+                                <Grid x:Name="grd_section">
+                                    <Grid.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform     x:Name="trf_sec_scale" ScaleX="1" ScaleY="1"/>
+                                            <TranslateTransform x:Name="trf_sec_pan"   X="0" Y="0"/>
+                                        </TransformGroup>
+                                    </Grid.RenderTransform>
+                                    <Image  x:Name="img_section" Stretch="Uniform"
+                                            HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+                                    <Canvas x:Name="cnv_section" Background="Transparent" ClipToBounds="False"/>
+                                </Grid>
+                                <!-- Outer overlay canvas: NOT transformed. Holds plane labels
+                                     ("Top -7'-6\"" etc.) so they stay glued to the right edge
+                                     of the visible card no matter how the user zooms / pans. -->
+                                <Canvas x:Name="cnv_section_screen" Background="Transparent"
+                                        IsHitTestVisible="False"/>
                             </Grid>
                         </Border>
                     </DockPanel>

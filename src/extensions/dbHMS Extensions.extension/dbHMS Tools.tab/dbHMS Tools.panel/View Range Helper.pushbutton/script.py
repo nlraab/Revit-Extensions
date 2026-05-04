@@ -39,7 +39,7 @@ from Autodesk.Revit.DB import (
     FilteredElementCollector, ViewPlan, ViewSection, Level,
     ViewFamily, ViewFamilyType, ViewDetailLevel, DisplayStyle,
     BuiltInCategory, BuiltInParameter,
-    Transaction, TransactionGroup, ElementId, XYZ, Line as DBLine,
+    Transaction, TransactionGroup, ElementId, XYZ,
     PlanViewPlane, BoundingBoxXYZ, Transform,
     ImageExportOptions, ImageFileType, ImageResolution,
     ZoomFitType, ExportRange,
@@ -48,23 +48,21 @@ from Autodesk.Revit.DB import (
 import System
 from System import Uri, UriKind
 from System.Windows import (
-    Thickness, Visibility, Point as WPoint,
+    Thickness, Visibility, Point as WPoint, HorizontalAlignment, VerticalAlignment,
     MessageBox, MessageBoxButton, MessageBoxResult, MessageBoxImage,
 )
 from System.Windows.Controls import (
-    ComboBoxItem, Canvas, TextBlock, Border,
+    ComboBoxItem, Canvas, TextBlock, Border, StackPanel, Orientation,
 )
 from System.Windows.Media import (
-    SolidColorBrush, Color, Brushes, PointCollection,
-    PathGeometry, PathFigure, ArcSegment, LineSegment,
-    SweepDirection,
+    SolidColorBrush, Color, Brushes, PointCollection, Stretch,
 )
 from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
 from System.Windows.Shapes import (
     Line as WLine, Rectangle as WRect, Ellipse as WEllipse,
-    Polygon as WPolygon, Path as WPath,
+    Polygon as WPolygon,
 )
-from System.Windows.Input import Cursors, MouseButtonState, Key
+from System.Windows.Input import Cursors, MouseButtonState, Key, MouseButton
 
 from pyrevit import revit, forms, script
 
@@ -165,11 +163,14 @@ def parse_offset(text):
     return sign * (ft + inch / 12.0)
 
 
-def snap_feet_to_6in(feet):
-    """Snap a decimal-feet value to nearest 0.5 ft (= 6 inches)."""
+def snap_feet(feet, distance):
+    """Snap a decimal-feet value to the nearest multiple of `distance` (also
+    in feet). distance <= 0 disables snapping (returns the original value)."""
     if feet is None:
         return None
-    return round(feet * 2.0) / 2.0
+    if distance is None or distance <= 0:
+        return feet
+    return round(feet / distance) * distance
 
 
 # ============================================================================
@@ -403,161 +404,128 @@ def detach_view_range_from_template(view_plan):
 # ----------------------------------------------------------------------
 
 def get_view_crop_box_xy(view_plan):
-    """Return ((min_x, min_y), (max_x, max_y)) of the view crop box in
-    model XY (feet). Falls back to a generous box around all walls when
-    the crop is not enabled."""
+    """Return ((min_x, min_y), (max_x, max_y)) of the view's crop region
+    in world XY (feet).
+
+    IMPORTANT: this MUST return the actual CropBox bounds even when the
+    view has CropBoxActive == False, because the render pipeline forces
+    CropBoxActive = True before exporting the PNG. The image will show
+    whatever's in the CropBox area, so the overlay coordinates need to
+    use the SAME area regardless of whether the user has the crop on
+    or off in their view."""
     try:
-        if view_plan.CropBoxActive:
-            cb = view_plan.CropBox  # BoundingBoxXYZ in view-relative coords
-            tr = cb.Transform
-            corners = [
-                tr.OfPoint(XYZ(cb.Min.X, cb.Min.Y, 0)),
-                tr.OfPoint(XYZ(cb.Max.X, cb.Min.Y, 0)),
-                tr.OfPoint(XYZ(cb.Max.X, cb.Max.Y, 0)),
-                tr.OfPoint(XYZ(cb.Min.X, cb.Max.Y, 0)),
-            ]
-            xs = [p.X for p in corners]; ys = [p.Y for p in corners]
-            return (min(xs), min(ys)), (max(xs), max(ys))
+        cb = view_plan.CropBox        # always available
+        if cb is None: return None
+        tr = cb.Transform
+        corners = [
+            tr.OfPoint(XYZ(cb.Min.X, cb.Min.Y, 0)),
+            tr.OfPoint(XYZ(cb.Max.X, cb.Min.Y, 0)),
+            tr.OfPoint(XYZ(cb.Max.X, cb.Max.Y, 0)),
+            tr.OfPoint(XYZ(cb.Min.X, cb.Max.Y, 0)),
+        ]
+        xs = [p.X for p in corners]; ys = [p.Y for p in corners]
+        return (min(xs), min(ys)), (max(xs), max(ys))
     except Exception:
         pass
     return None
 
 
-def collect_walls(view_plan, crop_min, crop_max):
-    """Collect a lightweight list of walls with their plan footprint and
-    vertical extent.
+def trim_png_white_margins(png_path, white_threshold=240):
+    """Crop the white margin off an exported PNG so the rendered content
+    fills the entire bitmap. Returns True if the file was rewritten,
+    False if no trim was needed (or trim failed).
 
-    Returns list of dicts:
-        { 'p1': (x, y), 'p2': (x, y), 'z_bot': float, 'z_top': float,
-          'thickness': float }
+    WHY: Revit's image export adds a small white margin around the
+    rendered view content. Our world↔canvas mapping assumes the PNG
+    fills exactly the CropBox area, so any margin causes a proportional
+    misalignment between where the section line appears on the plan and
+    what the section actually cuts. Trimming the PNG before we hand it
+    to WPF eliminates the margin entirely — m2c becomes pixel-accurate
+    to the visible content.
 
-    Walls are filtered to those whose plan footprint intersects the crop
-    bbox (or all walls if crop is None)."""
-    walls = list(FilteredElementCollector(doc)
-                 .OfCategory(BuiltInCategory.OST_Walls)
-                 .WhereElementIsNotElementType())
-    out = []
-    for w in walls:
+    Algorithm: walk in from each edge of the bitmap until we hit a row
+    (or column) containing a pixel below `white_threshold` on R/G/B.
+    Anything outside the resulting rectangle is considered margin and
+    cropped away."""
+    try:
+        from System.Drawing import Bitmap, Rectangle
+        from System.Drawing.Imaging import ImageLockMode, PixelFormat, ImageFormat
+        from System.Runtime.InteropServices import Marshal
+        from System import Array, Byte
+    except Exception:
+        return False
+
+    bmp = Bitmap(png_path)
+    try:
+        w, h = int(bmp.Width), int(bmp.Height)
+        if w < 4 or h < 4:
+            return False
+        rect = Rectangle(0, 0, w, h)
+        bmp_data = bmp.LockBits(rect, ImageLockMode.ReadOnly,
+                                PixelFormat.Format32bppArgb)
         try:
-            loc = w.Location
-            if loc is None or not hasattr(loc, "Curve"):
-                continue
-            curve = loc.Curve
-            if not isinstance(curve, DBLine):
-                # Skip arc walls for now - they complicate the section cut math
-                continue
-            p1 = curve.GetEndPoint(0); p2 = curve.GetEndPoint(1)
-            # Vertical extent of the wall
-            z_bot = None; z_top = None
-            try:
-                base_lvl = doc.GetElement(w.LevelId)
-                base_off = w.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)
-                z_bot = (base_lvl.Elevation if base_lvl else 0.0) + (base_off.AsDouble() if base_off else 0.0)
-            except Exception:
-                pass
-            try:
-                # Top by constraint
-                top_cnst_param = w.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE)
-                top_off_param  = w.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET)
-                top_cnst_id    = top_cnst_param.AsElementId() if top_cnst_param else None
-                if top_cnst_id and eid_int(top_cnst_id) > 0:
-                    top_lvl = doc.GetElement(top_cnst_id)
-                    if top_lvl:
-                        z_top = top_lvl.Elevation + (top_off_param.AsDouble() if top_off_param else 0.0)
-                if z_top is None:
-                    h_param = w.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM)
-                    if h_param and z_bot is not None:
-                        z_top = z_bot + h_param.AsDouble()
-            except Exception:
-                pass
-            if z_bot is None: z_bot = 0.0
-            if z_top is None: z_top = z_bot + 10.0  # fallback - 10 ft tall
+            stride = int(bmp_data.Stride)
+            size = stride * h
+            buf = Array.CreateInstance(Byte, size)
+            Marshal.Copy(bmp_data.Scan0, buf, 0, size)
+        finally:
+            bmp.UnlockBits(bmp_data)
 
-            # Wall thickness for the section render
-            try:
-                thk = w.Width
-            except Exception:
-                thk = 0.5
+        # Format32bppArgb byte order (little-endian): B G R A per pixel.
+        T = int(white_threshold)
 
-            # Crop filter: AABB-vs-segment quick reject
-            if crop_min is not None and crop_max is not None:
-                xs = (p1.X, p2.X); ys = (p1.Y, p2.Y)
-                if (max(xs) < crop_min[0] - 5 or min(xs) > crop_max[0] + 5 or
-                    max(ys) < crop_min[1] - 5 or min(ys) > crop_max[1] + 5):
-                    continue
+        def row_has_content(y):
+            # Sample every 4th pixel for speed. The margin we're trying
+            # to detect is solid white (Revit-imposed), so any sub-4-px
+            # content stripe is almost certainly noise we'd want to crop
+            # anyway. 4× speedup on big PNGs (~30 ms instead of ~120 ms).
+            base = y * stride
+            for x in range(0, w, 4):
+                i = base + x * 4
+                if (buf[i] & 0xFF) < T or (buf[i + 1] & 0xFF) < T or (buf[i + 2] & 0xFF) < T:
+                    return True
+            return False
 
-            out.append({
-                "id": eid_int(w.Id),
-                "p1": (p1.X, p1.Y),
-                "p2": (p2.X, p2.Y),
-                "z_bot": z_bot, "z_top": z_top,
-                "thickness": thk,
-            })
-        except Exception:
-            continue
-    return out
+        def col_has_content(x):
+            col = x * 4
+            for y in range(0, h, 4):
+                i = y * stride + col
+                if (buf[i] & 0xFF) < T or (buf[i + 1] & 0xFF) < T or (buf[i + 2] & 0xFF) < T:
+                    return True
+            return False
 
+        # Walk in from each side until we hit content.
+        top = 0
+        while top < h and not row_has_content(top):
+            top += 1
+        bottom = h - 1
+        while bottom > top and not row_has_content(bottom):
+            bottom -= 1
+        left = 0
+        while left < w and not col_has_content(left):
+            left += 1
+        right = w - 1
+        while right > left and not col_has_content(right):
+            right -= 1
 
-def collect_doors_windows(walls):
-    """Collect doors and windows whose host wall is in `walls`.
+        if left >= right or top >= bottom:
+            return False  # entire bitmap is white — nothing to do
+        if left == 0 and top == 0 and right == w - 1 and bottom == h - 1:
+            return False  # no margin found
 
-    Returns (doors, windows) - each a list of dicts with:
-        { 'host_id', 'pt': (x,y), 'width', 'z_bot', 'z_top' }
-    """
-    walls_by_id = {w["id"]: w for w in walls}
-    doors = []
-    windows = []
-    for cat_enum, target in (
-        (BuiltInCategory.OST_Doors,   doors),
-        (BuiltInCategory.OST_Windows, windows),
-    ):
+        crop = Rectangle(left, top, right - left + 1, bottom - top + 1)
+        cropped = bmp.Clone(crop, bmp.PixelFormat)
         try:
-            insts = list(FilteredElementCollector(doc)
-                         .OfCategory(cat_enum)
-                         .WhereElementIsNotElementType())
-        except Exception:
-            continue
-        for inst in insts:
-            try:
-                host = inst.Host
-                if host is None: continue
-                hid = eid_int(host.Id)
-                if hid not in walls_by_id: continue
-                loc = inst.Location
-                if loc is None or not hasattr(loc, "Point"): continue
-                pt = loc.Point
-                # Width / height from the symbol
-                sym = None
-                try: sym = inst.Symbol
-                except Exception: pass
-
-                def _param_double(elem, bip):
-                    try:
-                        p = elem.get_Parameter(bip) if elem else None
-                        if p: return p.AsDouble()
-                    except Exception:
-                        pass
-                    return None
-
-                width  = _param_double(sym, BuiltInParameter.FAMILY_WIDTH_PARAM)  or 3.0
-                height = _param_double(sym, BuiltInParameter.FAMILY_HEIGHT_PARAM) or 7.0
-
-                # Sill height for windows; doors usually sit at host base
-                sill = _param_double(inst, BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM) or 0.0
-
-                base_z = walls_by_id[hid]["z_bot"]
-                z_b = base_z + sill
-                z_t = z_b + height
-                target.append({
-                    "host_id": hid,
-                    "pt":      (pt.X, pt.Y),
-                    "width":   width,
-                    "z_bot":   z_b,
-                    "z_top":   z_t,
-                })
-            except Exception:
-                continue
-    return doors, windows
+            # Dispose the original bitmap before overwriting the file.
+            bmp.Dispose()
+            cropped.Save(png_path, ImageFormat.Png)
+        finally:
+            cropped.Dispose()
+        return True
+    except Exception:
+        try: bmp.Dispose()
+        except Exception: pass
+        return False
 
 
 # Whitelist of architectural categories to keep visible in the hybrid Revit
@@ -583,6 +551,10 @@ _ARCH_BIC = (
     BuiltInCategory.OST_CurtainWallMullions,
     BuiltInCategory.OST_Ramps,
     BuiltInCategory.OST_StructConnections,
+    # Revit Links - keep visible so linked architectural models render.
+    # Each link's per-category visibility defaults to "By Host View",
+    # so the categories we keep visible above will show inside the link.
+    BuiltInCategory.OST_RvtLinks,
 )
 
 
@@ -695,25 +667,6 @@ def seg_length(p1, p2):
     return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
 
-def wall_polygon(p1, p2, thickness):
-    """Return 4 (x,y) corners of a wall rectangle of given thickness,
-    centered along the line p1->p2. Order: p1-left, p2-left, p2-right, p1-right
-    (winding doesn't matter for fill, but is consistent)."""
-    x1, y1 = p1; x2, y2 = p2
-    dx = x2 - x1; dy = y2 - y1
-    L  = math.hypot(dx, dy)
-    if L < 1e-9: L = 1e-9
-    # Perpendicular unit (left-side when walking p1 -> p2)
-    nx = -dy / L; ny = dx / L
-    h  = thickness / 2.0
-    return [
-        (x1 + nx * h, y1 + ny * h),  # p1 left
-        (x2 + nx * h, y2 + ny * h),  # p2 left
-        (x2 - nx * h, y2 - ny * h),  # p2 right
-        (x1 - nx * h, y1 - ny * h),  # p1 right
-    ]
-
-
 def snap_orthogonal(anchor, target):
     """Project `target` onto the closest of (horizontal, vertical) lines
     through `anchor`. Used to constrain the section line."""
@@ -747,12 +700,34 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self.state_initial  = read_view_range(self.target)
         self.state          = self._copy_state(self.state_initial)
 
-        # Geometry caches
-        self.crop_bounds    = get_view_crop_box_xy(view_plan)
-        c_min = self.crop_bounds[0] if self.crop_bounds else None
-        c_max = self.crop_bounds[1] if self.crop_bounds else None
-        self.walls          = collect_walls(view_plan, c_min, c_max)
-        self.doors, self.windows = collect_doors_windows(self.walls)
+        # ---- Plan crop bounds + transform (data-accurate plan↔world mapping) ----
+        # The rendered plan PNG shows the area inside the view's CropBox.
+        # CropBox.Min/Max are in CROP-LOCAL coords; CropBox.Transform converts
+        # crop-local → world. For axis-aligned plans the Transform is a pure
+        # translation (or identity) and crop-local == world. For rotated plans
+        # (CropBox angled to the world axes — common when buildings are not
+        # north-aligned), crop-local is rotated relative to world; we must
+        # use Transform.Inverse to map world XY to the rendered PNG.
+        try:
+            cb = view_plan.CropBox
+            self.crop_box_min = (float(cb.Min.X), float(cb.Min.Y))
+            self.crop_box_max = (float(cb.Max.X), float(cb.Max.Y))
+            self.crop_box_transform         = cb.Transform
+            self.crop_box_transform_inverse = cb.Transform.Inverse
+            self._crop_box_ok = True
+        except Exception:
+            # Fall back to a generic 100x100 box at origin if the view has no
+            # usable CropBox (rare; would mean the view doesn't crop at all).
+            self.crop_box_min = (-50.0, -50.0)
+            self.crop_box_max = ( 50.0,  50.0)
+            self.crop_box_transform         = Transform.Identity
+            self.crop_box_transform_inverse = Transform.Identity
+            self._crop_box_ok = False
+        # Keep a world-AABB version for the initial section line placement
+        # (it's intuitive: section line spans the on-screen plan horizontally).
+        self.crop_bounds = get_view_crop_box_xy(view_plan)
+        if self.crop_bounds is None:
+            self.crop_bounds = ((-50.0, -50.0), (50.0, 50.0))
         self.disabled_planes = get_disabled_planes(view_plan)
 
         # Plan section line - in MODEL coords (feet)
@@ -770,22 +745,55 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self.use_revit_render = True
         self._cached_revit_render_path = None
 
-        # Section vertical extent - user-editable via Top/Bottom textboxes.
-        # Defaults to project levels + buffers for foundations and roofs.
+        # Section RENDER bounds — large fixed range that the underlying
+        # PNG always covers. Independent of the user's view extent, so
+        # the rendered image (and therefore the building) NEVER changes
+        # size or position when the user drags the top / bottom extent
+        # handles. Re-render only fires when the section LINE itself
+        # changes (different a/b on plan) or far-clip changes.
         if self.all_levels:
-            self.section_z_top = max(l.Elevation for l in self.all_levels) + 15.0
-            self.section_z_bot = min(l.Elevation for l in self.all_levels) - 4.0
+            proj_z_min = float(min(l.Elevation for l in self.all_levels))
+            proj_z_max = float(max(l.Elevation for l in self.all_levels))
+        else:
+            proj_z_min = 0.0
+            proj_z_max = 0.0
+        self.section_render_z_min = proj_z_min - 50.0
+        self.section_render_z_max = proj_z_max + 50.0
+
+        # Section vertical EXTENT — what the user wants to SEE. The
+        # section is rendered with this extent, and the dashed extent
+        # lines sit at the literal top/bottom of the rendered image.
+        if self.all_levels:
+            self.section_z_top = proj_z_max + 15.0
+            self.section_z_bot = proj_z_min - 4.0
         else:
             self.section_z_top = 25.0
             self.section_z_bot = -10.0
+        # Live preview of an extent drag in progress. While the drag
+        # is going, ONLY the dragged extent line follows the cursor;
+        # levels, plane lines, and the OTHER extent line stay anchored
+        # to the existing image (which still reflects the OLD extent).
+        # On release, we commit the preview to section_z_top/_bot and
+        # re-render the section so the new bbox renders properly.
+        self._ext_preview = None      # None or {'key': 'extent_top'|'_bot', 'z': float}
 
-        # Cache plan bounds ONCE (crop + walls + floors). The section line is
-        # deliberately excluded so dragging it doesn't rescale the plan.
-        self.plan_bounds    = self._compute_plan_bounds()
+        # Snap settings (user-editable in the left sidebar)
+        self.snap_enabled     = True
+        self.snap_distance_ft = 0.5   # 6 inches default
+
+        # Cached image dimensions for the rendered plan PNG (set on load).
+        # Used to compute where the image is actually displayed within the
+        # plan canvas (Stretch=Uniform letterbox handling).
+        self._plan_img_natural_w = None
+        self._plan_img_natural_h = None
 
         # Drag state (transient - reset between drags)
         self._plan_drag     = None    # dict: kind ('endpoint_a'/'endpoint_b'/'body'), ...
         self._sec_drag      = None    # dict: kind ('top'/'cut'/'bot'/'vd'), start_y, start_z
+        # Plan pan drag (middle-mouse) - separate from left-drag state
+        self._plan_pan_drag = None    # dict: 'start_x'/'_y' window coords, 'init_tx'/'_ty'
+        # Section pan drag (middle-mouse) - same shape as the plan pan drag
+        self._sec_pan_drag  = None
 
         # Suppress event re-entry
         self._suppress_editor_events = False
@@ -803,11 +811,11 @@ class ViewRangeHelperForm(forms.WPFWindow):
             self._draw_plan()
             self._draw_section()
             self._update_status()
-            # Kick off the first Revit-rendered section image
-            try:
-                self._refresh_revit_render()
-            except Exception:
-                pass
+            # Kick off the first Revit-rendered plan + section images
+            try:    self._refresh_revit_plan()
+            except Exception: pass
+            try:    self._refresh_revit_render()
+            except Exception: pass
         self.Loaded += _on_loaded
 
         # Repaint on resize so the canvases stretch
@@ -830,12 +838,6 @@ class ViewRangeHelperForm(forms.WPFWindow):
             # Pad inward by 5%
             pad = (mxx - mnx) * 0.05
             return [(mnx + pad, cy), (mxx - pad, cy)]
-        # Fall back to spanning the wall extents
-        if self.walls:
-            xs = [p[0] for w in self.walls for p in (w['p1'], w['p2'])]
-            ys = [p[1] for w in self.walls for p in (w['p1'], w['p2'])]
-            cy = (min(ys) + max(ys)) / 2.0
-            return [(min(xs), cy), (max(xs), cy)]
         return [(-50.0, 0.0), (50.0, 0.0)]
 
     # ----------------------------------------------------------------------
@@ -897,6 +899,12 @@ class ViewRangeHelperForm(forms.WPFWindow):
             tb.LostFocus += self._on_offset_lost_focus
             tb.KeyDown   += self._on_offset_keydown
 
+        # Snap controls in the left sidebar
+        self.chk_snap.Checked    += self._on_snap_toggle
+        self.chk_snap.Unchecked  += self._on_snap_toggle
+        self.txt_snap_distance.LostFocus += self._on_snap_distance_lost_focus
+        self.txt_snap_distance.KeyDown   += self._on_snap_distance_keydown
+
         # Footer
         self.btn_apply.Click  += self._on_apply
         self.btn_revert.Click += self._on_revert
@@ -904,20 +912,30 @@ class ViewRangeHelperForm(forms.WPFWindow):
 
         # Plan toolbar
         self.btn_recenter_section.Click += self._on_recenter_section
+        self.btn_reset_zoom.Click       += self._on_reset_plan_zoom
 
-        # Manual section refresh
-        self.btn_refresh_render.Click   += lambda s, e: self._refresh_revit_render()
+        # Manual section refresh + zoom reset
+        self.btn_refresh_render.Click      += lambda s, e: self._refresh_revit_render()
+        self.btn_reset_section_zoom.Click  += self._on_reset_section_zoom
 
         # Canvas mouse - bound at canvas level; child shapes set their own cursors
         self.cnv_plan.MouseLeftButtonDown += self._plan_mouse_down
         self.cnv_plan.MouseMove           += self._plan_mouse_move
         self.cnv_plan.MouseLeftButtonUp   += self._plan_mouse_up
         self.cnv_plan.MouseLeave          += self._plan_mouse_up
+        # Zoom + pan
+        self.cnv_plan.MouseWheel          += self._plan_mouse_wheel
+        self.cnv_plan.MouseDown           += self._plan_mouse_down_any
+        self.cnv_plan.MouseUp             += self._plan_mouse_up_any
 
         self.cnv_section.MouseLeftButtonDown += self._sec_mouse_down
         self.cnv_section.MouseMove           += self._sec_mouse_move
         self.cnv_section.MouseLeftButtonUp   += self._sec_mouse_up
         self.cnv_section.MouseLeave          += self._sec_mouse_up
+        # Section zoom + pan (mirrors plan: wheel = zoom, middle drag = pan)
+        self.cnv_section.MouseWheel          += self._sec_mouse_wheel
+        self.cnv_section.MouseDown           += self._sec_mouse_down_any
+        self.cnv_section.MouseUp             += self._sec_mouse_up_any
 
         # Lock banner
         self.btn_detach_view_range.Click += self._on_detach_view_range
@@ -938,10 +956,49 @@ class ViewRangeHelperForm(forms.WPFWindow):
                 self._select_combo_by_tag(combo, target)
                 # Offset
                 txt.Text = fmt_feet_in(s['offset'])
+            # Snap distance + checkbox
+            self.chk_snap.IsChecked       = bool(self.snap_enabled)
+            self.txt_snap_distance.Text   = fmt_feet_in(self.snap_distance_ft)
             # Validate top > cut > bot ordering
             self._validate_state()
         finally:
             self._suppress_editor_events = False
+
+    # ------------------ snap helpers ------------------------------------
+
+    def _snap_value(self, value):
+        """Snap a feet value to self.snap_distance_ft if snap is enabled."""
+        if not self.snap_enabled or self.snap_distance_ft is None or self.snap_distance_ft <= 0:
+            return value
+        return snap_feet(value, self.snap_distance_ft)
+
+    def _on_snap_toggle(self, sender, e):
+        if self._suppress_editor_events: return
+        self.snap_enabled = bool(self.chk_snap.IsChecked)
+
+    def _on_snap_distance_lost_focus(self, sender, e):
+        if self._suppress_editor_events: return
+        self._commit_snap_distance()
+
+    def _on_snap_distance_keydown(self, sender, e):
+        try:
+            if e.Key == Key.Enter:
+                self._commit_snap_distance()
+                e.Handled = True
+        except Exception:
+            pass
+
+    def _commit_snap_distance(self):
+        val = parse_offset(self.txt_snap_distance.Text)
+        if val is None or val < 0:
+            self._suppress_editor_events = True
+            self.txt_snap_distance.Text = fmt_feet_in(self.snap_distance_ft)
+            self._suppress_editor_events = False
+            return
+        self.snap_distance_ft = val
+        self._suppress_editor_events = True
+        self.txt_snap_distance.Text = fmt_feet_in(val)
+        self._suppress_editor_events = False
 
     def _editor_rows(self):
         return (
@@ -978,6 +1035,9 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._draw_section()
         self._update_status(dirty=True)
         self._validate_state()
+        # The plan render reflects the cut plane so any view range plane
+        # change requires a new plan PNG.
+        self._refresh_revit_plan()
 
     def _on_offset_lost_focus(self, sender, e):
         if self._suppress_editor_events:
@@ -1007,8 +1067,7 @@ class ViewRangeHelperForm(forms.WPFWindow):
             tb.Text = fmt_feet_in(self.state[key]['offset'])
             self._suppress_editor_events = False
             return
-        if self.chk_snap_6in.IsChecked:
-            val = snap_feet_to_6in(val)
+        val = self._snap_value(val)
         self.state[key]['offset'] = val
         # Reformat to canonical
         self._suppress_editor_events = True
@@ -1017,6 +1076,7 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._draw_section()
         self._update_status(dirty=True)
         self._validate_state()
+        self._refresh_revit_plan()
 
     def _validate_state(self):
         """Show an inline warning when the plane elevations don't make
@@ -1161,12 +1221,14 @@ class ViewRangeHelperForm(forms.WPFWindow):
         target_label = "template '{}'".format(self.target.Name) \
             if self.target is not self.view_plan else "view"
         self._update_status(extra="Applied to {}.".format(target_label))
+        self._refresh_revit_plan()
 
     def _on_revert(self, s, e):
         self.state = self._copy_state(self.state_initial)
         self._refresh_editor_from_state()
         self._draw_section()
         self._update_status(extra="Reverted to last applied values.")
+        self._refresh_revit_plan()
 
     def _on_close(self, s, e):
         self.Close()
@@ -1177,6 +1239,178 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._draw_section()
         if self.use_revit_render:
             self._refresh_revit_render()
+
+    # ------------------------------------------------------------------
+    # Revit plan render - re-renders the active plan view's PNG with the
+    # in-progress view range applied, so the user can see what the plan
+    # WILL look like once they hit Apply.
+    # ------------------------------------------------------------------
+
+    def _refresh_revit_plan(self):
+        """Render the active plan view with the pending view range applied
+        and load it into the inline image. Called whenever a view range
+        plane changes so the user sees the resulting plan live."""
+        try:
+            path = self._render_revit_plan()
+        except Exception as ex:
+            self.txt_plan_hint.Text = "Plan render failed: {}".format(ex)
+            return
+        if not path or not os.path.exists(path):
+            self.txt_plan_hint.Text = "Plan render produced no image."
+            return
+        try:
+            self._load_plan_image(path)
+        except Exception as ex:
+            self.txt_plan_hint.Text = "Could not load plan image: {}".format(ex)
+            return
+        self.txt_plan_hint.Text = ("Drag the red section line to slide it. Drag an endpoint to "
+                                   "rotate or extend it. Click the swap icon to flip view direction.")
+
+    def _load_plan_image(self, path):
+        bi = BitmapImage()
+        bi.BeginInit()
+        bi.UriSource = Uri(path, UriKind.Absolute)
+        bi.CacheOption = BitmapCacheOption.OnLoad
+        bi.EndInit()
+        bi.Freeze()
+        self.img_plan.Source = bi
+        try:
+            self._plan_img_natural_w = float(bi.PixelWidth)
+            self._plan_img_natural_h = float(bi.PixelHeight)
+        except Exception:
+            self._plan_img_natural_w = self._plan_img_natural_h = None
+        self._draw_plan()
+
+    def _plan_image_layout(self):
+        """Where the rendered plan image is actually displayed inside the
+        plan canvas (Stretch=Uniform letterboxing). Returns
+        (offset_x, offset_y, width, height). Falls back to the full canvas
+        if no image has loaded yet."""
+        cw = max(1.0, float(self.cnv_plan.ActualWidth))
+        ch = max(1.0, float(self.cnv_plan.ActualHeight))
+        nw = self._plan_img_natural_w
+        nh = self._plan_img_natural_h
+        if not nw or not nh or nw <= 0 or nh <= 0:
+            return (0.0, 0.0, cw, ch)
+        img_aspect    = nw / nh
+        canvas_aspect = cw / ch
+        if img_aspect > canvas_aspect:
+            display_w = cw
+            display_h = cw / img_aspect
+            return (0.0, (ch - display_h) / 2.0, display_w, display_h)
+        display_h = ch
+        display_w = ch * img_aspect
+        return ((cw - display_w) / 2.0, 0.0, display_w, display_h)
+
+    def _render_revit_plan(self):
+        """Apply the pending view range to the active plan view inside a
+        TransactionGroup, force CropBoxActive=True so the rendered image
+        matches the crop bounds we use for overlay coordinates, export to
+        PNG, then roll back so nothing persists in the model."""
+        view = self.view_plan
+        tmp_dir = tempfile.mkdtemp(prefix="vrh_plan_")
+        out_base = os.path.join(tmp_dir, "preview")
+
+        tg = TransactionGroup(doc, "Render plan preview")
+        tg.Start()
+        try:
+            t = Transaction(doc, "Apply pending view range for preview")
+            t.Start()
+            try:
+                # Force the crop on so the exported image matches our
+                # overlay bounds EXACTLY. The two settings below together
+                # guarantee the rendered PNG covers exactly the model
+                # CropBox area:
+                #   - CropBoxActive=True: render is bounded by CropBox
+                #   - AnnotationCropActive=False: render isn't expanded
+                #     by an annotation crop offset (which would shift the
+                #     content and cause the section line on the plan to
+                #     no longer line up with what's in the section)
+                #   - CropBoxVisible=False: crop boundary line isn't drawn
+                try:
+                    if not view.CropBoxActive:
+                        view.CropBoxActive = True
+                    try:    view.CropBoxVisible = False
+                    except Exception: pass
+                    try:
+                        mgr = view.GetCropRegionShapeManager()
+                        # Some Revit builds expose this as a property,
+                        # others as Get/Set methods. Try both.
+                        try:
+                            if getattr(mgr, 'AnnotationCropActive', False):
+                                mgr.AnnotationCropActive = False
+                        except Exception:
+                            try:
+                                if mgr.GetAnnotationCropActive():
+                                    mgr.SetAnnotationCropActive(False)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Apply the in-progress view range
+                pvr = view.GetViewRange()
+                for key, plane in (
+                    ("top", PlanViewPlane.TopClipPlane),
+                    ("cut", PlanViewPlane.CutPlane),
+                    ("bot", PlanViewPlane.BottomClipPlane),
+                    ("vd",  PlanViewPlane.ViewDepthPlane),
+                ):
+                    if key in self.disabled_planes:
+                        continue
+                    s = self.state[key]
+                    try: pvr.SetLevelId(plane, s["level_id"])
+                    except Exception: pass
+                    try: pvr.SetOffset(plane, float(s["offset"]))
+                    except Exception: pass
+                view.SetViewRange(pvr)
+                t.Commit()
+            except Exception as ex:
+                try: t.RollBack()
+                except Exception: pass
+                tg.RollBack()
+                self.txt_plan_hint.Text = "Plan setup failed: {}".format(ex)
+                return None
+
+            opts = ImageExportOptions()
+            opts.ZoomType         = ZoomFitType.FitToPage
+            # Higher PixelSize = more pixels per foot = less alignment error
+            # from any residual border / fractional-pixel rendering.
+            opts.PixelSize        = 3000
+            opts.ImageResolution  = ImageResolution.DPI_150
+            opts.ExportRange      = ExportRange.SetOfViews
+            from System.Collections.Generic import List as NetList
+            view_list = NetList[ElementId]()
+            view_list.Add(view.Id)
+            opts.SetViewsAndSheets(view_list)
+            opts.FilePath              = out_base
+            opts.HLRandWFViewsFileType = ImageFileType.PNG
+            try:
+                doc.ExportImage(opts)
+            except Exception as ex:
+                tg.RollBack()
+                self.txt_plan_hint.Text = "Plan export failed: {}".format(ex)
+                return None
+        finally:
+            try: tg.RollBack()
+            except Exception: pass
+
+        # Locate the exported PNG, then trim Revit's white margins so that
+        # the bitmap's pixel bounds match the rendered crop area exactly.
+        # Without this, the PNG content sits inset from the bitmap edges,
+        # and our world↔canvas math drifts proportionally with distance
+        # from the center of the view.
+        try:
+            for f in os.listdir(tmp_dir):
+                if f.lower().endswith('.png'):
+                    png_path = os.path.join(tmp_dir, f)
+                    try: trim_png_white_margins(png_path)
+                    except Exception: pass
+                    return png_path
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Revit section render
@@ -1212,38 +1446,115 @@ class ViewRangeHelperForm(forms.WPFWindow):
         bi.CacheOption = BitmapCacheOption.OnLoad
         bi.EndInit()
         bi.Freeze()
-        self.img_section.Source = bi
-        # Cache natural image dimensions so the overlay can be positioned
-        # to align with the rendered architecture (Stretch="Uniform" causes
-        # letterboxing whenever the canvas and image aspects don't match).
+        # Cache natural dims FIRST so _section_image_layout can use them
+        # to compute the slot height that matches the new PNG's aspect.
         try:
             self._img_natural_w = float(bi.PixelWidth)
             self._img_natural_h = float(bi.PixelHeight)
         except Exception:
             self._img_natural_w = self._img_natural_h = None
-        # Repaint the overlay so A/B chips and view range planes align
+        # Apply the new geometry BEFORE swapping the source, so the new
+        # bitmap is rendered into the new (correctly-shaped) slot from
+        # frame zero — no flash of the new content stretched into the
+        # old slot.
+        self._update_section_image_geometry()
+        self.img_section.Source = bi
+        # Repaint the overlay (A/B chips, plane labels, etc.) so they
+        # align with the newly positioned image.
         self._draw_section()
 
+    def _update_section_image_geometry(self):
+        """Push canvas-local position + size from _section_image_layout
+        onto the img_section element. Stretch.Fill (no letterbox) so
+        the PNG content fills the slot exactly — building elements at
+        z=B always land at the slot pixel corresponding to z=B per the
+        bbox math, which equals canvas_anchor_y - K*(B - anchor_z).
+        Building stays nailed in place when the user drags an extent
+        handle (image grows / shrinks; building doesn't move)."""
+        try:
+            ox, oy, dw, dh = self._section_image_layout()
+            self.img_section.Stretch             = Stretch.Fill
+            self.img_section.HorizontalAlignment = HorizontalAlignment.Left
+            self.img_section.VerticalAlignment   = VerticalAlignment.Top
+            self.img_section.Width  = max(1.0, dw)
+            self.img_section.Height = max(1.0, dh)
+            self.img_section.Margin = Thickness(ox, oy, 0, 0)
+        except Exception:
+            pass
+
+    def _section_anchor_z(self):
+        """Model elevation that stays glued to a fixed canvas Y, so
+        levels / planes / building elements DO NOT move when the user
+        drags the section's top / bottom extent handles.
+
+        Midpoint of project levels (or 0 if none). Centering on the
+        midpoint puts the building's middle at the canvas center, so
+        for tall buildings the upper levels and the lower levels are
+        BOTH within the visible canvas instead of one set being
+        pushed off-screen."""
+        try:
+            if self.all_levels:
+                elevs = [l.Elevation for l in self.all_levels]
+                return float((min(elevs) + max(elevs)) / 2.0)
+        except Exception:
+            pass
+        return 0.0
+
+    def _section_canvas_scale(self):
+        """Pixels per foot for the section overlay. Uses the FULL inner
+        canvas width (not the gutter-narrowed visible area) so the
+        building is rendered at the same scale as Revit's native
+        section view. Section line endpoints fall under the gutters,
+        but the building proper sits at the right size in the middle.
+
+        FIXED with respect to extent changes (depends only on L), so
+        levels and planes stay glued to their canvas Y when the user
+        drags the top / bottom extent handles."""
+        try:
+            cw = float(self.cnv_section.ActualWidth)
+        except Exception:
+            cw = 700.0
+        if cw < 50: cw = 700.0
+        L = max(0.001, seg_length(self.section_line[0], self.section_line[1]))
+        return cw / L
+
     def _section_image_layout(self):
-        """Compute where the rendered image is actually displayed inside the
-        canvas (with Stretch=Uniform letterboxing). Returns
-        (offset_x, offset_y, width, height). Falls back to the full canvas
-        if no image has loaded yet."""
-        cw = max(1.0, float(self.cnv_section.ActualWidth))
-        ch = max(1.0, float(self.cnv_section.ActualHeight))
-        nw = getattr(self, '_img_natural_w', None)
-        nh = getattr(self, '_img_natural_h', None)
-        if not nw or not nh or nw <= 0 or nh <= 0:
-            return (0.0, 0.0, cw, ch)
-        img_aspect    = nw / nh
-        canvas_aspect = cw / ch
-        if img_aspect > canvas_aspect:
-            display_w = cw
-            display_h = cw / img_aspect
-            return (0.0, (ch - display_h) / 2.0, display_w, display_h)
-        display_h = ch
-        display_w = ch * img_aspect
-        return ((cw - display_w) / 2.0, 0.0, display_w, display_h)
+        """Position + size of the rendered section image in canvas-local
+        coords using a FIXED scale anchor. Returns (ox, oy, dw, dh).
+
+        The math:
+          canvas_scale = cw / L  (constant for a given section line)
+          dw           = cw      (image fills canvas width)
+          dh           = canvas_scale × z_span  (varies with extent)
+          oy           = canvas_anchor_y - (z_max - anchor_z) × canvas_scale
+
+        anchor_z (lowest project level) is glued to canvas_anchor_y
+        (canvas_h × 0.85, near the bottom) for the entire session. With
+        this, y_at(z) = canvas_anchor_y - (z - anchor_z) × canvas_scale
+        is INDEPENDENT of z_min / z_max — building elements, levels,
+        and plane lines all stay at their canvas Y when the user drags
+        the top or bottom extent handle. Only the image's top edge
+        moves (to expose more or less area)."""
+        try:
+            cw = float(self.cnv_section.ActualWidth)
+            ch = float(self.cnv_section.ActualHeight)
+        except Exception:
+            cw, ch = 700.0, 400.0
+        if cw < 50: cw = 700.0
+        if ch < 50: ch = 400.0
+        L = max(0.001, seg_length(self.section_line[0], self.section_line[1]))
+        canvas_scale = cw / L
+        z_min, z_max = self._section_z_range()
+        z_span = max(0.001, z_max - z_min)
+        if self.all_levels:
+            anchor_z = float(min(l.Elevation for l in self.all_levels))
+        else:
+            anchor_z = 0.0
+        canvas_anchor_y = ch * 0.85
+        image_w   = cw
+        image_h   = canvas_scale * z_span
+        image_top = canvas_anchor_y - (z_max - anchor_z) * canvas_scale
+        return (0.0, image_top, image_w, image_h)
 
     def _render_revit_section(self):
         """Create a temporary ViewSection at the current section line +
@@ -1255,28 +1566,36 @@ class ViewRangeHelperForm(forms.WPFWindow):
         if L < 1e-6:
             return None
 
-        # Build the section's local coordinate system in the model.
-        # Critical: it MUST be right-handed (BasisX X BasisY = BasisZ).
-        # If we hand Revit a left-handed system it silently flips it,
-        # which inverts the view direction - so a section the user expects
-        # to look "east" actually looks "west" and they see the wrong wall
-        # in the distance. This was the cut-loss bug.
-        ux_m = dx / L; uy_m = dy / L                    # along-section A->B
-
-        # When user has section_flip on, swap BasisX direction (B->A).
-        # That's how Revit flips a section: BasisX flips, BasisZ follows
-        # via cross product so the system stays right-handed.
-        if self.section_flip:
-            basisX = XYZ(-ux_m, -uy_m, 0)
+        # Section coordinate system - Revit-standard "Convention B":
+        #   BasisX = section_dir (A->B)            (right side of section view)
+        #   BasisY = up
+        #   BasisZ = BasisX x BasisY               (right-handed; into model)
+        #   Origin Z = z_min  (bottom of vertical extent)
+        #   bbox.Min = (-L/2, 0, 0)                near clip at section line
+        #   bbox.Max = (+L/2, height, +far_clip)   far clip into the model
+        #
+        # Default (no flip): looking "right of A->B walking"
+        #   - A=south, B=north section -> look east (matches Revit default)
+        # When flipped: BasisX = -section_dir, view direction reverses,
+        #   system stays right-handed.
+        ux_m = dx / L; uy_m = dy / L
+        if not self.section_flip:
+            basisX = XYZ(ux_m, uy_m, 0)                 # A -> B direction
         else:
-            basisX = XYZ(ux_m, uy_m, 0)
+            basisX = XYZ(-ux_m, -uy_m, 0)               # B -> A direction
         section_up = XYZ(0, 0, 1)
-        basisZ     = basisX.CrossProduct(section_up)    # right-handed
+        basisZ     = basisX.CrossProduct(section_up)    # right-handed, into model
 
+        # Render with the USER's current view extent. Image fills the
+        # canvas via Stretch.Uniform; overlay derives Y positions from
+        # the same layout, so image and overlay always align perfectly.
         z_min, z_max = self._section_z_range()
+        # Origin Z at the BOTTOM of the rendered extent. With
+        # bbox.Min.Y = 0 and Max.Y = height, the section view spans
+        # exactly from z_min to z_max in model elevation.
         origin = XYZ((a[0] + b[0]) / 2.0,
                      (a[1] + b[1]) / 2.0,
-                     (z_min + z_max) / 2.0)
+                     z_min)
 
         transform = Transform.Identity
         transform.Origin = origin
@@ -1285,24 +1604,33 @@ class ViewRangeHelperForm(forms.WPFWindow):
         transform.BasisZ = basisZ
 
         half_w = L / 2.0
-        half_h = max(1.0, (z_max - z_min) / 2.0)
+        height = max(1.0, z_max - z_min)
         far    = max(self.far_clip_offset, 1.0)
 
-        # Section line at the front clip (Max.Z = 0). Cut walls that
-        # straddle Z=0 render with poché correctly with right-handed coords.
+        # Bbox spans EXACTLY from A to B in basisX with no horizontal
+        # padding. Data accuracy: what the user draws as the section line
+        # on the plan is precisely what's cut. The screen-anchored gutters
+        # on cnv_section_screen handle label space — they don't need any
+        # model-coord padding to back them up. (Padding remains a hook in
+        # _section_render_padding for future use, currently 0/0.)
+        left_pad, right_pad = self._section_render_padding()
+
         bbox = BoundingBoxXYZ()
         bbox.Transform = transform
-        bbox.Min = XYZ(-half_w, -half_h, -far)
-        bbox.Max = XYZ(+half_w, +half_h,  0.0)
+        bbox.Min = XYZ(-half_w - left_pad,  0,      0)
+        bbox.Max = XYZ(+half_w + right_pad, height, far)
 
-        # Find a section ViewFamilyType
-        vft_id = None
-        for vft in FilteredElementCollector(doc).OfClass(ViewFamilyType):
-            try:
-                if vft.ViewFamily == ViewFamily.Section:
-                    vft_id = vft.Id; break
-            except Exception:
-                continue
+        # Find a section ViewFamilyType — cache it on first use; the
+        # project's view family types don't change during a session.
+        vft_id = getattr(self, '_section_vft_id_cache', None)
+        if vft_id is None:
+            for vft in FilteredElementCollector(doc).OfClass(ViewFamilyType):
+                try:
+                    if vft.ViewFamily == ViewFamily.Section:
+                        vft_id = vft.Id; break
+                except Exception:
+                    continue
+            self._section_vft_id_cache = vft_id
         if vft_id is None:
             return None
 
@@ -1319,32 +1647,51 @@ class ViewRangeHelperForm(forms.WPFWindow):
             t.Start()
             try:
                 section = ViewSection.CreateSection(doc, vft_id, bbox)
-                # Force Hidden Line + Coarse so the section renders cuts
-                # consistently regardless of any default view template that
-                # might have been applied. These two settings most
-                # influence whether cut walls show poché vs being drawn
-                # over by projected elements.
+                # Drop any project default view template - if one was
+                # applied automatically, it can override visibility / display
+                # style and produce inconsistent renders.
+                try:
+                    section.ViewTemplateId = ElementId.InvalidElementId
+                except Exception:
+                    try: section.ViewTemplateId = ElementId(-1)
+                    except Exception: pass
+                # Force Hidden Line + Coarse so cut walls render with poché.
+                # Try the property first, then the BuiltInParameter as backup
+                # in case the property isn't writable in this Revit version.
                 try:
                     section.DisplayStyle = DisplayStyle.HiddenLine
                 except Exception:
-                    pass
+                    try:
+                        p = section.get_Parameter(BuiltInParameter.MODEL_GRAPHICS_STYLE)
+                        if p: p.Set(2)   # 2 = Hidden Line
+                    except Exception: pass
                 try:
                     section.DetailLevel = ViewDetailLevel.Coarse
                 except Exception:
-                    pass
+                    try:
+                        p = section.get_Parameter(BuiltInParameter.VIEW_DETAIL_LEVEL)
+                        if p: p.Set(1)   # 1 = Coarse
+                    except Exception: pass
                 # Hybrid mode: hide everything except architectural categories.
-                # Our overlay handles levels and view range planes, so we also
-                # hide Revit's own level lines to avoid double-up.
+                # Hide the crop region annotation line so it doesn't eat
+                # content area in the rendered image.
+                try:    section.CropBoxVisible = False
+                except Exception: pass
                 _apply_arch_only_visibility(section)
                 t.Commit()
-            except Exception:
+            except Exception as ex:
                 try: t.RollBack()
                 except Exception: pass
-                raise
+                # Surface the actual exception so we can debug section creation
+                tg.RollBack()
+                self.txt_section_hint.Text = "Section create failed: {}".format(ex)
+                return None
 
             opts = ImageExportOptions()
             opts.ZoomType         = ZoomFitType.FitToPage
-            opts.PixelSize        = 1400
+            # Higher PixelSize = more pixels per foot = less alignment
+            # error from any residual border / fractional-pixel rendering.
+            opts.PixelSize        = 3000
             opts.ImageResolution  = ImageResolution.DPI_150
             opts.ExportRange      = ExportRange.SetOfViews
             from System.Collections.Generic import List as NetList
@@ -1354,16 +1701,29 @@ class ViewRangeHelperForm(forms.WPFWindow):
             opts.FilePath              = out_base
             opts.HLRandWFViewsFileType = ImageFileType.PNG
 
-            doc.ExportImage(opts)
+            try:
+                doc.ExportImage(opts)
+            except Exception as ex:
+                tg.RollBack()
+                self.txt_section_hint.Text = "Image export failed: {}".format(ex)
+                return None
         finally:
             try: tg.RollBack()
             except Exception: pass
 
-        # Revit appends the view name to the file path, so scan the dir
+        # Locate the exported PNG. Do NOT trim — for the SECTION the
+        # bbox legitimately includes empty space above and below the
+        # building (the user's view extent), and trimming would remove
+        # that empty space, leaving only the building. Stretching the
+        # trimmed PNG into the slot would then put building elements
+        # 30-70 px below their proper canvas Y, breaking alignment with
+        # level / plane markers. Plan PNG still gets trimmed (its bbox
+        # = building footprint, no empty space).
         try:
             for f in os.listdir(tmp_dir):
                 if f.lower().endswith('.png'):
-                    return os.path.join(tmp_dir, f)
+                    png_path = os.path.join(tmp_dir, f)
+                    return png_path
         except Exception:
             pass
         return None
@@ -1384,216 +1744,101 @@ class ViewRangeHelperForm(forms.WPFWindow):
     # PLAN canvas - drawing & dragging
     # ======================================================================
 
-    def _compute_plan_bounds(self):
-        """Build the static plan extent from crop + walls. The
-        section line is intentionally excluded so dragging it does NOT
-        cause the plan to rescale or pan around it."""
-        xs = []; ys = []
-        if self.crop_bounds is not None:
-            (mnx, mny), (mxx, mxy) = self.crop_bounds
-            xs.extend([mnx, mxx]); ys.extend([mny, mxy])
-        for w in self.walls:
-            xs.extend([w['p1'][0], w['p2'][0]])
-            ys.extend([w['p1'][1], w['p2'][1]])
-        if not xs:
-            return ((-50.0, -50.0), (50.0, 50.0))
-        mnx, mxx = min(xs), max(xs); mny, mxy = min(ys), max(ys)
-        pad = max(2.0, max(mxx - mnx, mxy - mny) * 0.04)
-        return ((mnx - pad, mny - pad), (mxx + pad, mxy + pad))
-
     def _plan_transform(self):
-        """Return a (model_to_canvas, canvas_to_model, w, h, scale) tuple.
-        Uses the cached self.plan_bounds so the plan stays fixed while the
-        section line is dragged."""
+        """Return a (model_to_canvas, canvas_to_model, w, h, scale) tuple
+        for the plan canvas. m2c returns INTRINSIC canvas-local coords
+        (no zoom / pan applied). The actual zoom + pan lives on the parent
+        Grid's RenderTransform — so both the image AND the canvas (and
+        everything drawn on it) get transformed together. That means the
+        section line / bubbles stay glued to the building at the pixel
+        level; there's no sub-pixel drift between two independently
+        transformed elements.
+
+        DATA ACCURACY: m2c/c2m use the CropBox's LOCAL coord system + its
+        Transform — so a click at canvas position X corresponds to the
+        WORLD position that's actually under that pixel of the rendered
+        PNG, regardless of whether the plan view is rotated. The PNG
+        Revit exports (with CropBoxActive=True) is precisely the
+        rectangle [cb.Min.X, cb.Max.X] × [cb.Min.Y, cb.Max.Y] in
+        crop-local coords, so:
+            world → crop-local: Transform.Inverse
+            crop-local → image fraction: (lx - cb.Min.X) / (cb.Max.X - cb.Min.X)
+            image fraction → canvas: ox + frac * dw
+        For un-rotated views, Transform is identity (or pure translation)
+        and the math reduces to the simple AABB case. For rotated views,
+        the PNG content sits where it actually is on screen — section
+        lines stop bleeding off the building.
+
+        WPF's hit testing automatically inverts the Grid transform when
+        you call e.GetPosition(self.cnv_plan), so cursor positions also
+        come in canvas-local coords; c2m is the data-accurate inverse.
+
+        Because the Grid transform scales children visually, drawing
+        helpers must multiply all SIZES (radii, stroke widths, font
+        sizes, dash arrays) by self._plan_inv_scale so bubbles / lines
+        appear at constant screen-pixel sizes regardless of zoom."""
+        ox, oy, dw, dh = self._plan_image_layout()
         cw = max(1.0, float(self.cnv_plan.ActualWidth))
         ch = max(1.0, float(self.cnv_plan.ActualHeight))
-        margin = 16.0
 
-        (mnx, mny), (mxx, mxy) = self.plan_bounds
-        span_x = max(0.001, mxx - mnx); span_y = max(0.001, mxy - mny)
-        s = min((cw - 2 * margin) / span_x, (ch - 2 * margin) / span_y)
-
-        # Center the content within the canvas
-        used_w = span_x * s; used_h = span_y * s
-        ox = (cw - used_w) / 2.0
-        oy = (ch - used_h) / 2.0
+        cmnx, cmny = self.crop_box_min
+        cmxx, cmxy = self.crop_box_max
+        span_x = max(0.001, cmxx - cmnx)
+        span_y = max(0.001, cmxy - cmny)
+        inv_t  = self.crop_box_transform_inverse
+        fwd_t  = self.crop_box_transform
 
         def m2c(mx, my):
-            cx = ox + (mx - mnx) * s
-            cy = ch - (oy + (my - mny) * s)   # flip Y so north is up
-            return cx, cy
+            # World XY → CropBox local XY → image fraction → canvas-local
+            p = inv_t.OfPoint(XYZ(mx, my, 0))
+            lx = p.X; ly = p.Y
+            cx_img = ox + (lx - cmnx) / span_x * dw
+            cy_img = oy + (cmxy - ly) / span_y * dh   # flip Y so north is up
+            return cx_img, cy_img
 
         def c2m(px, py):
-            mx = mnx + (px - ox) / s
-            my = mny + ((ch - py) - oy) / s
-            return mx, my
+            # Canvas-local → image fraction → CropBox local → world
+            fx = (px - ox) / max(0.001, dw)
+            fy = (py - oy) / max(0.001, dh)
+            lx = cmnx + fx * span_x
+            ly = cmxy - fy * span_y
+            p  = fwd_t.OfPoint(XYZ(lx, ly, 0))
+            return p.X, p.Y
 
-        return m2c, c2m, cw, ch, s
+        # px-per-ft at zoom = 1 (intrinsic). Multiply by current zoom for
+        # actual on-screen scale; we expose the intrinsic value here.
+        scale = (dw / span_x) if span_x > 0 else 1.0
+        return m2c, c2m, cw, ch, scale
+
+    def _current_plan_inv_scale(self):
+        """Inverse of the plan Grid's current zoom. Multiply lengths by
+        this when drawing on cnv_plan so they stay constant size on
+        screen (because the Grid scales everything visually)."""
+        try:
+            s = float(self.trf_plan_scale.ScaleX)
+        except Exception:
+            s = 1.0
+        if s < 1e-6: s = 1.0
+        return 1.0 / s
 
     def _draw_plan(self):
         self.cnv_plan.Children.Clear()
         m2c, _c2m, cw, ch, scale = self._plan_transform()
+        # Stash the current inverse zoom so every overlay-drawing helper
+        # can scale its sizes back down (the parent Grid scales them up).
+        self._plan_inv_scale = self._current_plan_inv_scale()
+        inv_s = self._plan_inv_scale
+        # The rendered plan PNG sits behind cnv_plan (img_plan element).
+        # The canvas just hosts overlays: section line, far clip, bubbles,
+        # flip icon. Walls / doors / windows / crop boundary all show up
+        # in the rendered image itself.
 
-        # Crop boundary (dashed)
-        if self.crop_bounds is not None:
-            (mnx, mny), (mxx, mxy) = self.crop_bounds
-            corners = [(mnx, mny), (mxx, mny), (mxx, mxy), (mnx, mxy)]
-            for i in range(4):
-                a = corners[i]; b = corners[(i + 1) % 4]
-                ax, ay = m2c(*a); bx, by = m2c(*b)
-                ln = WLine()
-                ln.X1 = ax; ln.Y1 = ay; ln.X2 = bx; ln.Y2 = by
-                ln.Stroke = wpf_brush(COLOR_CROP)
-                ln.StrokeThickness = 1.0
-                ln.StrokeDashArray = self._dash_array([4, 3])
-                self.cnv_plan.Children.Add(ln)
+        # Far clip line (dashed parallel showing how far ahead of the
+        # section line the section preview pulls elements from)
+        self._draw_plan_far_clip_line(m2c, inv_s)
 
-        # Walls - filled polygons sized by real thickness
-        for w in self.walls:
-            corners = wall_polygon(w['p1'], w['p2'], w['thickness'])
-            poly = WPolygon()
-            pts = PointCollection()
-            for (mx, my) in corners:
-                cxp, cyp = m2c(mx, my)
-                pts.Add(WPoint(cxp, cyp))
-            poly.Points = pts
-            poly.Fill   = wpf_brush(COLOR_WALL_FILL)
-            poly.Stroke = wpf_brush(COLOR_WALL_OUTLINE)
-            poly.StrokeThickness = 0.8
-            self.cnv_plan.Children.Add(poly)
-
-        # Windows - light blue strokes spanning the wall opening
-        self._draw_plan_windows(m2c)
-
-        # Doors - gap + swing arc
-        self._draw_plan_doors(m2c)
-
-        # Far clip line (dashed parallel offset showing how far ahead of
-        # the section line the section preview will pull elements from)
-        self._draw_plan_far_clip_line(m2c)
-
-        # Section line (drawn on top so its bubbles aren't hidden)
-        self._draw_plan_section_line(m2c)
-
-        # North arrow (small) in top-right
-        nax = cw - 22; nay = 22
-        north = WLine()
-        north.X1 = nax; north.Y1 = nay + 12; north.X2 = nax; north.Y2 = nay - 4
-        north.Stroke = wpf_brush(COLOR_WALL_OUTLINE); north.StrokeThickness = 1.5
-        self.cnv_plan.Children.Add(north)
-        ntb = TextBlock(); ntb.Text = "N"; ntb.FontSize = 10; ntb.Foreground = wpf_brush(COLOR_WALL_OUTLINE)
-        Canvas.SetLeft(ntb, nax - 4); Canvas.SetTop(ntb, nay - 18)
-        self.cnv_plan.Children.Add(ntb)
-
-    # --- Plan sub-renderers --------------------------------------------------
-
-    def _wall_by_id(self, wid):
-        for w in self.walls:
-            if w['id'] == wid:
-                return w
-        return None
-
-    def _wall_unit_vectors(self, w):
-        """Return (along_unit, perp_unit, length) for a wall in model XY."""
-        x1, y1 = w['p1']; x2, y2 = w['p2']
-        dx = x2 - x1; dy = y2 - y1
-        L = math.hypot(dx, dy) or 1e-9
-        ux, uy = dx / L, dy / L
-        nx, ny = -uy, ux
-        return (ux, uy), (nx, ny), L
-
-    def _draw_plan_windows(self, m2c):
-        for win in self.windows:
-            w = self._wall_by_id(win['host_id'])
-            if w is None: continue
-            (ux, uy), (nx, ny), L = self._wall_unit_vectors(w)
-            cx, cy = win['pt']
-            half = win['width'] / 2.0
-            thk_h = w['thickness'] / 2.0
-            # 4 corners of the window opening footprint
-            corners = [
-                (cx - ux * half + nx * thk_h, cy - uy * half + ny * thk_h),
-                (cx + ux * half + nx * thk_h, cy + uy * half + ny * thk_h),
-                (cx + ux * half - nx * thk_h, cy + uy * half - ny * thk_h),
-                (cx - ux * half - nx * thk_h, cy - uy * half - ny * thk_h),
-            ]
-            poly = WPolygon()
-            pts = PointCollection()
-            for (mx, my) in corners:
-                px, py = m2c(mx, my); pts.Add(WPoint(px, py))
-            poly.Points = pts
-            poly.Fill = wpf_brush("#BEE3F8")           # light blue
-            poly.Stroke = wpf_brush("#3182CE")
-            poly.StrokeThickness = 0.8
-            self.cnv_plan.Children.Add(poly)
-            # Glass line through center of window
-            g_a = (cx - ux * half, cy - uy * half)
-            g_b = (cx + ux * half, cy + uy * half)
-            ax, ay = m2c(*g_a); bx, by = m2c(*g_b)
-            gl = WLine(); gl.X1 = ax; gl.Y1 = ay; gl.X2 = bx; gl.Y2 = by
-            gl.Stroke = wpf_brush("#2B6CB0"); gl.StrokeThickness = 1.0
-            self.cnv_plan.Children.Add(gl)
-
-    def _draw_plan_doors(self, m2c):
-        for d in self.doors:
-            w = self._wall_by_id(d['host_id'])
-            if w is None: continue
-            (ux, uy), (nx, ny), L = self._wall_unit_vectors(w)
-            cx, cy = d['pt']
-            half = d['width'] / 2.0
-            thk_h = w['thickness'] / 2.0
-            # White "gap" polygon erases the wall fill in the door opening
-            corners = [
-                (cx - ux * half + nx * thk_h, cy - uy * half + ny * thk_h),
-                (cx + ux * half + nx * thk_h, cy + uy * half + ny * thk_h),
-                (cx + ux * half - nx * thk_h, cy + uy * half - ny * thk_h),
-                (cx - ux * half - nx * thk_h, cy - uy * half - ny * thk_h),
-            ]
-            poly = WPolygon()
-            pts = PointCollection()
-            for (mx, my) in corners:
-                px, py = m2c(mx, my); pts.Add(WPoint(px, py))
-            poly.Points = pts
-            poly.Fill   = wpf_brush("#F7FAFC")   # erase the wall body
-            poly.Stroke = wpf_brush("#A0522D")   # door brown jamb
-            poly.StrokeThickness = 0.8
-            self.cnv_plan.Children.Add(poly)
-            # Door leaf (line at one jamb perpendicular to wall, length = door width)
-            leaf_start = (cx - ux * half, cy - uy * half)
-            leaf_end   = (leaf_start[0] + nx * d['width'],
-                          leaf_start[1] + ny * d['width'])
-            ax, ay = m2c(*leaf_start); bx, by = m2c(*leaf_end)
-            ll = WLine(); ll.X1 = ax; ll.Y1 = ay; ll.X2 = bx; ll.Y2 = by
-            ll.Stroke = wpf_brush("#A0522D"); ll.StrokeThickness = 1.4
-            self.cnv_plan.Children.Add(ll)
-            # Swing arc - quarter arc from leaf_end back along wall direction
-            arc_end = (leaf_start[0] + ux * d['width'],
-                       leaf_start[1] + uy * d['width'])
-            self._add_swing_arc(m2c, leaf_start, leaf_end, arc_end)
-
-    def _add_swing_arc(self, m2c, center_m, start_m, end_m):
-        """Draw a quarter-circle arc from start_m to end_m centered at center_m
-        in plan canvas coords."""
-        cx, cy = m2c(*center_m)
-        sx, sy = m2c(*start_m)
-        ex, ey = m2c(*end_m)
-        radius = math.hypot(sx - cx, sy - cy)
-        path = WPath()
-        geom = PathGeometry()
-        fig  = PathFigure()
-        fig.StartPoint = WPoint(sx, sy)
-        arc = ArcSegment()
-        arc.Point  = WPoint(ex, ey)
-        arc.Size   = System.Windows.Size(radius, radius)
-        arc.SweepDirection = SweepDirection.Counterclockwise
-        arc.IsLargeArc = False
-        fig.Segments.Add(arc)
-        geom.Figures.Add(fig)
-        path.Data = geom
-        path.Stroke = wpf_brush("#A0522D")
-        path.StrokeThickness = 0.8
-        path.IsHitTestVisible = False
-        self.cnv_plan.Children.Add(path)
+        # Section line + bubbles + flip icon (drawn on top)
+        self._draw_plan_section_line(m2c, inv_s)
 
     # Far clip handle radius (px). Used by both draw + hit-test.
     _FC_HANDLE_R = 11
@@ -1611,9 +1856,14 @@ class ViewRangeHelperForm(forms.WPFWindow):
                    (a[1] + b[1]) / 2.0 + ny * far)
         return m2c(*mid_a_m)
 
-    def _draw_plan_far_clip_line(self, m2c):
+    def _draw_plan_far_clip_line(self, m2c, inv_s):
         """Dashed parallel line showing where the far clip plane is in plan,
-        with a draggable two-arrow handle at its midpoint."""
+        with a draggable two-arrow handle at its midpoint.
+
+        inv_s = 1 / current Grid zoom. All visual sizes (stroke widths,
+        radii, dash patterns, arrow dimensions) get multiplied by it so
+        the handle stays a constant pixel size on screen regardless of
+        zoom (the parent Grid transform cancels out the inv_s)."""
         if self.far_clip_offset <= 0:
             return
         a, _b, ux, uy, nx, ny, _L = self._section_view_basis()
@@ -1626,7 +1876,11 @@ class ViewRangeHelperForm(forms.WPFWindow):
         ln = WLine()
         ln.X1 = ax; ln.Y1 = ay; ln.X2 = bx; ln.Y2 = by
         ln.Stroke = wpf_brush("#A0AEC0")
-        ln.StrokeThickness = 1.0
+        ln.StrokeThickness = 1.0 * inv_s
+        # Dash array values are MULTIPLES of stroke thickness (WPF math).
+        # We already scale stroke by inv_s, so leave dash values constant —
+        # otherwise dashes would shrink as inv_s² and look like specks at
+        # high zoom.
         ln.StrokeDashArray = self._dash_array([3, 3])
         ln.IsHitTestVisible = False
         self.cnv_plan.Children.Add(ln)
@@ -1638,34 +1892,33 @@ class ViewRangeHelperForm(forms.WPFWindow):
             tk = WLine()
             tk.X1 = ex1; tk.Y1 = ey1; tk.X2 = ex2; tk.Y2 = ey2
             tk.Stroke = wpf_brush("#CBD5E0")
-            tk.StrokeThickness = 0.6
+            tk.StrokeThickness = 0.6 * inv_s
             tk.StrokeDashArray = self._dash_array([2, 2])
             tk.IsHitTestVisible = False
             self.cnv_plan.Children.Add(tk)
 
         # ---------- Draggable handle at the midpoint of the far clip line ----------
-        # We need the SCREEN-space perpendicular direction so the in-handle
-        # arrows point perpendicular to the on-page section line regardless
-        # of the model orientation.
+        # Perpendicular direction in canvas-LOCAL coords (post-Grid-scale,
+        # but ratios are scale-invariant so the arrow direction is correct).
         sx_a, sy_a = m2c(*self.section_line[0])
         sx_b, sy_b = m2c(*self.section_line[1])
         sdx = sx_b - sx_a; sdy = sy_b - sy_a
         sL  = math.hypot(sdx, sdy) or 1e-9
         sux, suy = sdx / sL, sdy / sL
-        snx, sny = -suy, sux                  # screen-coord perpendicular
+        snx, sny = -suy, sux                  # canvas-local perpendicular
         if self.section_flip:
             snx, sny = -snx, -sny
 
         hx, hy = self._far_clip_handle_screen(m2c)
 
-        handle_r = self._FC_HANDLE_R
+        handle_r = self._FC_HANDLE_R * inv_s   # constant ~11px on screen
 
         # Background circle
         handle = WEllipse()
         handle.Width = 2 * handle_r; handle.Height = 2 * handle_r
         handle.Fill = Brushes.White
         handle.Stroke = wpf_brush("#4A5568")
-        handle.StrokeThickness = 1.4
+        handle.StrokeThickness = 1.4 * inv_s
         handle.Tag = "far_clip_handle"
         handle.Cursor = Cursors.SizeAll
         handle.ToolTip = "Drag to change the far clip distance"
@@ -1673,13 +1926,13 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self.cnv_plan.Children.Add(handle)
 
         # Two opposing arrows inside, perpendicular to the section line
-        arrow_len = handle_r - 2
-        head_w    = 3.0
+        arrow_len = handle_r - 2 * inv_s
+        head_w    = 3.0 * inv_s
         for sign in (+1, -1):
             tip   = (hx + snx * arrow_len * sign,
                      hy + sny * arrow_len * sign)
-            base_c = (hx + snx * (arrow_len - 4) * sign,
-                      hy + sny * (arrow_len - 4) * sign)
+            base_c = (hx + snx * (arrow_len - 4 * inv_s) * sign,
+                      hy + sny * (arrow_len - 4 * inv_s) * sign)
             base1 = (base_c[0] + sux * head_w, base_c[1] + suy * head_w)
             base2 = (base_c[0] - sux * head_w, base_c[1] - suy * head_w)
             tri = WPolygon()
@@ -1714,20 +1967,22 @@ class ViewRangeHelperForm(forms.WPFWindow):
             nx, ny = -nx, -ny
         return (ax, ay), (bx, by), ux, uy, nx, ny
 
-    def _draw_plan_section_line(self, m2c):
+    def _draw_plan_section_line(self, m2c, inv_s):
         (ax, ay), (bx, by), ux, uy, nx, ny = self._section_line_screen_geom(m2c)
 
-        # Section line itself - dash-dot, Revit-ish
+        # Section line itself - dash-dot, Revit-ish.
+        # Stroke multiplied by inv_s; dash values are unitless multiples of
+        # stroke (WPF math) so they stay constant.
         sl = WLine()
         sl.X1 = ax; sl.Y1 = ay; sl.X2 = bx; sl.Y2 = by
         sl.Stroke = wpf_brush(COLOR_SECTION_LINE)
-        sl.StrokeThickness = 2.0
+        sl.StrokeThickness = 2.0 * inv_s
         sl.StrokeDashArray = self._dash_array([8, 3, 1, 3])
         sl.Tag = "section_body"
         sl.Cursor = Cursors.SizeAll
         self.cnv_plan.Children.Add(sl)
 
-        R = self._BUBBLE_R
+        R = self._BUBBLE_R * inv_s             # constant ~18px on screen
         for label, tag, (px, py) in (("A", "section_a", (ax, ay)),
                                      ("B", "section_b", (bx, by))):
             # Bubble
@@ -1735,17 +1990,18 @@ class ViewRangeHelperForm(forms.WPFWindow):
             bubble.Width = 2 * R; bubble.Height = 2 * R
             bubble.Fill = Brushes.White
             bubble.Stroke = wpf_brush(COLOR_SECTION_LINE)
-            bubble.StrokeThickness = 2.2
+            bubble.StrokeThickness = 2.2 * inv_s
             bubble.Tag = tag
             bubble.Cursor = Cursors.SizeAll
             Canvas.SetLeft(bubble, px - R); Canvas.SetTop(bubble, py - R)
             self.cnv_plan.Children.Add(bubble)
-            # Letter
+            # Letter — FontSize is in canvas-local DIPs, the Grid then
+            # scales it up to ~14pt on screen.
             tb = TextBlock()
             tb.Text = label
             tb.Foreground = wpf_brush("#742A2A")
             tb.FontWeight = System.Windows.FontWeights.Bold
-            tb.FontSize = 14
+            tb.FontSize = 14 * inv_s
             tb.IsHitTestVisible = False
             tb.Measure(System.Windows.Size(System.Double.PositiveInfinity,
                                            System.Double.PositiveInfinity))
@@ -1754,9 +2010,11 @@ class ViewRangeHelperForm(forms.WPFWindow):
             self.cnv_plan.Children.Add(tb)
             # External view-direction triangle — reinforces direction at a
             # glance from a distance.
-            tip_x = px + nx * (R + 8); tip_y = py + ny * (R + 8)
-            base1_x = px + nx * R + ux * 5; base1_y = py + ny * R + uy * 5
-            base2_x = px + nx * R - ux * 5; base2_y = py + ny * R - uy * 5
+            tip_x = px + nx * (R + 8 * inv_s); tip_y = py + ny * (R + 8 * inv_s)
+            base1_x = px + nx * R + ux * 5 * inv_s
+            base1_y = py + ny * R + uy * 5 * inv_s
+            base2_x = px + nx * R - ux * 5 * inv_s
+            base2_y = py + ny * R - uy * 5 * inv_s
             tri = WPolygon()
             tpts = PointCollection()
             tpts.Add(WPoint(tip_x, tip_y))
@@ -1770,19 +2028,18 @@ class ViewRangeHelperForm(forms.WPFWindow):
         # Inline flip icon next to bubble A (Revit-style swap toggle).
         # Position perpendicular to the line on the "behind" side so it
         # doesn't collide with the view-direction triangle.
-        self._draw_flip_icon(ax, ay, ux, uy, nx, ny)
+        self._draw_flip_icon(ax, ay, ux, uy, nx, ny, inv_s)
 
-    def _draw_flip_icon(self, ax, ay, ux, uy, nx, ny):
-        R = self._BUBBLE_R
-        fx, fy = self._flip_icon_center((ax, ay), nx, ny)
-        size = self._FLIP_R
+    def _draw_flip_icon(self, ax, ay, ux, uy, nx, ny, inv_s):
+        fx, fy = self._flip_icon_center((ax, ay), nx, ny, inv_s)
+        size = self._FLIP_R * inv_s
 
         # Background circle (white with red ring) - the click target
         circle = WEllipse()
         circle.Width = 2 * size; circle.Height = 2 * size
         circle.Fill = Brushes.White
         circle.Stroke = wpf_brush(COLOR_SECTION_LINE)
-        circle.StrokeThickness = 1.4
+        circle.StrokeThickness = 1.4 * inv_s
         circle.Tag = "flip_icon"
         circle.Cursor = Cursors.Hand
         circle.ToolTip = "Flip section view direction"
@@ -1791,14 +2048,15 @@ class ViewRangeHelperForm(forms.WPFWindow):
 
         # Two opposing arrows inside (←  →) drawn ALONG the section direction
         # so they read "swap" regardless of section orientation.
-        head = 4.0    # arrow head half-width
-        tail = 5.5    # arrow length from center
-        # Right arrow: tip at (fx + ux*tail, fy + uy*tail), base at (fx + ux*1, fy + uy*1)
+        head = 4.0 * inv_s     # arrow head half-width
+        tail = 5.5 * inv_s     # arrow length from center
+        base = 1.5 * inv_s     # arrow base offset from center
+        # Right arrow: tip at (fx + ux*tail, fy + uy*tail), base at (fx + ux*base, fy + uy*base)
         right = WPolygon()
         rpts = PointCollection()
         rpts.Add(WPoint(fx + ux * tail, fy + uy * tail))
-        rpts.Add(WPoint(fx + ux * 1.5 + nx * head, fy + uy * 1.5 + ny * head))
-        rpts.Add(WPoint(fx + ux * 1.5 - nx * head, fy + uy * 1.5 - ny * head))
+        rpts.Add(WPoint(fx + ux * base + nx * head, fy + uy * base + ny * head))
+        rpts.Add(WPoint(fx + ux * base - nx * head, fy + uy * base - ny * head))
         right.Points = rpts
         right.Fill = wpf_brush(COLOR_SECTION_LINE)
         right.IsHitTestVisible = False
@@ -1807,22 +2065,23 @@ class ViewRangeHelperForm(forms.WPFWindow):
         left = WPolygon()
         lpts = PointCollection()
         lpts.Add(WPoint(fx - ux * tail, fy - uy * tail))
-        lpts.Add(WPoint(fx - ux * 1.5 + nx * head, fy - uy * 1.5 + ny * head))
-        lpts.Add(WPoint(fx - ux * 1.5 - nx * head, fy - uy * 1.5 - ny * head))
+        lpts.Add(WPoint(fx - ux * base + nx * head, fy - uy * base + ny * head))
+        lpts.Add(WPoint(fx - ux * base - nx * head, fy - uy * base - ny * head))
         left.Points = lpts
         left.Fill = wpf_brush(COLOR_SECTION_LINE)
         left.IsHitTestVisible = False
         self.cnv_plan.Children.Add(left)
 
-    def _flip_icon_center(self, bubble_screen, nx, ny):
+    def _flip_icon_center(self, bubble_screen, nx, ny, inv_s):
         """Position the flip icon perpendicular to the section line, on the
         OPPOSITE side from the view-direction triangle (so they don't
         overlap visually). The user clicks to swap which side the section
-        looks from."""
+        looks from. Distance is scaled by inv_s so the icon stays a
+        constant pixel offset from the bubble on screen."""
         bx, by = bubble_screen
         # Place the icon on the "back" side (-nx, -ny) so the front side
         # stays clear for the view-direction arrows.
-        d = self._BUBBLE_R + self._FLIP_OFFSET
+        d = (self._BUBBLE_R + self._FLIP_OFFSET) * inv_s
         return (bx - nx * d, by - ny * d)
 
     def _dash_array(self, pattern):
@@ -1836,32 +2095,44 @@ class ViewRangeHelperForm(forms.WPFWindow):
     def _plan_hit(self, pos):
         """Hit-test against the flip icon, far clip handle, section
         endpoints, or section body. Returns 'flip_icon' / 'far_clip_handle'
-        / 'endpoint_a' / 'endpoint_b' / 'body' / None."""
+        / 'endpoint_a' / 'endpoint_b' / 'body' / None.
+
+        pos is in canvas-LOCAL coords (e.GetPosition(self.cnv_plan), with
+        WPF inverting the parent Grid's transform automatically). All
+        target radii are multiplied by inv_s so the hit area matches the
+        bubbles' on-screen sizes — the user clicks where they SEE the
+        bubble, regardless of zoom."""
         m2c, _c2m, _cw, _ch, _s = self._plan_transform()
+        inv_s = self._current_plan_inv_scale()
         (ax, ay), (bx, by), ux, uy, nx, ny = self._section_line_screen_geom(m2c)
         # Flip icon (small target - prioritize)
-        fx, fy = self._flip_icon_center((ax, ay), nx, ny)
-        if (pos.X - fx) ** 2 + (pos.Y - fy) ** 2 <= self._FLIP_R ** 2:
+        fx, fy = self._flip_icon_center((ax, ay), nx, ny, inv_s)
+        flip_r = self._FLIP_R * inv_s
+        if (pos.X - fx) ** 2 + (pos.Y - fy) ** 2 <= flip_r * flip_r:
             return 'flip_icon'
         # Far clip handle
         fc = self._far_clip_handle_screen(m2c)
         if fc is not None:
-            if (pos.X - fc[0]) ** 2 + (pos.Y - fc[1]) ** 2 <= self._FC_HANDLE_R ** 2:
+            fc_r = self._FC_HANDLE_R * inv_s
+            if (pos.X - fc[0]) ** 2 + (pos.Y - fc[1]) ** 2 <= fc_r * fc_r:
                 return 'far_clip_handle'
         # Endpoints (use bubble radius)
-        R = self._BUBBLE_R
+        R = self._BUBBLE_R * inv_s
         if (pos.X - ax) ** 2 + (pos.Y - ay) ** 2 <= R * R:
             return 'endpoint_a'
         if (pos.X - bx) ** 2 + (pos.Y - by) ** 2 <= R * R:
             return 'endpoint_b'
-        # Body (within 6px perpendicular distance)
+        # Body — generous 14 px screen tolerance so the user doesn't have
+        # to be pixel-perfect (the line is dashed and only ~2 px thick;
+        # without slack a click that visually lands on the line can miss).
+        body_r = 14.0 * inv_s
         dx = bx - ax; dy = by - ay
         L2 = dx * dx + dy * dy
         if L2 < 1e-6: return None
         t = ((pos.X - ax) * dx + (pos.Y - ay) * dy) / L2
         if t < 0 or t > 1: return None
         cx = ax + t * dx; cy = ay + t * dy
-        if (pos.X - cx) ** 2 + (pos.Y - cy) ** 2 <= 6 * 6:
+        if (pos.X - cx) ** 2 + (pos.Y - cy) ** 2 <= body_r * body_r:
             return 'body'
         return None
 
@@ -1888,8 +2159,39 @@ class ViewRangeHelperForm(forms.WPFWindow):
         except Exception: pass
 
     def _plan_mouse_move(self, sender, e):
+        # Pan in progress takes priority over the section/bubble/far-clip drag
+        if self._plan_pan_drag is not None:
+            if e.MiddleButton != MouseButtonState.Pressed:
+                self._plan_pan_drag = None
+                try: self.cnv_plan.ReleaseMouseCapture()
+                except Exception: pass
+                return
+            pos = e.GetPosition(self)
+            dx = pos.X - self._plan_pan_drag['start_x']
+            dy = pos.Y - self._plan_pan_drag['start_y']
+            self.trf_plan_pan.X = self._plan_pan_drag['init_tx'] + dx
+            self.trf_plan_pan.Y = self._plan_pan_drag['init_ty'] + dy
+            # Redraw overlay so section line / bubbles follow the image
+            self._draw_plan()
+            return
         if self._plan_drag is None:
-            # Update cursor based on hover
+            # Hover cursor: change shape based on what's under the mouse so
+            # the user gets immediate feedback that the section line, its
+            # endpoints, the flip icon, and the far-clip handle are all
+            # grabbable. Without this, the user has to click-and-hope.
+            try:
+                hover_pos = e.GetPosition(self.cnv_plan)
+                hover_kind = self._plan_hit(hover_pos)
+            except Exception:
+                hover_kind = None
+            if hover_kind in ('endpoint_a', 'endpoint_b', 'body'):
+                self.cnv_plan.Cursor = Cursors.SizeAll
+            elif hover_kind == 'flip_icon':
+                self.cnv_plan.Cursor = Cursors.Hand
+            elif hover_kind == 'far_clip_handle':
+                self.cnv_plan.Cursor = Cursors.SizeAll
+            else:
+                self.cnv_plan.Cursor = Cursors.Arrow
             return
         if e.LeftButton != MouseButtonState.Pressed:
             self._plan_drag = None
@@ -1916,11 +2218,85 @@ class ViewRangeHelperForm(forms.WPFWindow):
             a, _b, _ux, _uy, nx, ny, _L = self._section_view_basis()
             d = (mx - a[0]) * nx + (my - a[1]) * ny
             d = max(0.0, d)
-            if self.chk_snap_6in.IsChecked:
-                d = snap_feet_to_6in(d)
+            d = self._snap_value(d)
             self.far_clip_offset = d
         self._draw_plan()
         self._draw_section()
+
+    # ------------------------------------------------------------------
+    # Plan zoom (mouse wheel) and pan (middle-click drag)
+    # The transform applies to the entire Grid containing both the image
+    # AND the canvas, so the section line / bubbles / far-clip stay
+    # anchored to the building when the user zooms or pans.
+    # ------------------------------------------------------------------
+
+    def _plan_mouse_wheel(self, sender, e):
+        try:
+            cur_scale = float(self.trf_plan_scale.ScaleX)
+        except Exception:
+            cur_scale = 1.0
+        factor = 1.10 if e.Delta > 0 else 1.0 / 1.10
+        new_scale = max(0.2, min(20.0, cur_scale * factor))
+        if abs(new_scale - cur_scale) < 1e-9:
+            e.Handled = True
+            return
+        # Anchor the zoom on the cursor: keep the LOCAL POINT under the
+        # cursor visually fixed in screen space.
+        #
+        # The Grid transform is:  screen = local * scale + pan
+        # GetPosition(self.cnv_plan) returns the LOCAL position (WPF
+        # inverts the parent Grid transform automatically). We want the
+        # screen position of that local point to be unchanged after the
+        # scale change:
+        #     local * scale_old + pan_old = local * scale_new + pan_new
+        #     pan_new = pan_old - local * (scale_new - scale_old)
+        pos = e.GetPosition(self.cnv_plan)
+        cx, cy = pos.X, pos.Y
+        try:
+            tx = float(self.trf_plan_pan.X); ty = float(self.trf_plan_pan.Y)
+        except Exception:
+            tx = ty = 0.0
+        ds = new_scale - cur_scale
+        self.trf_plan_pan.X        = tx - cx * ds
+        self.trf_plan_pan.Y        = ty - cy * ds
+        self.trf_plan_scale.ScaleX = new_scale
+        self.trf_plan_scale.ScaleY = new_scale
+        # The section line / bubbles are drawn at the same canvas-local
+        # coords (they use model coords through m2c, which is independent
+        # of the Grid transform). The Grid scales them visually with the
+        # building, then _draw_plan inverse-scales their sizes so they
+        # appear constant on screen - just like Revit.
+        self._draw_plan()
+        e.Handled = True
+
+    def _plan_mouse_down_any(self, sender, e):
+        # Middle-click starts a pan. Left button is handled by
+        # _plan_mouse_down (existing section-line / bubble / far-clip drag).
+        if e.ChangedButton != MouseButton.Middle:
+            return
+        pos = e.GetPosition(self)
+        self._plan_pan_drag = {
+            'start_x': pos.X, 'start_y': pos.Y,
+            'init_tx': float(self.trf_plan_pan.X),
+            'init_ty': float(self.trf_plan_pan.Y),
+        }
+        try: self.cnv_plan.CaptureMouse()
+        except Exception: pass
+        e.Handled = True
+
+    def _plan_mouse_up_any(self, sender, e):
+        if self._plan_pan_drag is not None and e.ChangedButton == MouseButton.Middle:
+            self._plan_pan_drag = None
+            try: self.cnv_plan.ReleaseMouseCapture()
+            except Exception: pass
+            e.Handled = True
+
+    def _on_reset_plan_zoom(self, s, e):
+        self.trf_plan_scale.ScaleX = 1.0
+        self.trf_plan_scale.ScaleY = 1.0
+        self.trf_plan_pan.X = 0.0
+        self.trf_plan_pan.Y = 0.0
+        self._draw_plan()
 
     def _plan_mouse_up(self, sender, e):
         if self._plan_drag is not None:
@@ -1941,153 +2317,176 @@ class ViewRangeHelperForm(forms.WPFWindow):
     # ======================================================================
 
     def _section_z_range(self):
-        """Vertical extent of the section view. User-controlled via the
-        Section Extent textboxes (raise to see parapets / roof peaks,
-        lower to see foundations).
-
-        Deliberately INDEPENDENT of self.far_clip_offset - extending the
-        far clip pulls in distant walls but doesn't change the vertical
-        zoom. Cut walls stay anchored at the same screen position
-        regardless of how deep we look behind the section."""
+        """User's view extent (z_bot, z_top) — what the user wants to
+        SEE. The section is RENDERED with this extent (Stretch.Uniform
+        fits the bbox to the canvas), so top / bottom extent lines sit
+        at the literal top and bottom of the rendered image."""
         return self.section_z_bot, self.section_z_top
+
+    def _section_render_padding(self):
+        """Horizontal padding in feet added to the section bbox.
+
+        DATA ACCURACY: This is now ZERO on both sides. The section bbox
+        spans EXACTLY the section line — what the user draws on the plan
+        is exactly what's in the section, down to the inch. The empty
+        space for level / plane labels is handled entirely by the white
+        screen gutters on cnv_section_screen, which are decoupled from
+        the model. Earlier versions used 5–20 ft of padding, which
+        extended the bbox into the building when the line was placed
+        near or just outside an exterior wall — that's why sections
+        showed unexpected content."""
+        return 0.0, 0.0
 
     def _section_view_basis(self):
         """Return (a, b, ux, uy, nx, ny, L) describing the section line in
         MODEL coords plus the view-direction perpendicular.
 
-        nx, ny is the math 'left-turn' from A->B (CCW) in model coords.
-        This matches Revit's right-handed section coordinate system:
-        view direction = -BasisZ where BasisZ = BasisX X BasisY = (uy,-ux).
-        So view direction in model = (-uy, ux) = the CCW perpendicular.
-        Putting plan UI on the same side as the actual render keeps the
-        far-clip indicator and the rendered section in agreement."""
+        nx, ny is the 'right-turn' from A->B (CW) in model coords. Walking
+        from A to B, the section "looks" to your right - this is Revit's
+        default section direction. For an A=south / B=north section line
+        that means default view direction = east.
+
+        _render_revit_section uses the same convention: BasisX = section_dir,
+        BasisZ = BasisX x BasisY = (uy, -ux) = view direction (into model).
+        Plan UI's nx, ny is exactly that view direction so the far-clip
+        line and triangles in the plan match what's actually rendered."""
         a, b = self.section_line[0], self.section_line[1]
         dx = b[0] - a[0]; dy = b[1] - a[1]
         L = math.hypot(dx, dy) or 1e-9
         ux, uy = dx / L, dy / L
-        nx, ny = -uy, ux                      # CCW left-turn from A->B
+        nx, ny = uy, -ux                      # CW right-turn from A->B
         if self.section_flip:
             nx, ny = -nx, -ny
         return a, b, ux, uy, nx, ny, L
 
     def _draw_section(self):
         """The section view is always a Revit-rendered PNG behind the
-        canvas. Here we just draw the overlay (A/B chips, level lines,
-        view range planes) on top of the image, aligned to the image's
-        actual displayed area."""
+        canvas. Here we draw two overlays:
+          * cnv_section (inside the transformed Grid) — model-anchored
+            elements (A/B chips, level lines, plane lines, extent
+            handles). They scale + pan with the image when the user
+            zooms / drags.
+          * cnv_section_screen (NOT transformed) — screen-anchored
+            elements (plane name + elevation labels). They stay glued
+            to the right edge of the visible card so the user never
+            loses Top / Cut Plane / Bottom / View Depth labels."""
         self.cnv_section.Children.Clear()
-        cw = max(1.0, float(self.cnv_section.ActualWidth))
-        ch = max(1.0, float(self.cnv_section.ActualHeight))
-        self._draw_section_overlays_only(None, None, cw, ch)
+        try: self.cnv_section_screen.Children.Clear()
+        except Exception: pass
+        # Stash the inverse zoom so every overlay-drawing helper can
+        # multiply its sizes by it. The Grid scales children visually,
+        # so this gives us SVG-like constant pixel sizes.
+        self._sec_inv_scale = self._current_section_inv_scale()
+        # Keep the section image geometry in sync with the current
+        # layout (extent, canvas size). The overlay and the image both
+        # use _section_image_layout, so they stay aligned automatically.
+        self._update_section_image_geometry()
+        self._draw_section_overlays_only()
 
-    def _draw_section_overlays_only(self, _unused_x_at, _unused_y_at, cw, ch):
-        """In Revit-render mode, draw only the A/B chips, levels, and the
-        colored view range plane lines on top of the rendered image.
+    # Reserved gutter widths (px on screen). Section content is clipped
+    # to NEVER intrude here — guarantees room for level + plane labels.
+    _SEC_LEFT_GUTTER  = 60.0
+    _SEC_RIGHT_GUTTER = 110.0
 
-        The overlay aligns with the IMAGE's actual displayed area (not the
-        full canvas), so when the rendered section is letterboxed by
-        Stretch=Uniform, our level lines still match the building."""
+    def _draw_section_overlays_only(self):
+        """Two-layer overlay:
+          * INNER canvas (cnv_section, transformed with the image): the
+            dashed lines — levels, plane lines, extent lines + pill
+            handles. They scale + pan with the section.
+          * SCREEN overlay (cnv_section_screen, NOT transformed): white
+            gutter strips on left + right, plus all label TEXT (level
+            names, plane labels, extent elevation labels, A/B chips).
+
+        The image is rendered with the user's current view extent and
+        Stretch.Uniform-fit to the canvas. Top/bottom extent lines sit
+        at the literal top and bottom of the rendered image. Levels
+        and plane lines align with the building because they all
+        derive their canvas Y from the same _section_image_layout
+        math the image uses."""
+        inv_s = self._sec_inv_scale
         ox, oy, dw, dh = self._section_image_layout()
         z_min, z_max = self._section_z_range()
         z_span = max(0.001, z_max - z_min)
 
-        # Image-aligned mappers
-        def x_at(t):  return ox + t * dw
-        def y_at(z):  return oy + (z_max - z) / z_span * dh
+        def y_at(z): return oy + (z_max - z) / z_span * dh
 
-        # A / B chips at the image's left/right edges (not canvas edges)
-        chip_r = 11
-        for label, x_pos in (("A", ox + chip_r + 4),
-                             ("B", ox + dw - chip_r - 4)):
-            cx = x_pos; cy = oy + chip_r + 4
-            chip = WEllipse()
-            chip.Width = 2 * chip_r; chip.Height = 2 * chip_r
-            chip.Fill = Brushes.White
-            chip.Stroke = wpf_brush(COLOR_SECTION_LINE)
-            chip.StrokeThickness = 1.6
-            chip.IsHitTestVisible = False
-            Canvas.SetLeft(chip, cx - chip_r); Canvas.SetTop(chip, cy - chip_r)
-            self.cnv_section.Children.Add(chip)
-            tb = TextBlock()
-            tb.Text = label
-            tb.Foreground = wpf_brush("#742A2A")
-            tb.FontWeight = System.Windows.FontWeights.Bold
-            tb.FontSize = 11
-            tb.IsHitTestVisible = False
-            tb.Measure(System.Windows.Size(System.Double.PositiveInfinity,
-                                           System.Double.PositiveInfinity))
-            tw = tb.DesiredSize.Width; th = tb.DesiredSize.Height
-            Canvas.SetLeft(tb, cx - tw / 2.0); Canvas.SetTop(tb, cy - th / 2.0)
-            self.cnv_section.Children.Add(tb)
+        # Current section Grid transform — used to project line Y to
+        # screen Y for the screen-anchored labels.
+        try:
+            sec_scale = float(self.trf_sec_scale.ScaleX)
+            sec_tx    = float(self.trf_sec_pan.X)
+            sec_ty    = float(self.trf_sec_pan.Y)
+        except Exception:
+            sec_scale = 1.0; sec_tx = sec_ty = 0.0
+        def screen_y_for(local_y):
+            return local_y * sec_scale + sec_ty
 
-        # Levels - drawn here since the rendered image hides Revit's level
-        # category. Span the image's displayed width (not the full canvas).
+        screen_w = max(1.0, float(self.cnv_section_screen.ActualWidth))
+        screen_h = max(1.0, float(self.cnv_section_screen.ActualHeight))
+        LG = self._SEC_LEFT_GUTTER
+        RG = self._SEC_RIGHT_GUTTER
+
+        # Canvas-local X range that the lines should span. We want the lines
+        # to ALWAYS reach exactly to the inner edge of each gutter on screen,
+        # regardless of zoom + pan. Solving screen_x = local_x * scale + tx:
+        #   local_x = (screen_x - tx) / scale
+        # So the line endpoints in canvas-local are:
+        if sec_scale < 1e-6: sec_scale = 1.0
+        line_x_left  = (LG               - sec_tx) / sec_scale
+        line_x_right = (screen_w - RG    - sec_tx) / sec_scale
+        # Stash for _sec_hit so the hit zone matches the visible line range.
+        self._sec_line_x_left  = line_x_left
+        self._sec_line_x_right = line_x_right
+
+        # ============================================================
+        # SCREEN OVERLAY — gutters first (drawn UNDER the labels)
+        # ============================================================
+        # Each gutter rect over-covers its outer edge by 4px so any subpixel
+        # render bleed at the canvas / border boundary is hidden.
+        gl = WRect()
+        gl.Width = LG + 4; gl.Height = screen_h
+        gl.Fill = Brushes.White
+        Canvas.SetLeft(gl, -4); Canvas.SetTop(gl, 0)
+        self.cnv_section_screen.Children.Add(gl)
+        # Thin separator so the gutter feels intentional, not like dead space
+        gl_sep = WLine()
+        gl_sep.X1 = LG; gl_sep.X2 = LG; gl_sep.Y1 = 0; gl_sep.Y2 = screen_h
+        gl_sep.Stroke = wpf_brush("#E2E8F0"); gl_sep.StrokeThickness = 1.0
+        self.cnv_section_screen.Children.Add(gl_sep)
+        # Right gutter
+        gr = WRect()
+        gr.Width = RG + 4; gr.Height = screen_h
+        gr.Fill = Brushes.White
+        Canvas.SetLeft(gr, screen_w - RG); Canvas.SetTop(gr, 0)
+        self.cnv_section_screen.Children.Add(gr)
+        gr_sep = WLine()
+        gr_sep.X1 = screen_w - RG; gr_sep.X2 = screen_w - RG
+        gr_sep.Y1 = 0;             gr_sep.Y2 = screen_h
+        gr_sep.Stroke = wpf_brush("#E2E8F0"); gr_sep.StrokeThickness = 1.0
+        self.cnv_section_screen.Children.Add(gr_sep)
+
+        # ============================================================
+        # INNER CANVAS — dashed lines
+        # ============================================================
+        # Drawing order: levels → planes → extent lines + pills.
+        # The image is rendered with the user's current extent, so
+        # everything visible in the image lies within [z_bot, z_top].
+
+        # 1. Levels (gray dashed) — span from gutter to gutter on screen
         for lvl in self.all_levels:
             if not (z_min <= lvl.Elevation <= z_max):
                 continue
             yz = y_at(lvl.Elevation)
             ln = WLine()
-            ln.X1 = ox; ln.X2 = ox + dw
+            ln.X1 = line_x_left; ln.X2 = line_x_right
             ln.Y1 = yz; ln.Y2 = yz
-            ln.Stroke = wpf_brush("#A0AEC0"); ln.StrokeThickness = 0.6
+            ln.Stroke = wpf_brush("#A0AEC0")
+            ln.StrokeThickness = 0.6 * inv_s
             ln.StrokeDashArray = self._dash_array([3, 3])
-            self.cnv_section.Children.Add(ln)
-            tb = TextBlock()
-            tb.Text = "{}  {}".format(lvl.Name, fmt_feet_in(lvl.Elevation))
-            tb.FontSize = 9; tb.Foreground = wpf_brush("#4A5568")
-            tb.IsHitTestVisible = False
-            # Inside-the-image label so it stays anchored to the level line
-            Canvas.SetLeft(tb, ox + 4); Canvas.SetTop(tb, yz - 12)
-            self.cnv_section.Children.Add(tb)
-
-        # Section vertical-extent handles (top + bottom). Each is a dashed
-        # gray horizontal line at z_top / z_bot plus a small triangle on
-        # the right edge of the image that the user can grab and drag.
-        for ext_key, z_val, point_up in (("extent_top", self.section_z_top, True),
-                                         ("extent_bot", self.section_z_bot, False)):
-            yz = y_at(z_val)
-            # Dashed line spanning the image width
-            ln = WLine()
-            ln.X1 = ox; ln.X2 = ox + dw
-            ln.Y1 = yz; ln.Y2 = yz
-            ln.Stroke = wpf_brush("#718096")
-            ln.StrokeThickness = 0.7
-            ln.StrokeDashArray = self._dash_array([4, 4])
             ln.IsHitTestVisible = False
             self.cnv_section.Children.Add(ln)
-            # Triangle handle on the right edge of the image. Apex points
-            # away from the image center (up for top, down for bottom).
-            tri = WPolygon()
-            tri.Tag = ext_key
-            tri.Cursor = Cursors.SizeNS
-            tri.Fill = wpf_brush("#4A5568")
-            tri.Stroke = Brushes.White
-            tri.StrokeThickness = 1.0
-            tri.ToolTip = "Drag to change how far {} the section shows".format(
-                "above" if point_up else "below")
-            tri_x = ox + dw - 4   # 4 px in from the image's right edge
-            tpts = PointCollection()
-            if point_up:
-                tpts.Add(WPoint(tri_x, yz - 9))         # apex up
-                tpts.Add(WPoint(tri_x - 7, yz + 1))
-                tpts.Add(WPoint(tri_x + 7, yz + 1))
-            else:
-                tpts.Add(WPoint(tri_x, yz + 9))         # apex down
-                tpts.Add(WPoint(tri_x - 7, yz - 1))
-                tpts.Add(WPoint(tri_x + 7, yz - 1))
-            tri.Points = tpts
-            self.cnv_section.Children.Add(tri)
-            # Small elevation label next to the handle
-            elev_tb = TextBlock()
-            elev_tb.Text = fmt_feet_in(z_val)
-            elev_tb.FontSize = 9
-            elev_tb.Foreground = wpf_brush("#4A5568")
-            elev_tb.IsHitTestVisible = False
-            Canvas.SetLeft(elev_tb, ox + dw - 60)
-            Canvas.SetTop(elev_tb, yz - 14 if point_up else yz + 4)
-            self.cnv_section.Children.Add(elev_tb)
 
-        # View range planes
+        # 2. View range plane lines (colored dashed)
         plane_visuals = (
             ("top", COLOR_TOP, "Top"),
             ("cut", COLOR_CUT, "Cut Plane"),
@@ -2099,49 +2498,209 @@ class ViewRangeHelperForm(forms.WPFWindow):
                 continue
             z = self._abs_z(key)
             if z is None:
-                tb = TextBlock(); tb.Text = "{} - Unlimited".format(label)
-                tb.Foreground = wpf_brush(color); tb.FontSize = 10
-                tb.FontWeight = System.Windows.FontWeights.SemiBold
-                Canvas.SetLeft(tb, max(0, cw - 120))
-                Canvas.SetTop(tb, 6 + (1 if key == "vd" else 0) * 16)
-                self.cnv_section.Children.Add(tb)
                 continue
             yz = y_at(z)
             ln = WLine()
-            ln.X1 = ox; ln.X2 = ox + dw
+            ln.X1 = line_x_left; ln.X2 = line_x_right
             ln.Y1 = yz; ln.Y2 = yz
             ln.Stroke = wpf_brush(color)
-            ln.StrokeThickness = 3.0 if key == "cut" else 2.0
+            ln.StrokeThickness = (3.0 if key == "cut" else 2.0) * inv_s
             ln.StrokeDashArray = self._dash_array([6, 4])
-            ln.Tag = "plane_{}".format(key)
-            ln.Cursor = Cursors.SizeNS
+            ln.IsHitTestVisible = False     # hit-test handled by _sec_hit
             self.cnv_section.Children.Add(ln)
+
+        # 3. Extent dashed lines + right-edge pill handles. They sit
+        # at the literal top and bottom of the rendered image (since
+        # the bbox covers exactly the user's extent). Hit-tested
+        # anywhere along the line (see _sec_hit).
+        #
+        # During an extent drag, the dragged line uses the PREVIEW
+        # value (cursor position) so it follows the mouse smoothly,
+        # while the OTHER line stays at its committed value. Levels,
+        # planes, and the image stay anchored to the committed extent
+        # because z_top/_bot only change on release (then we re-render).
+        preview_key = self._ext_preview['key'] if self._ext_preview else None
+        preview_z   = self._ext_preview['z']   if self._ext_preview else None
+        ext_z = {
+            "extent_top": self.section_z_top,
+            "extent_bot": self.section_z_bot,
+        }
+        if preview_key in ext_z:
+            ext_z[preview_key] = preview_z
+        for ext_key in ("extent_top", "extent_bot"):
+            yz = y_at(ext_z[ext_key])
+            ln = WLine()
+            ln.X1 = line_x_left; ln.X2 = line_x_right
+            ln.Y1 = yz; ln.Y2 = yz
+            ln.Stroke = wpf_brush("#4A5568")
+            ln.StrokeThickness = 1.4 * inv_s
+            ln.StrokeDashArray = self._dash_array([6, 4])
+            ln.IsHitTestVisible = False
+            self.cnv_section.Children.Add(ln)
+            # Pill handle anchored at the inner edge of the right gutter.
+            HANDLE_W = 22 * inv_s
+            HANDLE_H = 22 * inv_s
+            tri_x = line_x_right - HANDLE_W / 2.0 - 2 * inv_s
+            bg = WEllipse()
+            bg.Width = HANDLE_W; bg.Height = HANDLE_H
+            bg.Fill = Brushes.White
+            bg.Stroke = wpf_brush("#2D3748")
+            bg.StrokeThickness = 1.6 * inv_s
+            bg.IsHitTestVisible = False
+            Canvas.SetLeft(bg, tri_x - HANDLE_W / 2.0)
+            Canvas.SetTop(bg,  yz - HANDLE_H / 2.0)
+            self.cnv_section.Children.Add(bg)
+            for sign in (+1, -1):
+                arr = WPolygon()
+                apts = PointCollection()
+                apts.Add(WPoint(tri_x,             yz + sign * 7 * inv_s))
+                apts.Add(WPoint(tri_x - 4 * inv_s, yz + sign * 1 * inv_s))
+                apts.Add(WPoint(tri_x + 4 * inv_s, yz + sign * 1 * inv_s))
+                arr.Points = apts
+                arr.Fill = wpf_brush("#2D3748")
+                arr.IsHitTestVisible = False
+                self.cnv_section.Children.Add(arr)
+
+        # ============================================================
+        # SCREEN OVERLAY — labels (drawn ON the gutters)
+        # ============================================================
+        # A / B chips at the top corners of the visible content area.
+        # Empirically Revit puts section_line[0] (= "A" in the plan) on
+        # the RIGHT of the rendered image when not flipped.
+        if self.section_flip:
+            label_left, label_right = "A", "B"
+        else:
+            label_left, label_right = "B", "A"
+        chip_r = 11
+        chip_y = 4 + chip_r
+        for label, cx in ((label_left,  LG + 4 + chip_r),
+                          (label_right, screen_w - RG - 4 - chip_r)):
+            chip = WEllipse()
+            chip.Width = 2 * chip_r; chip.Height = 2 * chip_r
+            chip.Fill = Brushes.White
+            chip.Stroke = wpf_brush(COLOR_SECTION_LINE)
+            chip.StrokeThickness = 1.6
+            Canvas.SetLeft(chip, cx - chip_r); Canvas.SetTop(chip, chip_y - chip_r)
+            self.cnv_section_screen.Children.Add(chip)
+            tb = TextBlock()
+            tb.Text = label
+            tb.Foreground = wpf_brush("#742A2A")
+            tb.FontWeight = System.Windows.FontWeights.Bold
+            tb.FontSize = 11
+            tb.Measure(System.Windows.Size(System.Double.PositiveInfinity,
+                                           System.Double.PositiveInfinity))
+            tw = tb.DesiredSize.Width; th = tb.DesiredSize.Height
+            Canvas.SetLeft(tb, cx - tw / 2.0); Canvas.SetTop(tb, chip_y - th / 2.0)
+            self.cnv_section_screen.Children.Add(tb)
+
+        # Level labels in the LEFT gutter — two lines: name on top
+        # (bigger, semi-bold), elevation below (smaller, lighter).
+        # Vertically tracked to each level line. Filtered to the USER's
+        # view extent so labels for masked levels don't clutter the
+        # gutter.
+        ut_top = self.section_z_top
+        ut_bot = self.section_z_bot
+        for lvl in self.all_levels:
+            if not (ut_bot <= lvl.Elevation <= ut_top):
+                continue
+            sy = screen_y_for(y_at(lvl.Elevation))
+            sp = StackPanel()
+            sp.Orientation = Orientation.Vertical
+            name_tb = TextBlock()
+            name_tb.Text = lvl.Name
+            name_tb.FontSize = 12
+            name_tb.FontWeight = System.Windows.FontWeights.SemiBold
+            name_tb.Foreground = wpf_brush("#2D3748")
+            sp.Children.Add(name_tb)
+            elev_tb = TextBlock()
+            elev_tb.Text = fmt_feet_in(lvl.Elevation)
+            elev_tb.FontSize = 10
+            elev_tb.Foreground = wpf_brush("#718096")
+            sp.Children.Add(elev_tb)
+            sp.Measure(System.Windows.Size(LG - 6,
+                                           System.Double.PositiveInfinity))
+            sh = sp.DesiredSize.Height if sp.DesiredSize.Height > 0 else 28
+            # Anchor by the level line: name sits above the line, elevation below
+            sy_top = sy - sh / 2.0
+            if sy_top + sh < 0 or sy_top > screen_h:
+                continue
+            Canvas.SetLeft(sp, 4); Canvas.SetTop(sp, sy_top)
+            self.cnv_section_screen.Children.Add(sp)
+
+        # Extent (Top / Bottom) elevation labels in the RIGHT gutter
+        for ext_key, point_up in (("extent_top", True), ("extent_bot", False)):
+            sy = screen_y_for(y_at(ext_z[ext_key]))
+            etb = TextBlock()
+            etb.Text = "{}  {}".format("Top" if point_up else "Bottom",
+                                       fmt_feet_in(ext_z[ext_key]))
+            etb.FontSize = 10
+            etb.FontWeight = System.Windows.FontWeights.SemiBold
+            etb.Foreground = wpf_brush("#2D3748")
+            etb.Measure(System.Windows.Size(RG - 6,
+                                            System.Double.PositiveInfinity))
+            eth = etb.DesiredSize.Height if etb.DesiredSize.Height > 0 else 14
+            ety = sy + (-eth - 2 if point_up else 2)
+            ety = max(2, min(screen_h - eth - 2, ety))
+            Canvas.SetLeft(etb, screen_w - RG + 4); Canvas.SetTop(etb, ety)
+            self.cnv_section_screen.Children.Add(etb)
+
+        # View range plane labels in the RIGHT gutter, glued to their lines
+        unlimited_y = chip_y + chip_r + 6   # stack below the A/B chip
+        for key, color, label in plane_visuals:
+            if key in self.disabled_planes:
+                continue
+            z = self._abs_z(key)
             chip = Border()
             chip.Background = wpf_brush(color)
-            chip.CornerRadius = System.Windows.CornerRadius(2)
-            chip.Padding = Thickness(4, 1, 4, 1)
-            chip.Tag = "plane_{}".format(key)
-            chip.Cursor = Cursors.SizeNS
-            ctb = TextBlock(); ctb.Text = "{}  {}".format(label, fmt_feet_in(z))
-            ctb.Foreground = Brushes.White; ctb.FontSize = 10
+            chip.CornerRadius = System.Windows.CornerRadius(3)
+            chip.Padding = Thickness(6, 2, 6, 2)
+            ctb = TextBlock()
+            if z is None:
+                ctb.Text = "{}  Unlimited".format(label)
+            else:
+                ctb.Text = "{}  {}".format(label, fmt_feet_in(z))
+            ctb.Foreground = Brushes.White
+            ctb.FontSize = 11
             ctb.FontWeight = System.Windows.FontWeights.SemiBold
             chip.Child = ctb
-            chip.Measure(System.Windows.Size(System.Double.PositiveInfinity, System.Double.PositiveInfinity))
-            chip_w = chip.DesiredSize.Width if chip.DesiredSize.Width > 0 else 80
-            Canvas.SetLeft(chip, max(2.0, ox + dw - chip_w - 2))
-            Canvas.SetTop(chip, yz - 18 if key in ("top", "cut") else yz + 2)
-            self.cnv_section.Children.Add(chip)
+            chip.Measure(System.Windows.Size(RG - 6,
+                                             System.Double.PositiveInfinity))
+            chip_w = chip.DesiredSize.Width  if chip.DesiredSize.Width  > 0 else RG - 6
+            chip_h = chip.DesiredSize.Height if chip.DesiredSize.Height > 0 else 18
+            chip_x = screen_w - RG + 4
+            if z is None:
+                cy_ = unlimited_y
+                unlimited_y += chip_h + 3
+            else:
+                sy_ = screen_y_for(y_at(z))
+                if key in ("top", "cut"):
+                    cy_ = sy_ - chip_h - 2
+                else:
+                    cy_ = sy_ + 2
+                cy_ = max(2.0, min(screen_h - chip_h - 2, cy_))
+            Canvas.SetLeft(chip, chip_x); Canvas.SetTop(chip, cy_)
+            self.cnv_section_screen.Children.Add(chip)
 
     # --- Section drag handlers ----------------------------------------------
 
     def _section_mappers(self):
         """Return (x_at, y_at, m_at_y) aligned to the rendered section
-        image's actual display area, so drags + drawing stay aligned."""
+        image's actual display area. y_at / m_at_y derive from the
+        same Stretch.Uniform layout the image uses, so overlay
+        elements (level lines, plane lines, extent handles) stay
+        pixel-aligned with what's visible in the bitmap."""
         ox, oy, dw, dh = self._section_image_layout()
         z_min, z_max = self._section_z_range()
         z_span = max(0.001, z_max - z_min)
+
+        L = max(0.001, seg_length(self.section_line[0], self.section_line[1]))
+        left_pad, right_pad = self._section_render_padding()
+        total_w  = L + left_pad + right_pad
+        left_frac = left_pad / total_w
+        line_frac = L / total_w
+
         def x_at(t):
-            return ox + t * dw
+            return ox + (left_frac + t * line_frac) * dw
         def y_at(z):
             return oy + (z_max - z) / z_span * dh
         def m_at_y(py):
@@ -2151,29 +2710,56 @@ class ViewRangeHelperForm(forms.WPFWindow):
     def _sec_hit(self, pos):
         """Return what's under `pos`: a plane key ('top'/'cut'/'bot'/'vd'),
         an extent handle key ('extent_top'/'extent_bot'), or None.
-        Extent handles take priority since they're small targets on the
-        right edge of the image."""
-        ox, oy, dw, dh = self._section_image_layout()
+
+        Hit tolerances are scaled by the inverse of the current section
+        zoom so the user clicks where they SEE the line on screen,
+        regardless of zoom. The X range matches the visible line range
+        (gutter inner edges) so any click between gutters at the line's
+        Y registers."""
         _x_at, y_at, _m_at_y = self._section_mappers()
 
-        # Extent handles (right edge of image, ~7px half-width, ~9px tall)
-        right_edge = ox + dw
-        if abs(pos.X - (right_edge - 4)) <= 11:    # within the triangle's x band
-            for ext_key, z_val in (("extent_top", self.section_z_top),
-                                   ("extent_bot", self.section_z_bot)):
-                yz = y_at(z_val)
-                # Triangle's vertical extent is ~9px
-                if abs(pos.Y - yz) <= 11:
-                    return ext_key
+        try:
+            inv_s = self._sec_inv_scale
+        except AttributeError:
+            inv_s = self._current_section_inv_scale()
+        # X range that the lines visually span (canvas-local, mapping to
+        # the inner gutter edges in screen coords). Falls back to the full
+        # image width if the cached values don't exist yet.
+        try:
+            x_left  = self._sec_line_x_left
+            x_right = self._sec_line_x_right
+        except AttributeError:
+            ox, _oy, dw, _dh = self._section_image_layout()
+            x_left  = ox
+            x_right = ox + dw
 
-        # View range planes
+        # Generous hit tolerance in screen pixels (12 px), converted to
+        # canvas-local via inv_s so the click area always matches the
+        # line's apparent thickness on screen.
+        line_tol = 12.0 * inv_s
+        pill_tol = 18.0 * inv_s
+
+        # Extent handles. The chunky pill sits at the right gutter edge,
+        # but the dashed line itself is hit-testable end-to-end too.
+        for ext_key, z_val in (("extent_top", self.section_z_top),
+                               ("extent_bot", self.section_z_bot)):
+            yz = y_at(z_val)
+            # Pill handle: ~36 px wide on screen near the right gutter edge
+            if (x_right - 36 * inv_s) <= pos.X <= (x_right + 6 * inv_s) \
+                    and abs(pos.Y - yz) <= pill_tol:
+                return ext_key
+            # Dashed line: anywhere between the gutter edges
+            if x_left <= pos.X <= x_right and abs(pos.Y - yz) <= line_tol:
+                return ext_key
+
+        # View range planes — anywhere along the colored line is grabbable
         for key in PLANE_KEYS:
             if key in self.disabled_planes:
                 continue
             z = self._abs_z(key)
             if z is None: continue
             yz = y_at(z)
-            if abs(pos.Y - yz) <= 6:
+            if x_left <= pos.X <= x_right and abs(pos.Y - yz) <= line_tol:
                 return key
         return None
 
@@ -2185,6 +2771,7 @@ class ViewRangeHelperForm(forms.WPFWindow):
         # Extent handles - drag without view-range-plane state, no template lock
         if key in ('extent_top', 'extent_bot'):
             self._sec_drag = {'key': key}
+            self._ext_preview = None      # set on first move
             try: self.cnv_section.CaptureMouse()
             except Exception: pass
             return
@@ -2202,7 +2789,23 @@ class ViewRangeHelperForm(forms.WPFWindow):
         except Exception: pass
 
     def _sec_mouse_move(self, sender, e):
+        # Middle-button pan in progress takes priority
+        if self._sec_pan_drag is not None:
+            if e.MiddleButton != MouseButtonState.Pressed:
+                self._sec_pan_drag = None
+                try: self.cnv_section.ReleaseMouseCapture()
+                except Exception: pass
+                return
+            pos_w = e.GetPosition(self)
+            dx = pos_w.X - self._sec_pan_drag['start_x']
+            dy = pos_w.Y - self._sec_pan_drag['start_y']
+            self.trf_sec_pan.X = self._sec_pan_drag['init_tx'] + dx
+            self.trf_sec_pan.Y = self._sec_pan_drag['init_ty'] + dy
+            self._draw_section()
+            return
+        # No active drag: just hover-update the cursor based on what's under it
         if self._sec_drag is None:
+            self._update_section_hover_cursor(e)
             return
         if e.LeftButton != MouseButtonState.Pressed:
             self._sec_drag = None
@@ -2210,17 +2813,23 @@ class ViewRangeHelperForm(forms.WPFWindow):
         pos = e.GetPosition(self.cnv_section)
         _x_at, _y_at, m_at_y = self._section_mappers()
         key = self._sec_drag['key']
-        # ----- Extent handle drag: change vertical extent of section view -----
+        # ----- Extent handle drag: PREVIEW only — don't touch committed -----
+        # Critical: during drag, we DO NOT change section_z_top/_bot.
+        # If we did, _draw_section would compute level / plane / image
+        # positions using the new z_span while the existing PNG is
+        # still rendered for the OLD z_span — everything would shift
+        # relative to the unchanged image. So we just stash the cursor
+        # position in _ext_preview and only the dragged extent line
+        # uses it; everything else keeps using committed values and
+        # stays anchored to the image. Commit + re-render happens on
+        # release.
         if key in ('extent_top', 'extent_bot'):
             z_new = m_at_y(pos.Y)
-            if self.chk_snap_6in.IsChecked:
-                z_new = snap_feet_to_6in(z_new)
-            if key == 'extent_top':
-                # Don't let top drop below current bottom (+ 1 ft margin)
-                self.section_z_top = max(z_new, self.section_z_bot + 1.0)
-            else:
-                self.section_z_bot = min(z_new, self.section_z_top - 1.0)
-            # Repaint overlay live so the dashed line + handle follow the mouse
+            z_new = self._snap_value(z_new)
+            self._ext_preview = {'key': key, 'z': z_new}
+            label_word = "top" if key == 'extent_top' else "bottom"
+            self.txt_section_hint.Text = "Section {} → {} (release to re-render)".format(
+                label_word, fmt_feet_in(z_new))
             self._draw_section()
             return
         # ----- View range plane drag -----
@@ -2231,8 +2840,7 @@ class ViewRangeHelperForm(forms.WPFWindow):
         if ref_z is None:
             return
         new_off = z_new - ref_z
-        if self.chk_snap_6in.IsChecked:
-            new_off = snap_feet_to_6in(new_off)
+        new_off = self._snap_value(new_off)
         s['offset'] = new_off
         self._suppress_editor_events = True
         try:
@@ -2246,15 +2854,123 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._validate_state()
 
     def _sec_mouse_up(self, sender, e):
-        if self._sec_drag is not None:
-            kind = self._sec_drag['key']
-            self._sec_drag = None
+        if self._sec_drag is None:
+            return
+        kind = self._sec_drag['key']
+        self._sec_drag = None
+        try: self.cnv_section.ReleaseMouseCapture()
+        except Exception: pass
+        # Extent drag: commit the preview value to section_z_top/_bot
+        # NOW (we held the change off until release to keep the rest of
+        # the overlay stable during drag), then re-render with the new
+        # bbox so the image catches up.
+        if kind in ('extent_top', 'extent_bot'):
+            if self._ext_preview is not None:
+                z_new = self._ext_preview['z']
+                if kind == 'extent_top':
+                    self.section_z_top = max(z_new, self.section_z_bot + 1.0)
+                else:
+                    self.section_z_bot = min(z_new, self.section_z_top - 1.0)
+            self._ext_preview = None
+            self._refresh_revit_render()
+            return
+        if kind in PLANE_KEYS:
+            # View range plane drag committed: re-render the plan PNG
+            # since the cut plane / top / bottom / view depth all affect
+            # what's visible in the active plan view.
+            self._refresh_revit_plan()
+
+    # ------------------------------------------------------------------
+    # Section zoom (mouse wheel) + pan (middle-click drag) -- mirrors
+    # the plan: the RenderTransform lives on the parent Grid so the
+    # image and the content overlay scale together; the screen-anchored
+    # canvas (plane labels) sits OUTSIDE the Grid and stays glued to
+    # the visible card edge.
+    # ------------------------------------------------------------------
+
+    def _current_section_inv_scale(self):
+        """1 / current section Grid zoom — overlay sizes get multiplied
+        by this so they stay constant on screen."""
+        try:
+            s = float(self.trf_sec_scale.ScaleX)
+        except Exception:
+            s = 1.0
+        if s < 1e-6: s = 1.0
+        return 1.0 / s
+
+    def _sec_mouse_wheel(self, sender, e):
+        try:
+            cur_scale = float(self.trf_sec_scale.ScaleX)
+        except Exception:
+            cur_scale = 1.0
+        factor = 1.10 if e.Delta > 0 else 1.0 / 1.10
+        new_scale = max(0.2, min(20.0, cur_scale * factor))
+        if abs(new_scale - cur_scale) < 1e-9:
+            e.Handled = True
+            return
+        # Anchor the zoom on the cursor (canvas-LOCAL coords; WPF inverts
+        # the parent Grid transform automatically).
+        pos = e.GetPosition(self.cnv_section)
+        cx, cy = pos.X, pos.Y
+        try:
+            tx = float(self.trf_sec_pan.X); ty = float(self.trf_sec_pan.Y)
+        except Exception:
+            tx = ty = 0.0
+        ds = new_scale - cur_scale
+        self.trf_sec_pan.X        = tx - cx * ds
+        self.trf_sec_pan.Y        = ty - cy * ds
+        self.trf_sec_scale.ScaleX = new_scale
+        self.trf_sec_scale.ScaleY = new_scale
+        self._draw_section()
+        e.Handled = True
+
+    def _sec_mouse_down_any(self, sender, e):
+        # Middle-click starts a pan. Left button is handled by
+        # _sec_mouse_down (existing plane / extent drag).
+        if e.ChangedButton != MouseButton.Middle:
+            return
+        pos = e.GetPosition(self)
+        self._sec_pan_drag = {
+            'start_x': pos.X, 'start_y': pos.Y,
+            'init_tx': float(self.trf_sec_pan.X),
+            'init_ty': float(self.trf_sec_pan.Y),
+        }
+        try: self.cnv_section.CaptureMouse()
+        except Exception: pass
+        e.Handled = True
+
+    def _sec_mouse_up_any(self, sender, e):
+        if self._sec_pan_drag is not None and e.ChangedButton == MouseButton.Middle:
+            self._sec_pan_drag = None
             try: self.cnv_section.ReleaseMouseCapture()
             except Exception: pass
-            # If the user just changed the section's vertical extent, the
-            # bbox we send to Revit needs to be re-rendered.
-            if kind in ('extent_top', 'extent_bot'):
-                self._refresh_revit_render()
+            e.Handled = True
+
+    def _on_reset_section_zoom(self, s, e):
+        self.trf_sec_scale.ScaleX = 1.0
+        self.trf_sec_scale.ScaleY = 1.0
+        self.trf_sec_pan.X = 0.0
+        self.trf_sec_pan.Y = 0.0
+        self._draw_section()
+
+    def _update_section_hover_cursor(self, e):
+        """Update cnv_section's cursor based on what's under the mouse —
+        gives the user immediate feedback that a target is grabbable.
+        Without this the user has to click-and-hope."""
+        try:
+            pos = e.GetPosition(self.cnv_section)
+            kind = self._sec_hit(pos)
+        except Exception:
+            kind = None
+        if kind in ('extent_top', 'extent_bot'):
+            self.cnv_section.Cursor = Cursors.SizeNS
+        elif kind in PLANE_KEYS:
+            if kind in self.disabled_planes or getattr(self, '_template_locked', False):
+                self.cnv_section.Cursor = Cursors.Arrow
+            else:
+                self.cnv_section.Cursor = Cursors.SizeNS
+        else:
+            self.cnv_section.Cursor = Cursors.Arrow
 
 
 # ============================================================================
