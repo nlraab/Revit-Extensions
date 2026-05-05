@@ -46,6 +46,7 @@ from System.Windows import (
 from System.Windows.Controls import (
     DataGrid, DataGridCheckBoxColumn, DataGridTextColumn,
     DataGridTemplateColumn, DataGridEditAction, DataGridLength,
+    DataGridRow,
     ComboBox, ComboBoxItem, TextBox,
     ListBox, ListBoxItem, Button, CheckBox, RadioButton,
     StackPanel, Grid, Border, TextBlock, ScrollViewer,
@@ -55,7 +56,7 @@ from System.Windows.Controls import (
 from System.Windows.Controls.Primitives import ToggleButton
 from System.Windows.Threading import DispatcherPriority
 from System import Action
-from System.Windows.Media import SolidColorBrush, Color
+from System.Windows.Media import SolidColorBrush, Color, VisualTreeHelper
 from System.Windows.Data import (
     CollectionViewSource, PropertyGroupDescription,
     Binding, BindingMode
@@ -755,9 +756,38 @@ SHARED_RESOURCES = """
       <Setter Property="VerticalContentAlignment" Value="Center"/>
       <Setter Property="Margin"      Value="0,3,0,3"/>
     </Style>
+    <!-- RadioButton: properly-sized centered bullet -->
     <Style TargetType="RadioButton">
-      <Setter Property="Foreground"  Value="#1A202C"/>
+      <Setter Property="Foreground" Value="#1A202C"/>
       <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Grid Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,6,0">
+                <Ellipse x:Name="outer" Width="14" Height="14"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         Stroke="#A0AEC0" StrokeThickness="1.5" Fill="White"/>
+                <Ellipse x:Name="dot" Width="7" Height="7"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         Fill="#2B6CB0" Visibility="Collapsed"/>
+              </Grid>
+              <ContentPresenter VerticalAlignment="Center"
+                                RecognizesAccessKey="True"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="dot" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="outer" Property="Stroke" Value="#2B6CB0"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="outer" Property="Stroke" Value="#2B6CB0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 """
 
@@ -1266,7 +1296,7 @@ RENAME_XAML = """
       <!-- Single rename panel -->
       <Border x:Name="pnl_single" Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,0,0,12">
         <StackPanel>
-          <TextBlock Text="Applies to the first selected sheet only when multiple are selected."
+          <TextBlock Text="Edit the selected sheet's number and name."
                      Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
           <Grid>
             <Grid.ColumnDefinitions>
@@ -1610,7 +1640,8 @@ DUPLICATE_XAML = """
 
       <!-- Table -->
       <Border Grid.Row="1" Style="{StaticResource CardBorder}">
-        <DataGrid x:Name="dup_grid" Margin="0">
+        <DataGrid x:Name="dup_grid" Margin="0"
+                  SelectionMode="Extended" SelectionUnit="FullRow">
           <DataGrid.Columns>
             <!-- Numeric columns stay fixed; the four text columns are star-sized
                  so they share extra space proportionally when the window grows. -->
@@ -1928,6 +1959,16 @@ class RenameDialog(object):
             self._txt_num.Text  = selected_items[0].SheetNumber
             self._txt_name.Text = selected_items[0].SheetName
 
+        # Single Rename only makes sense for a single sheet — when the user
+        # has multiple sheets selected, hide that radio entirely and switch
+        # the default to Batch Renumber.
+        if len(selected_items) > 1:
+            self._rb_single.Visibility = Visibility.Collapsed
+            self._rb_single.IsChecked  = False
+            self._rb_batch.IsChecked   = True
+            self._pnl_single.Visibility = Visibility.Collapsed
+            self._pnl_batch.Visibility  = Visibility.Visible
+
         # Find/replace rules collection
         self._fr_rules = ObservableCollection[FindReplaceRule]()
         self._fr_rules.Add(FindReplaceRule())
@@ -2145,6 +2186,16 @@ class DuplicateDialog(object):
         # SheetItem/DuplicateRowItem combine via System.Delegate.Combine, which
         # only accepts a real Delegate (not a Python instancemethod).
         self._suppress_mirror = False
+        # Used while broadcasting a per-row template change to other selected
+        # rows — without it, each propagated assignment would re-trigger the
+        # broadcast and recurse.
+        self._suppress_template_propagation = False
+        # Snapshot of the grid's selection captured the moment the user
+        # mouse-downs into a cell. WPF resets multi-selection to one row when
+        # the user clicks into the per-row template combo, so we save it
+        # here and restore it after the template change so the user doesn't
+        # lose their shift/ctrl selection.
+        self._last_multi_selection = []
         self._row_pc_handler = PropertyChangedEventHandler(self._on_row_property_changed)
         self._rows = ObservableCollection[DuplicateRowItem]()
         for item in selected_items:
@@ -2175,6 +2226,11 @@ class DuplicateDialog(object):
         self._btn_reset_rules.Click  += self._on_reset_rules
         self._chk_view_eq_name.Checked   += self._on_view_eq_name
         self._chk_view_eq_name.Unchecked += self._on_view_eq_name
+        # Snapshot the selection BEFORE the click hits the cell — WPF reduces
+        # multi-row selection to a single row once the click lands on a cell,
+        # so we need PreviewMouseLeftButtonDown (the bubbling mouse event
+        # would already be too late).
+        self._grid.PreviewMouseLeftButtonDown += self._on_grid_preview_mouse_down
         # Bubble class handler for the per-row "Remove rule" buttons.
         self._rules_list.AddHandler(
             Button.ClickEvent,
@@ -2283,9 +2339,115 @@ class DuplicateDialog(object):
         finally:
             self._suppress_mirror = False
 
+    # ── Multi-row template propagation ───────────────────────
+
+    def _hit_test_row(self, e):
+        """Walk up from e.OriginalSource to find the DataGridRow it belongs
+        to, and return the bound row item (DuplicateRowItem) - or None if
+        the click wasn't on a row (header, scrollbar, empty space, etc.)."""
+        node = e.OriginalSource
+        while node is not None:
+            if isinstance(node, DataGridRow):
+                try:
+                    return node.Item
+                except Exception:
+                    return None
+            try:
+                node = VisualTreeHelper.GetParent(node)
+            except Exception:
+                return None
+        return None
+
+    def _on_grid_preview_mouse_down(self, sender, e):
+        """Maintain the multi-selection snapshot used by the per-row template
+        dropdown to broadcast a template pick to every highlighted row.
+
+        WPF collapses multi-row selection to a single row as soon as a click
+        lands on a cell. To survive that, we snapshot the selection here
+        (Preview events tunnel down before the click is processed) and only
+        clear the snapshot when the user clicks a row that is NOT in the
+        existing multi-selection (which signals a fresh single-select)."""
+        try:
+            current = list(self._grid.SelectedItems)
+        except Exception:
+            current = []
+
+        # Capture a fresh multi-selection if the live selection has more than
+        # one row. This handles the initial shift/ctrl-click sequence that
+        # built the multi-selection.
+        if len(current) > 1:
+            self._last_multi_selection = current
+            return
+
+        # Otherwise: WPF may be about to collapse the selection. Decide
+        # whether to keep the prior snapshot (user clicked inside their own
+        # multi-selection - probably opening a dropdown) or clear it (user
+        # clicked outside - making a fresh single-select).
+        if not self._last_multi_selection:
+            return  # nothing snapshotted yet
+
+        clicked_item = self._hit_test_row(e)
+        if clicked_item is None:
+            return  # click on header/scrollbar/etc. - leave snapshot alone
+
+        if clicked_item in self._last_multi_selection:
+            # Click inside the multi-selection -> preserve snapshot so the
+            # template broadcast still has the rows it needs.
+            return
+
+        # Click on a row outside the multi-selection -> user is making a
+        # fresh selection, drop the snapshot so we don't broadcast to
+        # stale rows.
+        self._last_multi_selection = []
+
+    def _restore_multi_selection(self):
+        """Re-apply the snapshotted multi-selection to the grid so the user
+        keeps their shift/ctrl context after a per-row template change."""
+        if not self._last_multi_selection:
+            return
+        try:
+            self._grid.SelectedItems.Clear()
+            for row in self._last_multi_selection:
+                self._grid.SelectedItems.Add(row)
+        except Exception:
+            pass
+
     def _on_row_property_changed(self, sender, args):
         if self._suppress_mirror:
             return
+
+        # Broadcast a per-row template pick to every row that was part of the
+        # multi-selection at click-time, so the per-row ComboBox feels like an
+        # in-cell version of the "Apply to selected" toolbar.
+        if args.PropertyName == "TemplateName":
+            if (not self._suppress_template_propagation
+                    and self._last_multi_selection
+                    and sender in self._last_multi_selection):
+                new_value = sender.TemplateName
+                targets = [r for r in self._last_multi_selection if r is not sender]
+                if targets:
+                    self._suppress_template_propagation = True
+                    try:
+                        for row in targets:
+                            try:
+                                if row.TemplateName != new_value:
+                                    row.TemplateName = new_value
+                            except Exception:
+                                pass
+                    finally:
+                        self._suppress_template_propagation = False
+                    # Defer the selection restore to the next dispatcher tick
+                    # so it happens after WPF finishes closing the cell editor.
+                    try:
+                        self._w.Dispatcher.BeginInvoke(
+                            DispatcherPriority.Background,
+                            Action(self._restore_multi_selection))
+                    except Exception:
+                        # If deferring fails (older WPF/IronPython), restore
+                        # inline. WPF tolerates this in most cases.
+                        self._restore_multi_selection()
+            return
+
         if args.PropertyName != "NewName":
             return
         if not bool(self._chk_view_eq_name.IsChecked):

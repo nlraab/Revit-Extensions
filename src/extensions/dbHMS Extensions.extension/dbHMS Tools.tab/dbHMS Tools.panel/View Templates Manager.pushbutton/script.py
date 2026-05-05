@@ -1067,8 +1067,10 @@ SHARED_RESOURCES = """
             <StackPanel Orientation="Horizontal" Background="Transparent">
               <Grid Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,6,0">
                 <Ellipse x:Name="outer" Width="14" Height="14"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
                          Stroke="#A0AEC0" StrokeThickness="1.5" Fill="White"/>
                 <Ellipse x:Name="dot" Width="7" Height="7"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
                          Fill="#2B6CB0" Visibility="Collapsed"/>
               </Grid>
               <ContentPresenter VerticalAlignment="Center"

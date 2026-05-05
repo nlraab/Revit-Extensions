@@ -14,7 +14,7 @@ Features:
       * Apply to Selected / Remove from Selected  (operate on highlighted rows)
       * Apply to All / Remove from All  (operate on every visible sheet)
       * Clicking a checkbox when multiple sheets are selected applies to all selected
-      * Filter, "Only with focused revision" toggle, group by prefix
+      * Filter, "Only with selected revision" toggle, group by prefix
   - Find Clouds: list every revision cloud with double-click → zoom to
   - Cloud / Tag buttons launch Revit's native commands after closing
 """
@@ -621,9 +621,38 @@ SHARED_RESOURCES = """
       <Setter Property="VerticalContentAlignment" Value="Center"/>
       <Setter Property="Margin"      Value="0,3,0,3"/>
     </Style>
+    <!-- RadioButton: properly-sized centered bullet -->
     <Style TargetType="RadioButton">
-      <Setter Property="Foreground"  Value="#1A202C"/>
+      <Setter Property="Foreground" Value="#1A202C"/>
       <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Grid Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,6,0">
+                <Ellipse x:Name="outer" Width="14" Height="14"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         Stroke="#A0AEC0" StrokeThickness="1.5" Fill="White"/>
+                <Ellipse x:Name="dot" Width="7" Height="7"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         Fill="#2B6CB0" Visibility="Collapsed"/>
+              </Grid>
+              <ContentPresenter VerticalAlignment="Center"
+                                RecognizesAccessKey="True"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="dot" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="outer" Property="Stroke" Value="#2B6CB0"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="outer" Property="Stroke" Value="#2B6CB0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style TargetType="DataGrid">
@@ -734,7 +763,7 @@ SHARED_RESOURCES = """
                                         IsThreeState="True"
                                         Margin="14,0,4,0" VerticalAlignment="Center"
                                         Cursor="Hand" Focusable="False"
-                                        ToolTip="Apply / remove focused revision for every sheet in this group"/>
+                                        ToolTip="Apply / remove selected revision for every sheet in this group"/>
                               <ToggleButton Grid.Column="1" x:Name="Hdr"
                                             IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
                                             Background="Transparent" BorderThickness="0"
@@ -836,12 +865,12 @@ MAIN_XAML = """
             Padding="16,10">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
         <Button x:Name="btn_new"    Content="✚ New Revision" Style="{StaticResource PrimaryButton}"   Height="30" ToolTip="Create a new revision"/>
-        <Button x:Name="btn_delete" Content="🗑 Delete"      Style="{StaticResource DangerButton}"    Height="30" IsEnabled="False" ToolTip="Delete the focused revision"/>
+        <Button x:Name="btn_delete" Content="🗑 Delete"      Style="{StaticResource DangerButton}"    Height="30" IsEnabled="False" ToolTip="Delete the selected revision"/>
         <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
-        <Button x:Name="btn_up"     Content="⬆ Up"           Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move focused revision earlier in sequence"/>
-        <Button x:Name="btn_down"   Content="⬇ Down"         Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move focused revision later in sequence"/>
+        <Button x:Name="btn_up"     Content="⬆ Up"           Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision earlier in sequence"/>
+        <Button x:Name="btn_down"   Content="⬇ Down"         Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision later in sequence"/>
         <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
-        <Button x:Name="btn_find"   Content="🔍 Find Clouds" Style="{StaticResource SecondaryButton}" Height="30" MinWidth="110" IsEnabled="False" ToolTip="Show every revision cloud assigned to the focused revision"/>
+        <Button x:Name="btn_find"   Content="🔍 Find Clouds" Style="{StaticResource SecondaryButton}" Height="30" MinWidth="110" IsEnabled="False" ToolTip="Show every revision cloud assigned to the selected revision"/>
       </StackPanel>
     </Border>
 
@@ -1061,7 +1090,7 @@ MAIN_XAML = """
           <StackPanel Grid.Row="0" Orientation="Vertical" Margin="0,0,0,8">
             <TextBlock Text="Sheets" Style="{StaticResource SectionHeader}" Margin="0"/>
             <TextBlock x:Name="lbl_focus_caption"
-                       Text="No revision focused — click a revision on the left."
+                       Text="No revision selected — click a revision on the left."
                        Foreground="#718096" FontSize="11" Margin="0,2,0,0"
                        TextWrapping="Wrap"/>
           </StackPanel>
@@ -1081,13 +1110,13 @@ MAIN_XAML = """
                          VerticalAlignment="Center" Margin="10,0"/>
             </Grid>
             <ToggleButton Grid.Column="1" x:Name="btn_only_with"
-                          Content="Only with focused"
+                          Content="Only with selected revision"
                           Height="28" Padding="10,4" Margin="8,0,0,0"
                           Cursor="Hand" FontSize="11"
                           Background="#EDF2F7" Foreground="#2D3748"
                           BorderBrush="#CBD5E0" BorderThickness="1"
                           IsEnabled="False"
-                          ToolTip="Show only sheets with the focused revision">
+                          ToolTip="Show only sheets with the selected revision">
               <ToggleButton.Template>
                 <ControlTemplate TargetType="ToggleButton">
                   <Border x:Name="bd" Background="{TemplateBinding Background}"
@@ -1189,11 +1218,11 @@ MAIN_XAML = """
               <Button x:Name="btn_apply_sel"  Content="✚ Apply to Selected"
                       Style="{StaticResource PrimaryButton}" Height="27" MinWidth="130"
                       IsEnabled="False"
-                      ToolTip="Add focused revision to every highlighted sheet"/>
+                      ToolTip="Add selected revision to every highlighted sheet"/>
               <Button x:Name="btn_remove_sel" Content="✖ Remove from Selected"
                       Style="{StaticResource DangerButton}" Height="27" MinWidth="150"
                       IsEnabled="False"
-                      ToolTip="Remove focused revision from every highlighted sheet"/>
+                      ToolTip="Remove selected revision from every highlighted sheet"/>
             </StackPanel>
 
             <!-- Row 2: Apply/Remove ALL visible sheets + count -->
@@ -1208,11 +1237,11 @@ MAIN_XAML = """
               <Button x:Name="btn_apply_all"  Grid.Column="1" Content="Apply to All"
                       Style="{StaticResource SecondaryButton}" Height="27" MinWidth="100"
                       IsEnabled="False"
-                      ToolTip="Add focused revision to every sheet currently shown"/>
+                      ToolTip="Add selected revision to every sheet currently shown"/>
               <Button x:Name="btn_remove_all" Grid.Column="2" Content="Remove from All"
                       Style="{StaticResource DangerButton}" Height="27" MinWidth="120"
                       IsEnabled="False"
-                      ToolTip="Remove focused revision from every sheet currently shown"/>
+                      ToolTip="Remove selected revision from every sheet currently shown"/>
             </Grid>
           </Grid>
 
@@ -1622,12 +1651,12 @@ class RevisionsManagerWindow(object):
         self._refresh_sel_buttons()
 
         if not has:
-            self._lbl_focus_cap.Text = "No revision focused — click a revision on the left."
+            self._lbl_focus_cap.Text = "No revision selected — click a revision on the left."
             self._lbl_focus_cap.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
             return
         f = self._focused
         self._lbl_focus_cap.Text = (
-            "Focused: Rev {0}  •  {1}  •  {2}  ({3} sheet(s), {4} cloud(s))".format(
+            "Selected revision: Rev {0}  •  {1}  •  {2}  ({3} sheet(s), {4} cloud(s))".format(
                 f.SeqNum,
                 f.RevDate or "(no date)",
                 f.Description or "(no description)",
