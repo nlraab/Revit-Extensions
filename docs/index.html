@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dbHMS · AI-Developed Productivity Tools</title>
+<title>dbHMS &middot; Revit Productivity Tools</title>
 <style>
   /* ---------- Design tokens (match dbHMS tool dialogs) ---------- */
   :root {
@@ -13,6 +13,7 @@
     --border:         #E2E8F0;
     --text:           #1A202C;
     --text-muted:     #4A5568;
+    --text-subtle:    #718096;
     --text-on-dark:   #FFFFFF;
     --subtitle:       #CBD5E0;
     --accent:         #3182CE;
@@ -22,6 +23,7 @@
     --danger:         #E53E3E;
     --chip-bg:        #EDF2F7;
     --chip-border:    #CBD5E0;
+    --wordmark:       #00BFFF;
   }
 
   * { box-sizing: border-box; }
@@ -46,6 +48,14 @@
     gap: 16px;
     border-bottom: 1px solid #1A202C;
   }
+  .app-header .eyebrow {
+    font-size: 9pt;
+    color: var(--wordmark);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
   .app-header .title {
     font-size: 20pt;
     font-weight: 700;
@@ -56,27 +66,24 @@
     color: var(--subtitle);
     margin-top: 4px;
   }
-  .logo-block {
+  .wordmark {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 4px;
+    align-items: center;
+    gap: 0;
+    opacity: 0.9;
+    font-family: "Segoe UI", -apple-system, sans-serif;
+    line-height: 1;
   }
-  .logo-mark {
-    background: var(--text-on-dark);
-    color: var(--bg-header);
+  .wordmark .db, .wordmark .hms {
+    color: var(--wordmark);
+    font-size: 28pt;
     font-weight: 800;
-    font-size: 14pt;
-    letter-spacing: 1px;
-    padding: 6px 12px;
-    border-radius: 4px;
-    border: 1px solid #1A202C;
   }
-  .logo-tag {
-    color: var(--subtitle);
-    font-size: 10pt;
-    letter-spacing: 2px;
-    text-transform: uppercase;
+  .wordmark .bar {
+    color: #7A8FA6;
+    font-size: 28pt;
+    font-weight: 300;
+    margin: 0 4px;
   }
 
   /* ---------- Layout ---------- */
@@ -91,6 +98,7 @@
     align-items: baseline;
     gap: 12px;
     margin: 6px 4px 10px;
+    flex-wrap: wrap;
   }
   .section-num {
     background: var(--bg-header);
@@ -122,24 +130,15 @@
     padding: 12px;
     margin-bottom: 10px;
   }
-  .card h3 {
-    margin: 0 0 6px;
-    font-size: 13pt;
-  }
-  .card .meta {
-    color: var(--text-muted);
-    font-size: 10.5pt;
-  }
 
   /* ---------- Hero strip ---------- */
   .hero {
     display: grid;
-    grid-template-columns: 1.3fr 1fr 1fr 1fr;
+    grid-template-columns: 1.5fr 1fr 1fr;
     gap: 10px;
+    align-items: stretch;
   }
-  .hero .stat {
-    text-align: center;
-  }
+  .hero .stat { text-align: center; padding: 4px 0; }
   .hero .stat .num {
     font-size: 28pt;
     font-weight: 800;
@@ -153,11 +152,7 @@
     letter-spacing: 1px;
     margin-top: 4px;
   }
-  .hero .pitch {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-  }
+  .hero .pitch { display: flex; flex-direction: column; justify-content: center; }
   .hero .pitch .h {
     font-size: 14pt;
     font-weight: 700;
@@ -167,6 +162,12 @@
     font-size: 10.5pt;
     color: var(--text-muted);
   }
+  .hero .pitch .scope {
+    margin-top: 6px;
+    font-size: 9.5pt;
+    color: var(--text-subtle);
+    font-style: italic;
+  }
 
   /* ---------- Tool grid ---------- */
   .tool-grid {
@@ -174,26 +175,21 @@
     grid-template-columns: repeat(3, 1fr);
     gap: 10px;
   }
-  .tool {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
+  .tool { display: flex; flex-direction: column; gap: 8px; }
   .tool .head {
     display: flex;
     align-items: center;
     gap: 10px;
   }
   .tool .icon {
-    width: 36px; height: 36px;
-    border-radius: 4px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18pt;
+    width: 40px; height: 40px;
     flex: 0 0 auto;
-    background: var(--bg-header);
-    color: var(--text-on-dark);
+    border-radius: 4px;
+    background: var(--chip-bg);
+    border: 1px solid var(--chip-border);
+    padding: 2px;
+    object-fit: contain;
+    image-rendering: -webkit-optimize-contrast;
   }
   .tool .name {
     font-size: 13pt;
@@ -215,9 +211,7 @@
     border-radius: 4px;
     padding: 8px;
   }
-  .from-to .col {
-    font-size: 9.5pt;
-  }
+  .from-to .col { font-size: 9.5pt; }
   .from-to .col .lbl {
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -234,32 +228,21 @@
     text-align: center;
   }
 
-  .saved {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+  /* Estimated savings, subtle, footnoted */
+  .savings {
     margin-top: 2px;
-  }
-  .saved .lbl {
     font-size: 9pt;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }
-  .saved .val {
-    font-weight: 700;
-    color: var(--good);
-    font-size: 11pt;
-  }
-  .quote {
-    border-left: 3px solid var(--accent);
-    padding: 4px 0 4px 8px;
-    color: var(--text-muted);
-    font-size: 9.5pt;
+    color: var(--text-subtle);
     font-style: italic;
   }
-  .quote .who { font-style: normal; color: var(--text); font-weight: 600; display: block; margin-top: 2px; font-size: 9pt; }
+  .savings .v { font-style: normal; color: var(--text-muted); }
+  .savings-note {
+    grid-column: 1 / -1;
+    font-size: 9pt;
+    color: var(--text-subtle);
+    font-style: italic;
+    padding: 6px 4px 0;
+  }
 
   /* ---------- AI Generated section ---------- */
   .ai-row {
@@ -277,6 +260,178 @@
     color: var(--accent-strong);
     font-weight: 700;
   }
+
+  /* ---------- Circular code-flow diagram ---------- */
+  .circle-flow {
+    position: relative;
+    width: 100%;
+    max-width: 520px;
+    aspect-ratio: 1 / 1;
+    margin: 6px auto 0;
+  }
+  .circle-flow .arcs {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .circle-flow .node {
+    position: absolute;
+    width: 17%;
+    aspect-ratio: 1 / 1;
+    transform: translate(-50%, -50%);
+    background: #FFFFFF;
+    border: 2px solid var(--chip-border);
+    border-radius: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    padding: 6px;
+    transition: border-color .15s ease, box-shadow .2s ease, transform .15s ease;
+  }
+  .circle-flow .node:hover { transform: translate(-50%, -50%) scale(1.04); }
+  .circle-flow .node[aria-selected="true"] {
+    border-color: var(--accent-strong);
+    box-shadow: 0 0 0 6px rgba(43,108,176,.14);
+  }
+  .circle-flow .node .badge {
+    position: absolute;
+    top: -8px; left: -8px;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--bg-header);
+    color: var(--text-on-dark);
+    font-size: 10pt; font-weight: 800;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 2px solid #FFFFFF;
+  }
+  .circle-flow .node[aria-selected="true"] .badge {
+    background: var(--accent-strong);
+  }
+  .circle-flow .node .glyph {
+    font-size: 20pt;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .circle-flow .node .lbl {
+    font-size: 9.5pt;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text);
+  }
+  .circle-flow .center {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 44%;
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    box-shadow: 0 6px 18px rgba(45,55,72,.08);
+    text-align: center;
+  }
+  .circle-flow .center .step {
+    font-size: 9pt;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .circle-flow .center .h {
+    font-size: 12.5pt;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .circle-flow .center .body {
+    font-size: 10pt;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+  .circle-flow .center .next {
+    font-size: 9.5pt;
+    color: var(--accent-strong);
+    cursor: pointer;
+    border: 1px solid var(--chip-border);
+    background: var(--chip-bg);
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .circle-flow .center .next:hover {
+    background: #E2E8F0;
+  }
+
+  /* Linear fallback (used at narrow widths) */
+  .flow-fallback {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .flow-fallback .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px;
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+  }
+  .flow-fallback .row .glyph { font-size: 16pt; }
+  .flow-fallback .row .lbl { font-weight: 700; font-size: 11pt; }
+  .flow-fallback .row .body { color: var(--text-muted); font-size: 10pt; }
+
+  .flow-legend {
+    margin-top: 12px;
+    font-size: 9.5pt;
+    color: var(--text-subtle);
+    font-style: italic;
+    text-align: center;
+  }
+
+  /* ---------- SDLC lifecycle (more technical) ---------- */
+  .sdlc {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .sdlc .stage {
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sdlc .stage .num {
+    font-size: 9pt;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
+  }
+  .sdlc .stage .h {
+    font-size: 12pt;
+    font-weight: 700;
+  }
+  .sdlc .stage ul {
+    margin: 0; padding-left: 16px;
+    color: var(--text-muted);
+    font-size: 9.5pt;
+  }
+  .sdlc .stage ul li { margin-bottom: 2px; }
+  .sdlc .stage.discover  { border-left-color: var(--warn); }
+  .sdlc .stage.develop   { border-left-color: var(--accent-strong); }
+  .sdlc .stage.release   { border-left-color: var(--good); }
+  .sdlc .stage.iterate   { border-left-color: #805AD5; }
 
   /* ---------- Summary three-column ---------- */
   .three-col {
@@ -341,14 +496,18 @@
     margin-left: 6px;
   }
 
+  @media (max-width: 1000px) {
+    .sdlc { grid-template-columns: repeat(2, 1fr); }
+  }
   @media (max-width: 900px) {
     .hero, .tool-grid, .ai-row, .three-col { grid-template-columns: 1fr 1fr; }
     .hero .pitch { grid-column: 1 / -1; }
   }
   @media (max-width: 620px) {
-    .hero, .tool-grid, .ai-row, .three-col { grid-template-columns: 1fr; }
+    .hero, .tool-grid, .ai-row, .three-col, .sdlc { grid-template-columns: 1fr; }
     .app-header { flex-direction: column; align-items: flex-start; }
-    .logo-block { align-items: flex-start; }
+    .circle-flow { display: none; }
+    .flow-fallback { display: flex; }
   }
 </style>
 </head>
@@ -357,36 +516,23 @@
   <!-- Top dark header -->
   <header class="app-header">
     <div>
-      <div class="title">AI-Developed Productivity Tools</div>
-      <div class="subtitle">by Nathan Raab &middot; dbHMS BIM Tools for Revit</div>
+      <div class="eyebrow">Project Brief</div>
+      <div class="title">Revit Productivity Tools</div>
+      <div class="subtitle">Nathan Raab &middot; dbHMS BIM Tools for Revit</div>
     </div>
-    <div class="logo-block">
-      <div class="logo-mark">dbHMS</div>
-      <div class="logo-tag">BIM Tools</div>
+    <div class="wordmark" aria-label="dbHMS">
+      <span class="db">db</span><span class="bar">|</span><span class="hms">HMS</span>
     </div>
   </header>
 
   <main>
 
-    <!-- Hero / at-a-glance stats -->
-    <section>
-      <div class="card hero">
-        <div class="pitch">
-          <div class="h">Six in-house Revit tools, built by one BIM tech with AI as a co-developer.</div>
-          <div class="p">Targeted at the most repetitive parts of an MEP engineer's day &mdash; sheet setup, view alignment, revisions, view templates &mdash; with the look and feel of a single product.</div>
-        </div>
-        <div class="stat"><div class="num">6</div><div class="lbl">Live Tools</div></div>
-        <div class="stat"><div class="num">~10&times;</div><div class="lbl">Faster on Setup</div></div>
-        <div class="stat"><div class="num">$0</div><div class="lbl">3rd-party License</div></div>
-      </div>
-    </section>
-
     <!-- Section 1: Productivity tools -->
     <section>
       <div class="section-head">
         <span class="section-num">1</span>
-        <h2 class="section-title">Tools that dramatically boost productivity</h2>
-        <span class="section-sub">From &rarr; To &nbsp;&middot;&nbsp; Time saved &nbsp;&middot;&nbsp; Engineer feedback</span>
+        <h2 class="section-title">The first six tools</h2>
+        <span class="section-sub">From &rarr; To &nbsp;&middot;&nbsp; representative tasks each tool replaces</span>
       </div>
 
       <div class="tool-grid">
@@ -394,7 +540,7 @@
         <!-- Sheet Setup -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">▦</div>
+            <img class="icon" src="icons/sheet-setup.png" alt="Sheet Setup icon" />
             <div>
               <div class="name">Sheet Setup</div>
               <div class="one-liner">One-click MEP sheet &amp; view scaffolding</div>
@@ -408,17 +554,16 @@
             <div class="arrow">&rarr;</div>
             <div class="col to">
               <div class="lbl">To</div>
-              Pick title block, scope box, levels, trades &mdash; tool builds, numbers, places
+              Pick title block, scope box, levels, trades, then the tool builds, numbers, places
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~4&ndash;6 hrs / project</span></div>
-          <div class="quote">"What used to be a half-day of clicking is done before lunch."<span class="who">&mdash; Project Engineer</span></div>
+          <div class="savings">Estimated savings: <span class="v">~4&ndash;6 hrs / project*</span></div>
         </div>
 
         <!-- Sheet Manager -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">▤</div>
+            <img class="icon" src="icons/sheet-manager.png" alt="Sheet Manager icon" />
             <div>
               <div class="name">Sheet Manager</div>
               <div class="one-liner">Bulk rename, renumber, duplicate, revise</div>
@@ -435,14 +580,13 @@
               Group by prefix, multi-select, live preview; duplicate keeps viewports aligned
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~1&ndash;2 hrs / package</span></div>
-          <div class="quote">"Renumbering a sheet set is finally not painful."<span class="who">&mdash; Senior Designer</span></div>
+          <div class="savings">Estimated savings: <span class="v">~1&ndash;2 hrs / package*</span></div>
         </div>
 
         <!-- Align Views -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">⊞</div>
+            <img class="icon" src="icons/align-views.png" alt="Align Views icon" />
             <div>
               <div class="name">Align Views</div>
               <div class="one-liner">Match viewport &amp; title position across sheets</div>
@@ -459,14 +603,13 @@
               Pick a master, check matching sheets, snap viewport + title in one go
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~30&ndash;60 min / set</span></div>
-          <div class="quote">"Replaces a paid add-in we used to pay per seat for."<span class="who">&mdash; BIM Lead</span></div>
+          <div class="savings">Estimated savings: <span class="v">~30&ndash;60 min / set*</span></div>
         </div>
 
         <!-- Revisions Manager -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">⟳</div>
+            <img class="icon" src="icons/revisions-manager.png" alt="Revisions Manager icon" />
             <div>
               <div class="name">Revisions Manager</div>
               <div class="one-liner">Revisions + sheet coverage + cloud finder</div>
@@ -483,14 +626,13 @@
               One panel: edit revisions, apply to selected sheets, jump to any cloud
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~1 hr / issuance</span></div>
-          <div class="quote">"I trust the revision schedule for the first time."<span class="who">&mdash; Project Manager</span></div>
+          <div class="savings">Estimated savings: <span class="v">~1 hr / issuance*</span></div>
         </div>
 
         <!-- View Range Helper -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">◫</div>
+            <img class="icon" src="icons/view-range-helper.png" alt="View Range Helper icon" />
             <div>
               <div class="name">View Range Helper</div>
               <div class="one-liner">Live plan + section preview of view range</div>
@@ -507,14 +649,13 @@
               Drag colored planes on a live section preview; template locks handled
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~15 min / problem view</span></div>
-          <div class="quote">"Junior engineers actually understand view range now."<span class="who">&mdash; Mentor / Reviewer</span></div>
+          <div class="savings">Estimated savings: <span class="v">~15 min / problem view*</span></div>
         </div>
 
         <!-- View Templates Manager -->
         <div class="card tool">
           <div class="head">
-            <div class="icon">▣</div>
+            <img class="icon" src="icons/view-templates-manager.png" alt="View Templates Manager icon" />
             <div>
               <div class="name">View Templates Manager</div>
               <div class="one-liner">Single + bulk-edit view templates</div>
@@ -531,9 +672,10 @@
               Multi-select templates, build override once, apply to all
             </div>
           </div>
-          <div class="saved"><span class="lbl">Time saved</span><span class="val">~2&ndash;4 hrs / standard update</span></div>
-          <div class="quote">"Standards rollouts went from a project to an afternoon."<span class="who">&mdash; QA / Standards</span></div>
+          <div class="savings">Estimated savings: <span class="v">~2&ndash;4 hrs / standard update*</span></div>
         </div>
+
+        <div class="savings-note">* Time savings are rough internal estimates from early in-firm use, not measured benchmarks.</div>
 
       </div>
     </section>
@@ -543,35 +685,173 @@
       <div class="section-head">
         <span class="section-num">2</span>
         <h2 class="section-title">Built with AI</h2>
-        <span class="section-sub">How one BIM tech ships six tools</span>
+        <span class="section-sub">How one practitioner ships six tools</span>
       </div>
 
       <div class="ai-row">
         <div class="card ai-card">
-          <div class="h">AI <span class="accent">democratizes</span> tool-building</div>
+          <div class="h">AI does the <span class="accent">grunt work</span></div>
           <div class="body">
-            You no longer need a software engineer to automate Revit. A BIM tech who
-            understands the workflow can describe the problem in plain English and
-            collaborate with AI on Python + WPF code, ship a real tool, and iterate
-            with the engineers who use it.
+            Boilerplate Python, WPF event wiring, repetitive Revit API calls. AI now writes in minutes the same code that used to take days. What's left is the work that actually requires judgment: scoping the problem, choosing the architecture, reviewing the diff, and catching what AI quietly gets wrong about a thirty-year-old API.
           </div>
         </div>
         <div class="card ai-card">
-          <div class="h">AI makes it <span class="accent">extremely fast</span></div>
+          <div class="h">Speed <span class="accent">compounds</span> when there's a system</div>
           <div class="body">
-            What used to be a "we'll buy that someday" wishlist becomes a Tuesday
-            afternoon prototype. Each of these six tools went from idea to in-house
-            beta in days, not months &mdash; including the consistent header, footer,
-            and card styling you see throughout this page.
+            Days-to-beta instead of months. The compounding starts when six tools share one design system, one repo, one release process, and one backlog. AI writes the parts. The system around the parts is what turns shipped code into a product, and that system has to be defined, maintained, and governed by someone who knows both the toolchain and the workflow.
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Section 3: Summary & Discussion -->
+    <!-- Section 3: Where the code lives (for management) -->
     <section>
       <div class="section-head">
         <span class="section-num">3</span>
+        <h2 class="section-title">Where the code lives, and how it gets to engineers</h2>
+        <span class="section-sub">Click any step to see what happens there</span>
+      </div>
+
+      <div class="card">
+
+        <div class="circle-flow" role="tablist" aria-label="Code lifecycle">
+
+          <!-- Curved arrows along the same circle the nodes sit on -->
+          <svg class="arcs" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+            <defs>
+              <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5"
+                      markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#3182CE"/>
+              </marker>
+            </defs>
+            <g fill="none" stroke="#3182CE" stroke-width="0.7" marker-end="url(#arrowhead)" opacity="0.85">
+              <path d="M 57.49 14.79 A 36 36 0 0 1 76.75 25.91"/>
+              <path d="M 84.24 38.88 A 36 36 0 0 1 84.24 61.12"/>
+              <path d="M 76.75 74.09 A 36 36 0 0 1 57.49 85.21"/>
+              <path d="M 42.51 85.21 A 36 36 0 0 1 23.25 74.09"/>
+              <path d="M 15.76 61.12 A 36 36 0 0 1 15.76 38.88"/>
+              <path d="M 23.25 25.91 A 36 36 0 0 1 42.51 14.79"/>
+            </g>
+          </svg>
+
+          <!-- 6 nodes positioned around a circle (60 degrees apart) -->
+          <div class="node" role="tab" tabindex="0" data-step="laptop"
+               style="left:50%; top:14%;" aria-selected="true">
+            <span class="badge">1</span>
+            <div class="glyph">&#x1F4BB;</div>
+            <div class="lbl">Developer's<br/>laptop</div>
+          </div>
+          <div class="node" role="tab" tabindex="0" data-step="github"
+               style="left:81.18%; top:32%;">
+            <span class="badge">2</span>
+            <div class="glyph">&#x2399;</div>
+            <div class="lbl">GitHub<br/>repo</div>
+          </div>
+          <div class="node" role="tab" tabindex="0" data-step="release"
+               style="left:81.18%; top:68%;">
+            <span class="badge">3</span>
+            <div class="glyph">&#x1F4E6;</div>
+            <div class="lbl">Versioned<br/>release</div>
+          </div>
+          <div class="node" role="tab" tabindex="0" data-step="firm"
+               style="left:50%; top:86%;">
+            <span class="badge">4</span>
+            <div class="glyph">&#x1F3E2;</div>
+            <div class="lbl">Firm<br/>extensions</div>
+          </div>
+          <div class="node" role="tab" tabindex="0" data-step="revit"
+               style="left:18.82%; top:68%;">
+            <span class="badge">5</span>
+            <div class="glyph">&#x1F3D7;</div>
+            <div class="lbl">Engineer's<br/>Revit</div>
+          </div>
+          <div class="node" role="tab" tabindex="0" data-step="feedback"
+               style="left:18.82%; top:32%;">
+            <span class="badge">6</span>
+            <div class="glyph">&#x1F4AC;</div>
+            <div class="lbl">Feedback<br/>loop</div>
+          </div>
+
+          <!-- Center detail panel -->
+          <div class="center" role="tabpanel" aria-live="polite">
+            <div class="step" id="flow-step">Step 1 of 6</div>
+            <div class="h" id="flow-h"></div>
+            <div class="body" id="flow-b"></div>
+            <button type="button" class="next" id="flow-next">Next step &rarr;</button>
+          </div>
+
+        </div>
+
+        <!-- Linear fallback for narrow screens (CSS toggles visibility) -->
+        <div class="flow-fallback" aria-hidden="true">
+          <div class="row"><span class="glyph">&#x1F4BB;</span><div><div class="lbl">1. Developer's laptop</div><div class="body">Edit + run locally against a real Revit project.</div></div></div>
+          <div class="row"><span class="glyph">&#x2399;</span><div><div class="lbl">2. GitHub repo</div><div class="body">Single source of truth; PRs trigger automated checks.</div></div></div>
+          <div class="row"><span class="glyph">&#x1F4E6;</span><div><div class="lbl">3. Versioned release</div><div class="body">Tagged zip artifact tied to one commit.</div></div></div>
+          <div class="row"><span class="glyph">&#x1F3E2;</span><div><div class="lbl">4. Firm extensions folder</div><div class="body">One shared location; everyone runs the same version.</div></div></div>
+          <div class="row"><span class="glyph">&#x1F3D7;</span><div><div class="lbl">5. Engineer's Revit</div><div class="body">pyRevit loads the new tool on launch. No install.</div></div></div>
+          <div class="row"><span class="glyph">&#x1F4AC;</span><div><div class="lbl">6. Feedback loop</div><div class="body">Issues filed in GitHub feed straight back into the backlog.</div></div></div>
+        </div>
+
+        <div class="flow-legend">
+          The same loop every tool follows. Click any step to see what happens there. The cycle never ends; feedback always seeds the next change.
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Section 4: How a tool gets built (technical SDLC) -->
+    <section>
+      <div class="section-head">
+        <span class="section-num">4</span>
+        <h2 class="section-title">How a tool gets built</h2>
+        <span class="section-sub">Four-stage lifecycle modeled on standard tech-company SDLC</span>
+      </div>
+
+      <div class="sdlc">
+
+        <div class="stage discover">
+          <div class="num">Stage 1</div>
+          <div class="h">Discover</div>
+          <ul>
+            <li>Spot a repetitive task; file an issue with examples</li>
+            <li>Triage: automatable + frequent enough to fund?</li>
+          </ul>
+        </div>
+
+        <div class="stage develop">
+          <div class="num">Stage 2</div>
+          <div class="h">Develop &amp; Test</div>
+          <ul>
+            <li>Scope, branch off <code>main</code>, pair-program with Claude</li>
+            <li>CI runs structural tests; self-test in real projects; review before merge</li>
+          </ul>
+        </div>
+
+        <div class="stage release">
+          <div class="num">Stage 3</div>
+          <div class="h">Release &amp; Support</div>
+          <ul>
+            <li>Semver tag; <code>build.ps1</code> + <code>deploy.ps1</code> push to firm extensions root</li>
+            <li>Triage incoming issues; hotfix branches for breakage</li>
+          </ul>
+        </div>
+
+        <div class="stage iterate">
+          <div class="num">Stage 4</div>
+          <div class="h">Iterate &amp; Expand</div>
+          <ul>
+            <li>Feedback informs the next version of each tool</li>
+            <li>Recurring patterns become the next tool in the suite</li>
+          </ul>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Section 5: Summary & Discussion -->
+    <section>
+      <div class="section-head">
+        <span class="section-num">5</span>
         <h2 class="section-title">Summary &amp; Discussion</h2>
         <span class="section-sub">Opportunity &nbsp;&middot;&nbsp; Challenges &nbsp;&middot;&nbsp; Recommendations</span>
       </div>
@@ -582,7 +862,7 @@
           <div class="h">Opportunity</div>
           <ul>
             <li>Reduce time spent on repetitive tasks</li>
-            <li>Democratize automation &mdash; and, eventually, engineering itself</li>
+            <li>Democratize automation, and eventually engineering itself</li>
             <li>Free up time for more projects, new skills, and creativity</li>
           </ul>
         </div>
@@ -590,9 +870,9 @@
         <div class="card col-card challenges">
           <div class="h">AI Challenges</div>
           <ul>
-            <li><strong>Tool anarchy</strong> &mdash; duplication, overlapping scope, inconsistent UI</li>
-            <li><strong>Limited code knowledge</strong> &mdash; tools become hard to maintain or debug</li>
-            <li><strong>Hallucinations</strong> &mdash; quietly introduced errors, unintended changes</li>
+            <li><strong>Tool anarchy</strong>: duplication, overlapping scope, inconsistent UI</li>
+            <li><strong>Limited code knowledge</strong>: tools become hard to maintain or debug</li>
+            <li><strong>Hallucinations</strong>: quietly introduced errors, unintended changes</li>
           </ul>
         </div>
 
@@ -606,9 +886,9 @@
           </ul>
           <div class="sub">Forward-looking</div>
           <ul>
-            <li>Tool strategy &mdash; organization, standards, look &amp; feel, no redundancy</li>
-            <li>Development process &mdash; rigorous test &amp; release so live tools don't break</li>
-            <li>Governance &mdash; quality, consistency, usability, coverage</li>
+            <li>Tool strategy: organization, standards, look &amp; feel, no redundancy</li>
+            <li>Development process: rigorous test &amp; release so live tools don't break</li>
+            <li>Governance: quality, consistency, usability, coverage</li>
             <li>Investigate tools for other roles in the firm</li>
           </ul>
         </div>
@@ -618,14 +898,71 @@
 
   </main>
 
-  <!-- Bottom footer bar -->
-  <footer class="app-footer">
-    <div class="status">Status: 6 tools in production &middot; consistent header / footer / card styling across the suite.</div>
-    <div>
-      <button class="btn">Cancel</button>
-      <button class="btn primary">Discuss Roadmap</button>
-    </div>
-  </footer>
+<script>
+(function () {
+  var order = ["laptop", "github", "release", "firm", "revit", "feedback"];
+  var detail = {
+    laptop: {
+      h: "Developer's laptop",
+      b: "Edit Python and WPF locally, run the tool against a real Revit project, see the change instantly. Nothing is shared yet; this is the sandbox before anything reaches the team."
+    },
+    github: {
+      h: "GitHub repo",
+      b: "The single source of truth. Every change is pushed here as a pull request; automated checks block broken code from reaching the main branch."
+    },
+    release: {
+      h: "Versioned release",
+      b: "When main is good, a semver tag is cut and the build script produces one self-contained zip. The zip is auditable, rollback-able, and tied to a specific commit."
+    },
+    firm: {
+      h: "Firm extensions folder",
+      b: "The release is unpacked to a shared location everyone in the firm can read. One deploy reaches every engineer."
+    },
+    revit: {
+      h: "Engineer's Revit",
+      b: "On Revit launch, pyRevit loads the folder and the new tool appears in the dbHMS ribbon tab. Engineers install nothing."
+    },
+    feedback: {
+      h: "Feedback loop",
+      b: "Bugs and requests come back as GitHub issues from inside the firm and feed straight into the next iteration. The cycle continues."
+    }
+  };
+
+  var stepEl = document.getElementById("flow-step");
+  var hEl = document.getElementById("flow-h");
+  var bEl = document.getElementById("flow-b");
+  var nextBtn = document.getElementById("flow-next");
+  var nodes = document.querySelectorAll(".circle-flow .node");
+
+  function show(step) {
+    var d = detail[step];
+    if (!d) return;
+    var idx = order.indexOf(step);
+    stepEl.textContent = "Step " + (idx + 1) + " of " + order.length;
+    hEl.textContent = d.h;
+    bEl.textContent = d.b;
+    var nextStep = order[(idx + 1) % order.length];
+    nextBtn.textContent = "Next: " + detail[nextStep].h + " →";
+    nextBtn.dataset.next = nextStep;
+    nodes.forEach(function (n) {
+      n.setAttribute("aria-selected", n.getAttribute("data-step") === step ? "true" : "false");
+    });
+  }
+
+  nodes.forEach(function (n) {
+    n.addEventListener("click", function () { show(n.getAttribute("data-step")); });
+    n.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        show(n.getAttribute("data-step"));
+      }
+    });
+  });
+  nextBtn.addEventListener("click", function () { show(nextBtn.dataset.next); });
+
+  show("laptop");
+})();
+</script>
 
 </body>
 </html>
