@@ -20,6 +20,7 @@ import re
 import json
 import copy
 import codecs
+import hashlib
 import traceback
 
 from pyrevit import revit, DB, forms, script
@@ -52,10 +53,11 @@ NONE_TEMPLATE_LABEL = '<None - no template>'
 NONE_SCOPEBOX_LABEL = '<None>'
 
 
-# In-Revit-session cache of the form's last-known state per project, keyed
-# by doc.PathName (or doc.Title for unsaved docs). Survives form close/reopen
-# within the same Revit session; cleared when Revit closes or the engine
-# is reset.
+# Per-project state is persisted to disk so the form's last-known config
+# (disciplines, level labels, popup overrides, picker selections) survives
+# across Revit sessions and engine resets. Files live under:
+#   %APPDATA%\dbHMS\SheetSetup\states\<md5(doc-key)>.json
+# An in-memory cache keeps reads fast within a single session.
 _PROJECT_STATE_CACHE = {}
 
 
@@ -66,18 +68,65 @@ def _state_key():
         return None
 
 
+def _state_dir():
+    appdata = os.environ.get('APPDATA') or os.path.expanduser('~')
+    folder = os.path.join(appdata, 'dbHMS', 'SheetSetup', 'states')
+    if not os.path.isdir(folder):
+        try:
+            os.makedirs(folder)
+        except Exception:
+            return None
+    return folder
+
+
+def _state_file_path():
+    key = _state_key()
+    if not key:
+        return None
+    folder = _state_dir()
+    if not folder:
+        return None
+    try:
+        digest = hashlib.md5(key.encode('utf-8')).hexdigest()
+    except Exception:
+        digest = hashlib.md5(repr(key).encode('utf-8')).hexdigest()
+    return os.path.join(folder, '{}.json'.format(digest))
+
+
 def _save_project_state(cfg):
     key = _state_key()
     if key is None:
         return
-    _PROJECT_STATE_CACHE[key] = copy.deepcopy(cfg)
+    snapshot = copy.deepcopy(cfg)
+    _PROJECT_STATE_CACHE[key] = snapshot
+    path = _state_file_path()
+    if not path:
+        return
+    try:
+        # Tag the file so a human can identify which project it belongs to.
+        snapshot.setdefault('_project_key', key)
+        with codecs.open(path, 'w', 'utf-8') as f:
+            json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass  # never fail the run because persistence hiccupped
 
 
 def _load_project_state():
     key = _state_key()
     if key is None:
         return None
-    return _PROJECT_STATE_CACHE.get(key)
+    if key in _PROJECT_STATE_CACHE:
+        return copy.deepcopy(_PROJECT_STATE_CACHE[key])
+    path = _state_file_path()
+    if path and os.path.isfile(path):
+        try:
+            with codecs.open(path, 'r', 'utf-8') as f:
+                state = json.load(f)
+            _PROJECT_STATE_CACHE[key] = copy.deepcopy(state)
+            return state
+        except Exception:
+            return None
+    return None
 
 
 def _load_config():
@@ -88,6 +137,41 @@ def _load_config():
 def _save_config(cfg):
     with codecs.open(CONFIG_PATH, 'w', 'utf-8') as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
+
+
+def _minimal_default_disciplines():
+    """The fresh-project starting layout: one sample discipline with two
+    sample plan types. The "Full Setup" button restores the full multi-
+    discipline default from config.json."""
+    return [{
+        'code': 'X',
+        'name': 'Sample Discipline',
+        'enabled': True,
+        'plan_types': [
+            {
+                'name': 'SAMPLE PLAN 1',
+                'view_family': 'FloorPlan',
+                'view_template_name': None,
+                'enabled': True,
+                'level_filter_uniqueids': None,
+                'sheet_number_prefix_override': None,
+                'sheet_number_series_override': '1',
+                'sheet_number_level_override': None,
+                'sheet_number_suffix_override': None,
+            },
+            {
+                'name': 'SAMPLE PLAN 2',
+                'view_family': 'FloorPlan',
+                'view_template_name': None,
+                'enabled': True,
+                'level_filter_uniqueids': None,
+                'sheet_number_prefix_override': None,
+                'sheet_number_series_override': '2',
+                'sheet_number_level_override': None,
+                'sheet_number_suffix_override': None,
+            },
+        ],
+    }]
 
 
 # --------------------------------------------------------------------------
@@ -177,11 +261,10 @@ def _room_tag_label(tag_type):
 
 
 def _get_viewport_types():
-    """Find every viewport type in the project. Tries many strategies because
-    different Revit versions / project configurations expose viewport types
-    differently. Stores diagnostic info on the function for debug display."""
+    """Find every viewport type in the project. Tries several strategies
+    because different Revit versions / project configurations expose viewport
+    types differently."""
     out = {}
-    diag = []  # (strategy_name, count_added, error_or_None)
 
     def _add(t):
         if t is None:
@@ -197,13 +280,11 @@ def _get_viewport_types():
 
     OST_INT = int(DB.BuiltInCategory.OST_Viewports)
 
-    def _try(label, fn):
-        before = len(out)
+    def _try(fn):
         try:
             fn()
-            diag.append((label, len(out) - before, None))
-        except Exception as ex:
-            diag.append((label, len(out) - before, str(ex)))
+        except Exception:
+            pass
 
     # Strategy 1: standard category collector
     def _s1():
@@ -212,7 +293,7 @@ def _get_viewport_types():
                  .WhereElementIsElementType())
         for t in col.ToElements():
             _add(t)
-    _try('OfCategory(OST_Viewports)+IsElementType', _s1)
+    _try(_s1)
 
     # Strategy 2: OfCategoryId variant
     def _s2():
@@ -222,7 +303,7 @@ def _get_viewport_types():
                  .WhereElementIsElementType())
         for t in col.ToElements():
             _add(t)
-    _try('OfCategoryId+IsElementType', _s2)
+    _try(_s2)
 
     # Strategy 3: ElementCategoryFilter via LogicalAnd
     def _s3():
@@ -232,7 +313,7 @@ def _get_viewport_types():
                  .WhereElementIsElementType())
         for t in col.ToElements():
             _add(t)
-    _try('CategoryFilter+IsElementType', _s3)
+    _try(_s3)
 
     # Strategy 4: scan ALL element types, post-filter by category id or family name
     def _s4():
@@ -247,7 +328,7 @@ def _get_viewport_types():
                     _add(t)
             except Exception:
                 pass
-    _try('AllElementTypes+postfilter', _s4)
+    _try(_s4)
 
     # Strategy 5: harvest from existing viewport instances
     def _s5():
@@ -260,7 +341,7 @@ def _get_viewport_types():
                     _add(doc.GetElement(tid))
             except Exception:
                 pass
-    _try('Harvest from Viewport instances', _s5)
+    _try(_s5)
 
     # Strategy 6: project default viewport type
     def _s6():
@@ -270,14 +351,10 @@ def _get_viewport_types():
             eid = None
         if eid is not None and eid != DB.ElementId.InvalidElementId:
             _add(doc.GetElement(eid))
-    _try('GetDefaultElementTypeId(ViewportType)', _s6)
+    _try(_s6)
 
-    types = sorted(out.values(),
-                   key=lambda t: (DB.Element.Name.GetValue(t) or '').lower())
-
-    # Stash diagnostics so the form can show them on demand
-    _get_viewport_types.last_diagnostics = diag
-    return types
+    return sorted(out.values(),
+                  key=lambda t: (DB.Element.Name.GetValue(t) or '').lower())
 
 
 def _viewport_type_label(vp_type):
@@ -310,7 +387,8 @@ class ModelSetupForm(forms.WPFWindow):
         self._populate_disciplines()
 
         # Wire buttons -------------------------------------------------------
-        self.btn_reset.Click += self._on_reset
+        self.btn_full_setup.Click += self._on_full_setup
+        self.btn_clear.Click += self._on_clear
         self.btn_cancel.Click += self._on_cancel
         self.btn_run.Click += self._on_run
         self.btn_levels_all.Click += self._on_levels_all
@@ -338,11 +416,7 @@ class ModelSetupForm(forms.WPFWindow):
         self.cmb_viewport_type.Items.Clear()
         types = self._proj.get('viewport_types', []) or []
         none_item = ComboBoxItem()
-        if types:
-            none_item.Content = '<Default - whatever Revit uses>'
-        else:
-            none_item.Content = (
-                '<Default - 0 viewport types found - click for diagnostics>')
+        none_item.Content = '<Default - whatever Revit uses>'
         none_item.Tag = None
         self.cmb_viewport_type.Items.Add(none_item)
         default = self._cfg.get('default_viewport_type_name')
@@ -356,26 +430,6 @@ class ModelSetupForm(forms.WPFWindow):
             if default and default == label:
                 sel = i + 1
         self.cmb_viewport_type.SelectedIndex = sel
-
-        # If nothing was found, attach a click handler that shows the
-        # per-strategy diagnostic so we can see WHY they're not being found.
-        diag = getattr(_get_viewport_types, 'last_diagnostics', None)
-        if not types and diag is not None:
-            def _on_click(sender, e):
-                lines = ['Viewport-type discovery diagnostics:', '']
-                for label, count, err in diag:
-                    if err is not None:
-                        lines.append('  [{}] {} - ERROR: {}'.format(
-                            count, label, err))
-                    else:
-                        lines.append('  [{}] {}'.format(count, label))
-                lines.append('')
-                lines.append('Please paste this back to me so I can fix it.')
-                forms.alert('\n'.join(lines), title='Diagnostics')
-            self.cmb_viewport_type.MouseDoubleClick += _on_click
-            self.cmb_viewport_type.ToolTip = (
-                'Double-click for diagnostics on why no viewport types '
-                'were found in this project.')
 
     def _populate_scope_boxes(self):
         self.cmb_scopebox.Items.Clear()
@@ -887,7 +941,20 @@ class ModelSetupForm(forms.WPFWindow):
             'level':  '{:02d}'.format(first_lvl_num),
         }
 
-        popup = PlanTypeSettingsWindow(plan, active_levels, defaults)
+        # Live discipline context for the popup header so the popup feels
+        # tied to whatever the user just typed for the discipline letter/name.
+        if parent_disc is None:
+            disc_name_live = ''
+        else:
+            disc_name_live = (parent_disc['name_box'].Text or '').strip() \
+                or parent_disc['config'].get('name', '')
+        discipline_context = {
+            'code': disc_code,
+            'name': disc_name_live,
+        }
+
+        popup = PlanTypeSettingsWindow(
+            plan, active_levels, defaults, discipline_context)
         popup.Owner = self
         popup.ShowDialog()
         # popup mutates plan dict directly on Apply
@@ -1036,11 +1103,21 @@ class ModelSetupForm(forms.WPFWindow):
 
     # ---- Button handlers --------------------------------------------------
 
-    def _on_reset(self, sender, e):
-        self._cfg = _load_config()
-        self._populate_title_blocks()
-        self._populate_scope_boxes()
-        self._populate_levels()
+    def _on_full_setup(self, sender, e):
+        """Replace the discipline list with the full firm-standard layout
+        from config.json. Leaves all other settings (title block, scope box,
+        level overrides, etc.) untouched so the user keeps their context."""
+        # Capture in-flight edits so we don't lose user picks elsewhere
+        self._read_form_into_cfg()
+        full_cfg = _load_config()
+        self._cfg['disciplines'] = copy.deepcopy(full_cfg.get('disciplines', []))
+        self._populate_disciplines()
+
+    def _on_clear(self, sender, e):
+        """Empty the discipline list. Use this to start a setup from scratch
+        in the current project."""
+        self._read_form_into_cfg()
+        self._cfg['disciplines'] = []
         self._populate_disciplines()
 
     def _on_save_default(self, sender, e):
@@ -1075,13 +1152,27 @@ class ModelSetupForm(forms.WPFWindow):
 class PlanTypeSettingsWindow(forms.WPFWindow):
     """Popup for one plan type: pick which levels apply + override sheet # pattern."""
 
-    def __init__(self, plan, active_levels, defaults):
+    def __init__(self, plan, active_levels, defaults, discipline_context=None):
         forms.WPFWindow.__init__(self, PLAN_SETTINGS_XAML)
         self._plan = plan
         self._active_levels = active_levels
         # defaults = {'prefix': 'E', 'series': '1', 'level': '01'} for previewing
         self._defaults = defaults
         self._level_checkboxes = []  # [(uniqueid, CheckBox)]
+
+        # Live discipline context: shows the user that this popup is tied to
+        # the discipline code/name they just typed in the main form. Updates
+        # each time the popup is opened from the main form's gear button.
+        ctx = discipline_context or {}
+        ctx_code = (ctx.get('code') or '').strip()
+        ctx_name = (ctx.get('name') or '').strip()
+        if ctx_code or ctx_name:
+            label = ctx_code
+            if ctx_name:
+                label = '{} - {}'.format(label, ctx_name) if label else ctx_name
+            self.txt_discipline_context.Text = label.upper()
+        else:
+            self.txt_discipline_context.Text = ''
 
         self.txt_plan_name.Text = plan.get('name', '')
 
@@ -1390,21 +1481,66 @@ def _viewport_center_for_sheet(sheet):
     return DB.XYZ(0, 0, 0)
 
 
-def _tag_rooms_on_view(view, room_tag_type):
-    """Tag every room found in this doc + every linked Revit model on the view.
+def _room_is_placed(room):
+    """Best-effort check: is this room actually placed (has a location and
+    non-zero area)? Survives accessing .Area on rooms in linked docs where
+    that property occasionally raises."""
+    try:
+        if room.Location is None:
+            return False
+    except Exception:
+        return False
+    try:
+        return room.Area > 0
+    except Exception:
+        # No usable Area - fall back to "has a location point"
+        try:
+            return room.Location.Point is not None
+        except Exception:
+            return False
 
-    Returns (tagged_count, skipped_count). Errors per room are swallowed.
+
+# Tolerance for matching a linked room's Z elevation to the host view's level
+# (in feet). Generous enough for floor-thickness offsets between disciplines.
+_LEVEL_MATCH_TOL_FT = 1.0
+
+
+def _view_level_elevation(view):
+    """Return the Z elevation (host coords) of the host view's associated
+    level, or None if it can't be determined."""
+    try:
+        gen_level = view.GenLevel
+    except Exception:
+        gen_level = None
+    if gen_level is None:
+        return None
+    try:
+        return gen_level.Elevation
+    except Exception:
+        return None
+
+
+def _tag_rooms_on_view(view, room_tag_type):
+    """Tag every room (host + linked) that lies on the host view's level.
+
+    Returns (tagged_count, skipped_count, error_messages). Error messages are
+    captured (instead of silently swallowed) so the run report can surface
+    real reasons tags didn't land - the most common being a view that doesn't
+    intersect any rooms on its level.
     """
     tagged = 0
     skipped = 0
+    errors = []
     if room_tag_type is None:
-        return (0, 0)
+        return (0, 0, errors)
     if not room_tag_type.IsActive:
         try:
             room_tag_type.Activate()
             doc.Regenerate()
         except Exception:
             pass
+
+    view_z = _view_level_elevation(view)
 
     # Host-doc rooms
     try:
@@ -1413,12 +1549,14 @@ def _tag_rooms_on_view(view, room_tag_type):
                       .WhereElementIsNotElementType()
                       .ToElements())
         for room in host_rooms:
+            if not _room_is_placed(room):
+                continue
             try:
-                if room.Location is None:
-                    continue
-                if hasattr(room, 'Area') and room.Area <= 0:
-                    continue
                 pt = room.Location.Point
+                # Only tag rooms whose Z matches the view's level (avoids
+                # tagging level 1 rooms onto the level 3 view, etc.)
+                if view_z is not None and abs(pt.Z - view_z) > _LEVEL_MATCH_TOL_FT:
+                    continue
                 ref = DB.LinkElementId(room.Id)
                 tag = DB.RoomTag.Create(
                     doc, view.Id, ref, DB.UV(pt.X, pt.Y))
@@ -1428,18 +1566,22 @@ def _tag_rooms_on_view(view, room_tag_type):
                     except Exception:
                         pass
                 tagged += 1
-            except Exception:
+            except Exception as ex:
                 skipped += 1
-    except Exception:
-        pass
+                errors.append('host room {}: {}'.format(
+                    getattr(room, 'Id', '?'), ex))
+    except Exception as ex:
+        errors.append('host rooms collector: {}'.format(ex))
 
-    # Linked-doc rooms
+    # Linked-doc rooms - the common case for MEP setups where Architecture
+    # is a linked model.
     try:
         link_instances = (DB.FilteredElementCollector(doc)
                           .OfClass(DB.RevitLinkInstance)
                           .ToElements())
-    except Exception:
+    except Exception as ex:
         link_instances = []
+        errors.append('link instances collector: {}'.format(ex))
 
     for inst in link_instances:
         link_doc = inst.GetLinkDocument()
@@ -1452,13 +1594,18 @@ def _tag_rooms_on_view(view, room_tag_type):
                      .WhereElementIsNotElementType()
                      .ToElements())
             for room in rooms:
+                if not _room_is_placed(room):
+                    continue
                 try:
-                    if room.Location is None:
-                        continue
-                    if hasattr(room, 'Area') and room.Area <= 0:
-                        continue
                     pt = room.Location.Point
                     host_pt = transform.OfPoint(pt)
+                    # Skip rooms whose level (after the link's transform)
+                    # doesn't match the host view's level. Without this, we
+                    # try to tag every linked room on every plan view and
+                    # nearly all of them fail silently because the room
+                    # doesn't intersect the view's plan range.
+                    if view_z is not None and abs(host_pt.Z - view_z) > _LEVEL_MATCH_TOL_FT:
+                        continue
                     ref = DB.LinkElementId(inst.Id, room.Id)
                     tag = DB.RoomTag.Create(
                         doc, view.Id, ref,
@@ -1469,12 +1616,16 @@ def _tag_rooms_on_view(view, room_tag_type):
                         except Exception:
                             pass
                     tagged += 1
-                except Exception:
+                except Exception as ex:
                     skipped += 1
-        except Exception:
-            pass
+                    errors.append('linked room {} (link {}): {}'.format(
+                        getattr(room, 'Id', '?'),
+                        getattr(inst, 'Name', '?'), ex))
+        except Exception as ex:
+            errors.append('link {} rooms: {}'.format(
+                getattr(inst, 'Name', '?'), ex))
 
-    return (tagged, skipped)
+    return (tagged, skipped, errors)
 
 
 def _execute_plan(plan, settings, project_data):
@@ -1492,6 +1643,9 @@ def _execute_plan(plan, settings, project_data):
     placed_count = 0
     skipped = []
     log_lines = []
+    total_rooms_tagged = 0
+    total_rooms_skipped = 0
+    tag_errors = []
 
     with revit.Transaction('Sheet Setup'):
         # Make sure the title block FamilySymbol is active before sheet creation
@@ -1583,13 +1737,24 @@ def _execute_plan(plan, settings, project_data):
                         op['sheet_number']))
                     continue
 
-                # 8. Auto-tag rooms (if user picked a room tag type)
+                # 8. Auto-tag rooms (if user picked a room tag type). Tags
+                #    rooms in the host doc and in every linked Revit model
+                #    that intersect this view's level.
                 room_tag_type = settings.get('room_tag_type')
                 if room_tag_type is not None:
                     try:
-                        _tag_rooms_on_view(new_view, room_tag_type)
-                    except Exception:
-                        pass  # don't fail the run because of tagging trouble
+                        t_tagged, t_skipped, t_errors = _tag_rooms_on_view(
+                            new_view, room_tag_type)
+                        total_rooms_tagged += t_tagged
+                        total_rooms_skipped += t_skipped
+                        # Cap the errors we keep so a misconfigured project
+                        # doesn't flood the log with thousands of lines.
+                        for msg in t_errors[:5]:
+                            tag_errors.append('{} | {}'.format(
+                                op['sheet_number'], msg))
+                    except Exception as ex:
+                        tag_errors.append('{} | tagging crashed: {}'.format(
+                            op['sheet_number'], ex))
 
                 placed_count += 1
                 log_lines.append('{} | {} | {}'.format(
@@ -1608,6 +1773,16 @@ def _execute_plan(plan, settings, project_data):
         output.print_md('**Skipped {}:**'.format(len(skipped)))
         for line in skipped:
             output.print_md('- ' + line)
+    if settings.get('room_tag_type') is not None:
+        output.print_md(
+            '**Room tags placed: {}** (skipped: {})'.format(
+                total_rooms_tagged, total_rooms_skipped))
+        if total_rooms_tagged == 0 and total_rooms_skipped == 0 and not tag_errors:
+            output.print_md(
+                '- No rooms found on the host doc or in any linked model. '
+                'Make sure the linked architectural model is loaded.')
+        for line in tag_errors[:20]:
+            output.print_md('- ' + line)
 
 
 # --------------------------------------------------------------------------
@@ -1624,10 +1799,15 @@ def main():
     cfg = _load_config()
     cached = _load_project_state()
     if cached:
-        # Use cached state from this Revit session as the starting point so
-        # the user's edits (renamed levels, popup overrides, etc.) survive a
-        # form close/reopen.
+        # Use cached project state as the starting point so the user's edits
+        # (renamed levels, popup overrides, picked title block, etc.) survive
+        # form close/reopen and Revit restarts.
         cfg = cached
+    else:
+        # Fresh project: start with a single sample discipline + two sample
+        # plan types instead of the full firm-standard list. The user can
+        # click "Full Setup" to load the full default at any time.
+        cfg['disciplines'] = _minimal_default_disciplines()
 
     project_data = {
         'levels': _get_levels(),

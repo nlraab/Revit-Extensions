@@ -89,7 +89,12 @@
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
             <Grid>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                    <Button x:Name="btn_reset" Content="Reset to Default" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_full_setup" Content="Full Setup"
+                            Style="{StaticResource SecondaryButton}"
+                            ToolTip="Load the full firm-standard discipline list (M, E, P, FP, T) into the current setup."/>
+                    <Button x:Name="btn_clear" Content="Clear"
+                            Style="{StaticResource SecondaryButton}"
+                            ToolTip="Remove every discipline so you can build a setup from scratch."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
