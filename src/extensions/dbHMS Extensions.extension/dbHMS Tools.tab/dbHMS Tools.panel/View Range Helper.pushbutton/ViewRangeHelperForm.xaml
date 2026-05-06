@@ -336,7 +336,7 @@
                         </Grid>
                         <TextBlock x:Name="txt_plan_hint" DockPanel.Dock="Bottom"
                                    Style="{StaticResource HelperText}" Margin="0,6,0,0"
-                                   Text="Mouse wheel = zoom. Middle-click drag = pan. Drag the red section line / bubbles / far-clip handle as usual."/>
+                                   Text="Mouse wheel = zoom. Drag empty space (left or middle button) to pan. Drag the red section line, bubbles, or far-clip handle to edit."/>
                         <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="White" CornerRadius="3"
                                 ClipToBounds="True">
                             <Grid x:Name="grd_plan">
@@ -370,7 +370,7 @@
                         </Grid>
                         <TextBlock x:Name="txt_section_hint" DockPanel.Dock="Bottom"
                                    Style="{StaticResource HelperText}" Margin="0,6,0,0"
-                                   Text="Drag the colored lines to move each view-range plane. Mouse wheel zoom, middle-click to pan."/>
+                                   Text="Drag the colored lines to move each view-range plane. Mouse wheel zoom; drag empty space to pan."/>
                         <Border BorderBrush="#CBD5E0" BorderThickness="1" Background="White" CornerRadius="3"
                                 ClipToBounds="True">
                             <Grid>

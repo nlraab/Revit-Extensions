@@ -34,6 +34,8 @@ Renaming any `*.extension`, `*.tab`, `*.panel`, or `*.pushbutton` folder changes
 
 Each `script.py` is self-contained: it sets `__title__` / `__author__` for the toolbar, imports `pyrevit` + .NET WPF types (`System.Windows.*`), reads its sibling `config.json` / `*.xaml`, and runs inside a Revit transaction. Tools do not share helper modules — duplication across pushbuttons is intentional so each one can be deployed standalone.
 
+**Documented exception:** the `Clash Detection.tab/` tool uses an extension-level `lib/` folder (`dbHMS Extensions.extension/lib/clash_*/`) shared across its six pushbuttons. Clash detection is a single coherent system — six buttons read and write the same JSON database, share the same data model, and use the same detection algorithms; duplicating thousands of lines across them would be unworkable. pyRevit auto-adds extension-level `lib/` to `sys.path`. The exception is scoped: only `lib/clash_*/` namespaces, only used by Clash Detection scripts. Architecture, data model, and storage layout are documented in `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — read that before making serious changes anywhere under `Clash Detection.tab/` or `lib/clash_*/`. If a future tool wants the same treatment, document it here first.
+
 ### Build / deploy model
 
 `build.ps1` zips the entire `dbHMS Extensions.extension` directory verbatim into `artifacts/dbHMS-Extensions-<timestamp>.zip`. `deploy.ps1` copies that same directory tree into a target pyRevit extensions root, deleting any existing `dbHMS Extensions.extension` folder there first. There is no compilation step and no manifest beyond the folder structure itself, so anything committed under `src/extensions/...` ships as-is.
@@ -126,6 +128,19 @@ Define these in `<Window.Resources>`. Names are part of the convention — keep 
 - `MiniButton` — `Background="#EDF2F7"`, `BorderBrush="#CBD5E0"`, `Padding="8,2"`, `Cursor="Hand"`, `Margin="0,0,4,0"` (for All/None/refresh icons in card headers)
 - `WarnButton` — `BasedOn="{StaticResource SecondaryButton}"`, `Background="#FEFCBF"`, `BorderBrush="#D69E2E"`, `Foreground="#744210"`, `MinWidth="0"`
 - Default `CheckBox` — `Margin="0,3,0,3"`, `VerticalContentAlignment="Center"`
+- **`RadioButton`** — WPF's default radio button looks small and off-center next to text. Use the firm-standard custom template with a 14 px outer ellipse + 7 px inner dot, both centered, blue (`#2B6CB0`) when checked or hovered. Reference implementation lives in `Sheet Manager.pushbutton/script.py` (`<Style TargetType="RadioButton">` block); copy the whole `Style` (including `Setter Property="Template"`) into the new form's `<Window.Resources>`. Without this template, the radio dot is offset and undersized — every form with `RadioButton`s must include it.
+
+### Mixed-font inline labels
+
+When a label and a code-like value need to render on the same line (e.g. `Storage: T:\path\to\file`), do **not** put two `TextBlock`s with different `FontFamily`s in a horizontal `StackPanel` — different fonts have different ascent metrics and a horizontal `StackPanel` aligns by top, so the value visibly floats above or below the label. Instead, use **one** `TextBlock` with `<Run>` elements:
+
+```xml
+<TextBlock Style="{StaticResource HelperText}">
+    <Run Text="Storage: "/><Run Text="T:\\_clash_data\\..." FontFamily="Consolas" Foreground="#2D3748"/>
+</TextBlock>
+```
+
+WPF's text engine handles baseline alignment correctly within a single `TextBlock`.
 
 ### Layout patterns
 

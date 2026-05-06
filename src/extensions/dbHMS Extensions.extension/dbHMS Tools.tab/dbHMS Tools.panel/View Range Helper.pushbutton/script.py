@@ -558,6 +558,41 @@ _ARCH_BIC = (
 )
 
 
+def _copy_view_param_id(src_view, dst_view, bip):
+    """Copy an ElementId-typed view parameter (e.g. VIEW_PHASE,
+    VIEW_PHASE_FILTER) from src_view to dst_view. Silent on every
+    failure — these helpers run inside the section-render transaction
+    where any exception would surface as 'Section create failed' and
+    be misleading."""
+    try:
+        src = src_view.get_Parameter(bip)
+        dst = dst_view.get_Parameter(bip)
+        if src is None or dst is None or dst.IsReadOnly:
+            return
+        try:
+            dst.Set(src.AsElementId())
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _copy_view_param_int(src_view, dst_view, bip):
+    """Copy an integer-typed view parameter (e.g. VIEW_DISCIPLINE)
+    from src_view to dst_view. Silent on every failure."""
+    try:
+        src = src_view.get_Parameter(bip)
+        dst = dst_view.get_Parameter(bip)
+        if src is None or dst is None or dst.IsReadOnly:
+            return
+        try:
+            dst.Set(src.AsInteger())
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _apply_arch_only_visibility(view):
     """Hide every category on `view` that isn't in the architectural
     whitelist. Levels are also hidden - the helper draws its own overlay.
@@ -669,7 +704,10 @@ def seg_length(p1, p2):
 
 def snap_orthogonal(anchor, target):
     """Project `target` onto the closest of (horizontal, vertical) lines
-    through `anchor`. Used to constrain the section line."""
+    through `anchor`, in WORLD XY. Used as a fallback when no CropBox
+    transform is available; the form's `_snap_orthogonal_image` does
+    the same thing in CropBox-local space so rotated plans still get
+    on-screen-orthogonal section lines."""
     dx = abs(target[0] - anchor[0])
     dy = abs(target[1] - anchor[1])
     if dx >= dy:
@@ -831,14 +869,57 @@ class ViewRangeHelperForm(forms.WPFWindow):
                  for k, v in s.items() }
 
     def _default_section_line(self):
-        """Auto-place a section line spanning the crop region horizontally."""
+        """Auto-place a section line spanning the crop region horizontally
+        ON THE RENDERED IMAGE — i.e. across the CropBox's local X axis,
+        not the world X axis. On rotated plans (CropBox angled to true
+        north, very common when the building isn't north-aligned) the
+        world AABB extends well beyond the actual rendered area, so a
+        line placed at world-AABB extremes draws diagonally and lands
+        partly off the visible image. Working in CropBox-local coords
+        and projecting to world keeps the line horizontal on screen
+        and inside the rendered area regardless of plan rotation."""
+        try:
+            cmnx, cmny = self.crop_box_min
+            cmxx, cmxy = self.crop_box_max
+            span_x = cmxx - cmnx
+            if span_x > 1e-6:
+                pad = span_x * 0.05
+                cy_local = (cmny + cmxy) / 2.0
+                p_a = self.crop_box_transform.OfPoint(XYZ(cmnx + pad, cy_local, 0))
+                p_b = self.crop_box_transform.OfPoint(XYZ(cmxx - pad, cy_local, 0))
+                return [(float(p_a.X), float(p_a.Y)),
+                        (float(p_b.X), float(p_b.Y))]
+        except Exception:
+            pass
+        # Fallback to world-AABB if the CropBox isn't usable
         if self.crop_bounds is not None:
             (mnx, mny), (mxx, mxy) = self.crop_bounds
             cy = (mny + mxy) / 2.0
-            # Pad inward by 5%
             pad = (mxx - mnx) * 0.05
             return [(mnx + pad, cy), (mxx - pad, cy)]
         return [(-50.0, 0.0), (50.0, 0.0)]
+
+    def _snap_orthogonal_image(self, anchor_world, target_world):
+        """Constrain the endpoint so anchor→endpoint is horizontal or
+        vertical on the RENDERED IMAGE — i.e. aligned to CropBox-local
+        axes, not world axes. Without this, dragging an endpoint on a
+        rotated plan produces a line that's locked to world XY but
+        appears diagonal on screen, which is what users were seeing."""
+        try:
+            inv_t = self.crop_box_transform_inverse
+            fwd_t = self.crop_box_transform
+            a = inv_t.OfPoint(XYZ(float(anchor_world[0]), float(anchor_world[1]), 0))
+            t = inv_t.OfPoint(XYZ(float(target_world[0]), float(target_world[1]), 0))
+            ax = float(a.X); ay = float(a.Y)
+            tx = float(t.X); ty = float(t.Y)
+            if abs(tx - ax) >= abs(ty - ay):
+                snapped_local = XYZ(tx, ay, 0)
+            else:
+                snapped_local = XYZ(ax, ty, 0)
+            sw = fwd_t.OfPoint(snapped_local)
+            return (float(sw.X), float(sw.Y))
+        except Exception:
+            return snap_orthogonal(anchor_world, target_world)
 
     # ----------------------------------------------------------------------
     # Population & wiring
@@ -1655,6 +1736,17 @@ class ViewRangeHelperForm(forms.WPFWindow):
                 except Exception:
                     try: section.ViewTemplateId = ElementId(-1)
                     except Exception: pass
+                # Copy phase, phase filter, and discipline from the active
+                # plan view. Without this, ViewSection.CreateSection picks
+                # Revit's project defaults which very commonly mismatch
+                # the host's working phase — causing linked architectural
+                # models to phase-map to nothing and the section to render
+                # blank. Copying from the active view guarantees the
+                # section sees the same scene the user already sees in
+                # plan, which is the only sensible default for a preview.
+                _copy_view_param_id(view, section, BuiltInParameter.VIEW_PHASE)
+                _copy_view_param_id(view, section, BuiltInParameter.VIEW_PHASE_FILTER)
+                _copy_view_param_int(view, section, BuiltInParameter.VIEW_DISCIPLINE)
                 # Force Hidden Line + Coarse so cut walls render with poché.
                 # Try the property first, then the BuiltInParameter as backup
                 # in case the property isn't writable in this Revit version.
@@ -2140,6 +2232,13 @@ class ViewRangeHelperForm(forms.WPFWindow):
         pos = e.GetPosition(self.cnv_plan)
         kind = self._plan_hit(pos)
         if kind is None:
+            # Empty space → start a left-button pan. This makes the
+            # canvas feel like a normal Revit view: anywhere not on a
+            # handle is grabbable. Middle-button pan still works in
+            # parallel via _plan_mouse_down_any.
+            self._begin_plan_pan(e, button='left')
+            try: e.Handled = True
+            except Exception: pass
             return
         # Click-to-flip - no drag setup needed
         if kind == 'flip_icon':
@@ -2158,13 +2257,33 @@ class ViewRangeHelperForm(forms.WPFWindow):
         try: self.cnv_plan.CaptureMouse()
         except Exception: pass
 
+    def _begin_plan_pan(self, e, button):
+        """Start a pan drag on the plan. `button` is 'left' or 'middle';
+        we track which so the matching mouse-up actually ends it."""
+        pos_w = e.GetPosition(self)
+        try:
+            init_tx = float(self.trf_plan_pan.X)
+            init_ty = float(self.trf_plan_pan.Y)
+        except Exception:
+            init_tx = init_ty = 0.0
+        self._plan_pan_drag = {
+            'start_x': pos_w.X, 'start_y': pos_w.Y,
+            'init_tx': init_tx, 'init_ty': init_ty,
+            'button':  button,
+        }
+        try: self.cnv_plan.CaptureMouse()
+        except Exception: pass
+        try: self.cnv_plan.Cursor = Cursors.SizeAll
+        except Exception: pass
+
     def _plan_mouse_move(self, sender, e):
         # Pan in progress takes priority over the section/bubble/far-clip drag
         if self._plan_pan_drag is not None:
-            if e.MiddleButton != MouseButtonState.Pressed:
-                self._plan_pan_drag = None
-                try: self.cnv_plan.ReleaseMouseCapture()
-                except Exception: pass
+            btn = self._plan_pan_drag.get('button', 'middle')
+            still_down = (e.LeftButton   == MouseButtonState.Pressed) if btn == 'left' \
+                    else (e.MiddleButton == MouseButtonState.Pressed)
+            if not still_down:
+                self._end_plan_pan()
                 return
             pos = e.GetPosition(self)
             dx = pos.X - self._plan_pan_drag['start_x']
@@ -2191,7 +2310,8 @@ class ViewRangeHelperForm(forms.WPFWindow):
             elif hover_kind == 'far_clip_handle':
                 self.cnv_plan.Cursor = Cursors.SizeAll
             else:
-                self.cnv_plan.Cursor = Cursors.Arrow
+                # Empty space: still grabbable (left-drag pans).
+                self.cnv_plan.Cursor = Cursors.SizeAll
             return
         if e.LeftButton != MouseButtonState.Pressed:
             self._plan_drag = None
@@ -2202,11 +2322,11 @@ class ViewRangeHelperForm(forms.WPFWindow):
         kind = self._plan_drag['kind']
         if kind == 'endpoint_a':
             anchor = self._plan_drag['line_start'][1]
-            new_a  = snap_orthogonal(anchor, (mx, my))
+            new_a  = self._snap_orthogonal_image(anchor, (mx, my))
             self.section_line = [new_a, anchor]
         elif kind == 'endpoint_b':
             anchor = self._plan_drag['line_start'][0]
-            new_b  = snap_orthogonal(anchor, (mx, my))
+            new_b  = self._snap_orthogonal_image(anchor, (mx, my))
             self.section_line = [anchor, new_b]
         elif kind == 'body':
             sx, sy = self._plan_drag['mouse_start_model']
@@ -2270,26 +2390,27 @@ class ViewRangeHelperForm(forms.WPFWindow):
         e.Handled = True
 
     def _plan_mouse_down_any(self, sender, e):
-        # Middle-click starts a pan. Left button is handled by
-        # _plan_mouse_down (existing section-line / bubble / far-clip drag).
+        # Middle-click also starts a pan. Left-button-on-empty-space is
+        # the primary pan path (handled in _plan_mouse_down) — middle
+        # stays here for users who prefer the Revit-native gesture.
         if e.ChangedButton != MouseButton.Middle:
             return
-        pos = e.GetPosition(self)
-        self._plan_pan_drag = {
-            'start_x': pos.X, 'start_y': pos.Y,
-            'init_tx': float(self.trf_plan_pan.X),
-            'init_ty': float(self.trf_plan_pan.Y),
-        }
-        try: self.cnv_plan.CaptureMouse()
-        except Exception: pass
+        self._begin_plan_pan(e, button='middle')
         e.Handled = True
 
     def _plan_mouse_up_any(self, sender, e):
-        if self._plan_pan_drag is not None and e.ChangedButton == MouseButton.Middle:
-            self._plan_pan_drag = None
-            try: self.cnv_plan.ReleaseMouseCapture()
-            except Exception: pass
+        if self._plan_pan_drag is not None \
+                and e.ChangedButton == MouseButton.Middle \
+                and self._plan_pan_drag.get('button') == 'middle':
+            self._end_plan_pan()
             e.Handled = True
+
+    def _end_plan_pan(self):
+        self._plan_pan_drag = None
+        try: self.cnv_plan.ReleaseMouseCapture()
+        except Exception: pass
+        try: self.cnv_plan.Cursor = Cursors.Arrow
+        except Exception: pass
 
     def _on_reset_plan_zoom(self, s, e):
         self.trf_plan_scale.ScaleX = 1.0
@@ -2299,6 +2420,20 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._draw_plan()
 
     def _plan_mouse_up(self, sender, e):
+        # End a left-button pan IF the button was actually released.
+        # MouseLeave is wired to this handler too, but it can fire while
+        # the button is still held — we must not end the pan in that
+        # case or the user's drag breaks the moment the cursor crosses
+        # a sub-element edge.
+        if self._plan_pan_drag is not None \
+                and self._plan_pan_drag.get('button') == 'left':
+            try:
+                still_pressed = (e.LeftButton == MouseButtonState.Pressed)
+            except Exception:
+                still_pressed = False
+            if not still_pressed:
+                self._end_plan_pan()
+            return
         if self._plan_drag is not None:
             kind = self._plan_drag['kind']
             # Things that change what the section preview should show
@@ -2767,6 +2902,12 @@ class ViewRangeHelperForm(forms.WPFWindow):
         pos = e.GetPosition(self.cnv_section)
         key = self._sec_hit(pos)
         if key is None:
+            # Empty space → start a left-button pan. Mirrors the plan
+            # canvas; works on laptops without a middle button and is
+            # the gesture users reach for naturally.
+            self._begin_sec_pan(e, button='left')
+            try: e.Handled = True
+            except Exception: pass
             return
         # Extent handles - drag without view-range-plane state, no template lock
         if key in ('extent_top', 'extent_bot'):
@@ -2788,13 +2929,40 @@ class ViewRangeHelperForm(forms.WPFWindow):
         try: self.cnv_section.CaptureMouse()
         except Exception: pass
 
+    def _begin_sec_pan(self, e, button):
+        """Start a section pan drag. `button` is 'left' or 'middle';
+        mouse-up checks this so the matching release ends it."""
+        pos_w = e.GetPosition(self)
+        try:
+            init_tx = float(self.trf_sec_pan.X)
+            init_ty = float(self.trf_sec_pan.Y)
+        except Exception:
+            init_tx = init_ty = 0.0
+        self._sec_pan_drag = {
+            'start_x': pos_w.X, 'start_y': pos_w.Y,
+            'init_tx': init_tx, 'init_ty': init_ty,
+            'button':  button,
+        }
+        try: self.cnv_section.CaptureMouse()
+        except Exception: pass
+        try: self.cnv_section.Cursor = Cursors.SizeAll
+        except Exception: pass
+
+    def _end_sec_pan(self):
+        self._sec_pan_drag = None
+        try: self.cnv_section.ReleaseMouseCapture()
+        except Exception: pass
+        try: self.cnv_section.Cursor = Cursors.Arrow
+        except Exception: pass
+
     def _sec_mouse_move(self, sender, e):
-        # Middle-button pan in progress takes priority
+        # Pan in progress takes priority over plane / extent drags
         if self._sec_pan_drag is not None:
-            if e.MiddleButton != MouseButtonState.Pressed:
-                self._sec_pan_drag = None
-                try: self.cnv_section.ReleaseMouseCapture()
-                except Exception: pass
+            btn = self._sec_pan_drag.get('button', 'middle')
+            still_down = (e.LeftButton   == MouseButtonState.Pressed) if btn == 'left' \
+                    else (e.MiddleButton == MouseButtonState.Pressed)
+            if not still_down:
+                self._end_sec_pan()
                 return
             pos_w = e.GetPosition(self)
             dx = pos_w.X - self._sec_pan_drag['start_x']
@@ -2854,6 +3022,17 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._validate_state()
 
     def _sec_mouse_up(self, sender, e):
+        # End a left-button pan IF the button was actually released.
+        # MouseLeave is wired to this same handler; we ignore those.
+        if self._sec_pan_drag is not None \
+                and self._sec_pan_drag.get('button') == 'left':
+            try:
+                still_pressed = (e.LeftButton == MouseButtonState.Pressed)
+            except Exception:
+                still_pressed = False
+            if not still_pressed:
+                self._end_sec_pan()
+            return
         if self._sec_drag is None:
             return
         kind = self._sec_drag['key']
@@ -2925,25 +3104,19 @@ class ViewRangeHelperForm(forms.WPFWindow):
         e.Handled = True
 
     def _sec_mouse_down_any(self, sender, e):
-        # Middle-click starts a pan. Left button is handled by
-        # _sec_mouse_down (existing plane / extent drag).
+        # Middle-click also starts a pan. Left-button-on-empty-space is
+        # the primary path (handled in _sec_mouse_down) — middle stays
+        # here for users who prefer the Revit-native gesture.
         if e.ChangedButton != MouseButton.Middle:
             return
-        pos = e.GetPosition(self)
-        self._sec_pan_drag = {
-            'start_x': pos.X, 'start_y': pos.Y,
-            'init_tx': float(self.trf_sec_pan.X),
-            'init_ty': float(self.trf_sec_pan.Y),
-        }
-        try: self.cnv_section.CaptureMouse()
-        except Exception: pass
+        self._begin_sec_pan(e, button='middle')
         e.Handled = True
 
     def _sec_mouse_up_any(self, sender, e):
-        if self._sec_pan_drag is not None and e.ChangedButton == MouseButton.Middle:
-            self._sec_pan_drag = None
-            try: self.cnv_section.ReleaseMouseCapture()
-            except Exception: pass
+        if self._sec_pan_drag is not None \
+                and e.ChangedButton == MouseButton.Middle \
+                and self._sec_pan_drag.get('button') == 'middle':
+            self._end_sec_pan()
             e.Handled = True
 
     def _on_reset_section_zoom(self, s, e):
@@ -2970,7 +3143,8 @@ class ViewRangeHelperForm(forms.WPFWindow):
             else:
                 self.cnv_section.Cursor = Cursors.SizeNS
         else:
-            self.cnv_section.Cursor = Cursors.Arrow
+            # Empty space: still grabbable (left-drag pans).
+            self.cnv_section.Cursor = Cursors.SizeAll
 
 
 # ============================================================================

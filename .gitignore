@@ -13,6 +13,9 @@ Thumbs.db
 ~$*
 *_bash_write_test.txt
 
+# Claude Code local state (per-user permission settings, worktrees, etc.)
+.claude/
+
 # Build artifacts
 dist/
 artifacts/
