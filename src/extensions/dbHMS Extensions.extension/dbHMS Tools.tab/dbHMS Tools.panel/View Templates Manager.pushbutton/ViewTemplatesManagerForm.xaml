@@ -145,15 +145,32 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
 
-        <!-- ===== Expander (sections) ===== -->
+        <!-- ===== Expander (sections) =====
+             Custom HeaderTemplate gives each section a gray background bar,
+             a thick blue accent stripe on the left, and a 15pt bold title so
+             section breaks stand out clearly when scanning the form. -->
         <Style x:Key="SectionExpander" TargetType="Expander">
             <Setter Property="IsExpanded" Value="True"/>
-            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="Margin" Value="0,6,0,10"/>
             <Setter Property="BorderBrush" Value="#E2E8F0"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#1A202C"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HeaderTemplate">
+                <Setter.Value>
+                    <DataTemplate>
+                        <Border Background="#EDF2F7" Padding="6,8"
+                                BorderBrush="#CBD5E0" BorderThickness="0,0,0,2">
+                            <StackPanel Orientation="Horizontal">
+                                <Border Width="4" Height="22" Background="#2B6CB0"
+                                        CornerRadius="2" Margin="0,0,10,0"/>
+                                <TextBlock Text="{Binding}" FontSize="15" FontWeight="Bold"
+                                           Foreground="#1A202C" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <!-- ===== Parameter row layout (shared via control template idea — using a simple Border) ===== -->
@@ -198,10 +215,13 @@
             </Grid>
         </Border>
 
-        <!-- ============= BULK BANNER (yellow when 2+ selected) ============= -->
-        <Border x:Name="bnr_bulk" DockPanel.Dock="Top" Visibility="Collapsed"
+        <!-- ============= BULK BANNER (yellow when 2+ selected) =============
+             Visibility="Hidden" reserves layout space so the form does not
+             jump when bulk mode toggles on/off. Only the bnr_bulk Border
+             gets toggled in code; the slot height stays constant. -->
+        <Border x:Name="bnr_bulk" DockPanel.Dock="Top" Visibility="Hidden"
                 Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="0,0,0,1"
-                Padding="20,10">
+                Padding="20,10" Height="36">
             <Grid>
                 <TextBlock x:Name="txt_bulk_banner" Foreground="#744210" FontWeight="SemiBold"
                            FontSize="12" VerticalAlignment="Center"

@@ -278,10 +278,16 @@ class TemplateItem(object):
 class ViewTemplatesManagerForm(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, MAIN_XAML)
-        self._all_templates  = []   # list of TemplateItem
-        self._search_text    = ""
-        self._chip_filter    = "All"   # All | Plan | Section | 3D | Other
-        self._chip_buttons   = {}      # name -> ToggleButton
+        self._all_templates    = []   # list of TemplateItem
+        self._search_text      = ""
+        self._chip_filter      = "All"   # All | Plan | Section | 3D | Other
+        self._chip_buttons     = {}      # name -> ToggleButton
+        # Multi-row highlight state for shift/ctrl-click on the template list.
+        # Highlight is a visual "selection" separate from the per-row checkbox;
+        # when a checkbox in a highlighted row is clicked, we propagate the
+        # check to all currently highlighted rows.
+        self._highlighted_eids = set()
+        self._last_clicked_eid = None
 
         self._populate_combos()
         self._build_chips()
@@ -498,15 +504,23 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
 
     def _render_template_list(self):
         self.pnl_tpl_list.Children.Clear()
+        # Reset row_border refs on items that won't be visible this pass —
+        # _render_highlights() skips items with row_border None, so we
+        # can't accidentally repaint a recycled UI element.
+        for it in self._all_templates:
+            it.row_border = None
         visible = self._visible_items()
         for item in visible:
             row = self._build_template_row(item)
             self.pnl_tpl_list.Children.Add(row)
             item.row_border = row
         self.txt_tpl_summary.Text = (
-            "{0} templates shown (of {1}). Check 1 to edit, 2+ to bulk-edit."
+            "{0} templates shown (of {1}). Click to highlight, shift/ctrl for "
+            "multi-select. Tick a checkbox in a highlighted row to bulk-check."
             .format(len(visible), len(self._all_templates))
         )
+        # Reapply highlights to whatever rows are now visible
+        self._render_highlights()
 
     def _build_template_row(self, item):
         outer = Border()
@@ -516,6 +530,9 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
         outer.BorderThickness = Thickness(1)
         outer.CornerRadius    = self._zero_radius(3)
         outer.Background      = SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF))
+        outer.Cursor          = Cursors.Hand
+        outer.Tag             = item
+        outer.MouseLeftButtonDown += self._on_row_mouse_down
 
         grid = Grid()
         c0 = ColumnDefinition(); c0.Width = self._grid_length(28)
@@ -528,6 +545,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
         chk.IsChecked = False
         chk.VerticalAlignment   = VerticalAlignment.Center
         chk.HorizontalAlignment = HorizontalAlignment.Center
+        chk.Tag = item
         chk.Click += self._on_template_check
         Grid.SetColumn(chk, 0)
         grid.Children.Add(chk)
@@ -571,7 +589,83 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
         outer.Child = grid
         return outer
 
+    def _on_row_mouse_down(self, sender, args):
+        """Row body click: manages the highlight set with shift/ctrl semantics.
+        WPF's CheckBox handles its own mouse-down, so a click on the row's
+        checkbox does not trigger this handler (the event is marked handled
+        before it bubbles up to the Border)."""
+        item = getattr(sender, "Tag", None)
+        if item is None or not isinstance(item, TemplateItem):
+            return
+        from System.Windows.Input import Keyboard, ModifierKeys
+        # Bitwise AND for IronPython enum-flag compatibility
+        shift = bool(int(Keyboard.Modifiers) & int(ModifierKeys.Shift))
+        ctrl  = bool(int(Keyboard.Modifiers) & int(ModifierKeys.Control))
+
+        visible = self._visible_items()
+
+        if shift and self._last_clicked_eid is not None:
+            last_idx = None
+            this_idx = None
+            for i, it in enumerate(visible):
+                if it.eid_int == self._last_clicked_eid:
+                    last_idx = i
+                if it.eid_int == item.eid_int:
+                    this_idx = i
+            if last_idx is not None and this_idx is not None:
+                lo, hi = min(last_idx, this_idx), max(last_idx, this_idx)
+                self._highlighted_eids = set(it.eid_int for it in visible[lo:hi+1])
+            else:
+                self._highlighted_eids = {item.eid_int}
+                self._last_clicked_eid = item.eid_int
+        elif ctrl:
+            if item.eid_int in self._highlighted_eids:
+                self._highlighted_eids.discard(item.eid_int)
+            else:
+                self._highlighted_eids.add(item.eid_int)
+            self._last_clicked_eid = item.eid_int
+        else:
+            self._highlighted_eids = {item.eid_int}
+            self._last_clicked_eid = item.eid_int
+
+        self._render_highlights()
+
+    def _render_highlights(self):
+        hl_bg     = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
+        hl_border = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
+        normal_bg     = SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF))
+        normal_border = SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF0))
+        for it in self._all_templates:
+            if it.row_border is None:
+                continue
+            if it.eid_int in self._highlighted_eids:
+                it.row_border.Background  = hl_bg
+                it.row_border.BorderBrush = hl_border
+            else:
+                it.row_border.Background  = normal_bg
+                it.row_border.BorderBrush = normal_border
+
     def _on_template_check(self, sender, args):
+        """Checkbox toggle: if the checkbox's row is part of a multi-row
+        highlight set, propagate the new check state to every highlighted
+        row. Otherwise behaves as a simple per-row toggle."""
+        target_item = getattr(sender, "Tag", None)
+        if target_item is None or not isinstance(target_item, TemplateItem):
+            self._update_mode()
+            return
+
+        new_state = bool(sender.IsChecked)
+        # Only propagate if the clicked row is itself highlighted AND the
+        # highlight set has 2+ items. Avoids surprising behavior when the
+        # user just wants to tick a single arbitrary row.
+        if (target_item.eid_int in self._highlighted_eids and
+                len(self._highlighted_eids) > 1):
+            for it in self._all_templates:
+                if (it.eid_int in self._highlighted_eids and
+                        it is not target_item and
+                        it.checkbox is not None):
+                    it.checkbox.IsChecked = new_state
+
         self._update_mode()
 
     # ---- single / bulk mode plumbing ------------------------------------
@@ -584,13 +678,13 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
         n = len(self._checked())
         self._set_apply_column_visible(n >= 2)
         if n == 0:
-            self.bnr_bulk.Visibility = Visibility.Collapsed
+            self.bnr_bulk.Visibility = Visibility.Hidden
             self.txt_right_title.Text   = "Select a template on the left"
             self.txt_right_subtitle.Text = "Edit one template, or check 2+ to bulk-edit."
             self.txt_views_using.Text   = "Number of views with this template assigned: 0"
             self._set_param_table_enabled(False)
         elif n == 1:
-            self.bnr_bulk.Visibility = Visibility.Collapsed
+            self.bnr_bulk.Visibility = Visibility.Hidden
             it = self._checked()[0]
             self.txt_right_title.Text   = it.name
             self.txt_right_subtitle.Text = "{0}  -  {1}".format(
