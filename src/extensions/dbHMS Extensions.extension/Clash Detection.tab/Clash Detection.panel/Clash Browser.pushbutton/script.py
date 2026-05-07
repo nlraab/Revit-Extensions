@@ -37,11 +37,13 @@ from System.Collections.Generic import List as NetList
 
 from pyrevit import forms
 
-from clash_core import config, persistence, project, users, models, browser_filters
+from clash_core import config, persistence, project, users, models, browser_filters, bulk_edit, history_format, filter_presets
+from clash_core.models import _now_iso
 
 
-SCRIPT_DIR = os.path.dirname(__file__)
-FORM_XAML  = os.path.join(SCRIPT_DIR, 'ClashBrowserForm.xaml')
+SCRIPT_DIR        = os.path.dirname(__file__)
+FORM_XAML         = os.path.join(SCRIPT_DIR, 'ClashBrowserForm.xaml')
+HISTORY_DIALOG_XAML = os.path.join(SCRIPT_DIR, 'HistoryDialog.xaml')
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +210,19 @@ class ClashBrowserForm(forms.WPFWindow):
         # they're left on the placeholder until those iterations land.
         self.btn_show_3d.Click       += self._on_show_in_3d
         self.btn_save_viewpoint.Click += self._on_save_viewpoint
+        self.btn_history.Click        += self._on_show_history
+        # Bulk action bar (visible when 2+ rows selected) — Iteration 9.
+        # Group is left on the placeholder; "group these clashes as a
+        # unit" needs its own data-model design pass.
+        self.btn_bulk_status.Click   += self._on_bulk_status
+        self.btn_bulk_reassign.Click += self._on_bulk_reassign
+        self.btn_bulk_resolve.Click  += self._on_bulk_resolve
         for btn_name in ('btn_walkthrough_here',
-                         'btn_history', 'btn_save_preset',
-                         'btn_bulk_status', 'btn_bulk_reassign',
-                         'btn_bulk_group', 'btn_bulk_resolve'):
+                         'btn_bulk_group'):
             getattr(self, btn_name).Click += self._on_coming_soon
+        # Filter presets (Iteration 11). Built-ins always show; user
+        # saves go under them. Right-click a user preset to delete it.
+        self.btn_save_preset.Click += self._on_save_preset
 
         # Filter wiring (Iteration 5). Trade and Status checkboxes don't have
         # individual x:Name attributes — we walk the WrapPanels' Children
@@ -231,6 +241,9 @@ class ClashBrowserForm(forms.WPFWindow):
         self._filters_wired = True
         self._apply_filters()
 
+        # Populate the filter-preset button list (built-ins + saved).
+        self._build_preset_buttons()
+
         # Catch-up viewpoint generation: any clash without a viewpoint
         # (older data from before viewpoint generation existed, or new
         # clashes detected via a path that didn't auto-generate) gets
@@ -242,6 +255,19 @@ class ClashBrowserForm(forms.WPFWindow):
             self._catch_up_viewpoints()
         except Exception:
             pass
+
+        # The first-thumbnail-doesn't-show bug: when __init__ sets
+        # SelectedIndex = 0 (or WPF's auto-sync does it from the new
+        # ItemsSource), SelectionChanged fires synchronously and
+        # _render_viewpoint runs against an Image control that's been
+        # constructed but not yet laid out / displayed. WPF doesn't
+        # repaint that Image when the window finally shows, so the
+        # first thumbnail stays blank until the user clicks a different
+        # row and back. Hooking Loaded — which fires AFTER the window
+        # has been measured + arranged + shown — and re-rendering the
+        # current selection at that moment forces WPF to paint the
+        # thumbnail with the now-fully-laid-out image.
+        self.Loaded += self._on_loaded
 
         if len(self._clashes) > 0:
             self.dg_clashes.SelectedIndex = 0
@@ -435,15 +461,26 @@ class ClashBrowserForm(forms.WPFWindow):
 
     def _on_selection_changed(self, sender, args):
         selected = list(self.dg_clashes.SelectedItems)
-        if len(selected) > 1:
+        count = len(selected)
+        if count > 1:
             self.brd_bulk_actions.Visibility = Visibility.Visible
-            self.txt_bulk_count.Text = '{} selected:'.format(len(selected))
+            self.txt_bulk_count.Text = '{} selected:'.format(count)
         else:
-            self.brd_bulk_actions.Visibility = Visibility.Collapsed
+            # Hidden (not Collapsed) keeps the bar's layout slot reserved
+            # so the DataGrid below doesn't jump up/down as the bar
+            # appears/disappears with selection changes.
+            self.brd_bulk_actions.Visibility = Visibility.Hidden
 
-        if len(selected) >= 1:
+        # Only re-render the detail panel when exactly one row is
+        # selected. Re-rendering on every multi-select adjustment
+        # (ctrl-click adding/removing rows, even when the FIRST selected
+        # row hasn't changed) caused visible glitching as the BitmapImage
+        # reloaded on each click. In multi-select mode the bulk-action
+        # bar is the relevant info; the detail panel keeps whatever was
+        # last shown until the user drops back to a single selection.
+        if count == 1:
             self._populate_detail(selected[0])
-        elif not self._clashes:
+        elif count == 0 and not self._clashes:
             self._show_empty_detail()
 
     def _show_empty_detail(self):
@@ -686,6 +723,145 @@ class ClashBrowserForm(forms.WPFWindow):
             self._suppress_change_events = previous
         self._apply_filters()
 
+    # --- Filter presets (Iteration 11) ----------------------------------
+
+    # Sentinel string the Test combo's "(All tests)" item carries; preset
+    # records use the same string so we can round-trip without special-
+    # casing.
+    _ALL_TESTS_SENTINEL = "(All tests)"
+
+    def _build_preset_buttons(self):
+        """Populate sp_presets with one Button per preset.
+
+        Built-ins first (always present, can't delete), then user-saved.
+        Each button click applies the preset to the filter UI; right-
+        click on a user-saved button opens a context menu to delete it.
+        """
+        from System.Windows.Controls import (
+            Button, ContextMenu, MenuItem)
+        from System.Windows import HorizontalAlignment, Thickness
+        sp = self.sp_presets
+        sp.Children.Clear()
+        for preset in filter_presets.all_presets():
+            btn = Button()
+            btn.Content = preset["name"]
+            btn.Style = self.Resources["MiniButton"]
+            btn.HorizontalContentAlignment = HorizontalAlignment.Left
+            btn.Margin = Thickness(0, 0, 0, 4)
+            # Bind preset via default-arg closure (IronPython late-binding
+            # bites the same way CPython does — without `p=preset`, every
+            # button would apply the LAST preset in the loop).
+            btn.Click += (lambda s, a, p=preset: self._on_apply_preset(p))
+            if not preset.get("builtin"):
+                # User-saved presets get a right-click "Delete preset"
+                # menu. Built-ins are immutable.
+                cm = ContextMenu()
+                mi = MenuItem()
+                mi.Header = "Delete preset"
+                mi.Click += (lambda s, a, pid=preset["id"], pname=preset["name"]:
+                             self._on_delete_preset(pid, pname))
+                cm.Items.Add(mi)
+                btn.ContextMenu = cm
+            sp.Children.Add(btn)
+
+    def _on_apply_preset(self, preset):
+        """Restore the filter UI to the state captured in `preset`.
+
+        trades=None / statuses=None means "no filter on this dimension"
+        — every checkbox in that panel goes on. test defaults to the
+        "(All tests)" sentinel; search defaults to empty.
+        """
+        previous = self._suppress_change_events
+        self._suppress_change_events = True
+        try:
+            trades   = preset.get("trades")
+            statuses = preset.get("statuses")
+            test     = preset.get("test") or self._ALL_TESTS_SENTINEL
+            search   = preset.get("search") or ""
+
+            for chk in self._iter_checkboxes(self.wp_trade_filter):
+                content = str(getattr(chk, 'Content', ''))
+                chk.IsChecked = (trades is None) or (content in trades)
+            for chk in self._iter_checkboxes(self.wp_status_filter):
+                content = str(getattr(chk, 'Content', ''))
+                chk.IsChecked = (statuses is None) or (content in statuses)
+
+            # Test filter: if the saved name isn't in the dropdown
+            # (project changed, test deleted), fall back to "(All tests)"
+            # rather than leaving the combo blank.
+            matched = False
+            for item in self.cmb_test_filter.Items:
+                if getattr(item, 'Content', None) == test:
+                    self.cmb_test_filter.SelectedItem = item
+                    matched = True
+                    break
+            if not matched:
+                self.cmb_test_filter.SelectedIndex = 0
+
+            self.txt_search.Text = search
+        finally:
+            self._suppress_change_events = previous
+        self._apply_filters()
+        self.txt_status.Text = "Preset applied: {}".format(preset.get("name", ""))
+
+    def _on_save_preset(self, sender, args):
+        """Prompt for a name, snapshot the current filter UI state into a
+        preset, persist, and refresh the button list."""
+        name = forms.ask_for_string(
+            default='My filter',
+            prompt='Save current filters as a preset. Name:',
+            title='Save filter preset',
+        )
+        if not name:
+            return
+        allowed_trades, allowed_statuses, test_filter, search_text = (
+            self._collect_filter_args())
+        # _collect_filter_args returns sets; convert to sorted lists for
+        # stable JSON output. allowed_trades/statuses being None means
+        # the panel had no checkboxes (defensive); persist as None too.
+        trades_list = (sorted(allowed_trades)
+                       if allowed_trades is not None else None)
+        statuses_list = (sorted(allowed_statuses)
+                         if allowed_statuses is not None else None)
+        preset = filter_presets.make_preset(
+            name,
+            trades=trades_list,
+            statuses=statuses_list,
+            test=test_filter or self._ALL_TESTS_SENTINEL,
+            search=search_text,
+        )
+        try:
+            filter_presets.append_user_preset(preset)
+        except Exception as ex:
+            forms.alert(
+                "Couldn't save preset:\n\n{}".format(ex),
+                title='Save preset failed',
+            )
+            return
+        self._build_preset_buttons()
+        self.txt_status.Text = "Preset saved: {}".format(preset["name"])
+
+    def _on_delete_preset(self, preset_id, preset_name):
+        """Confirm + delete a user-saved preset, then refresh the list."""
+        ok = forms.alert(
+            "Delete the preset '{}'? This can't be undone.".format(preset_name),
+            title='Delete preset',
+            yes=True, no=True,
+        )
+        if not ok:
+            return
+        try:
+            removed = filter_presets.delete_user_preset(preset_id)
+        except Exception as ex:
+            forms.alert(
+                "Couldn't delete preset:\n\n{}".format(ex),
+                title='Delete preset failed',
+            )
+            return
+        if removed:
+            self._build_preset_buttons()
+            self.txt_status.Text = "Preset deleted: {}".format(preset_name)
+
     def _catch_up_viewpoints(self):
         """Generate viewpoint thumbnails for any clashes that don't have one.
 
@@ -858,6 +1034,186 @@ class ClashBrowserForm(forms.WPFWindow):
             self._render_viewpoint(clash_dict)
             self.txt_status.Text = message
 
+    def _on_show_history(self, sender, args):
+        """Pop a modal sub-window listing the selected clash's audit
+        trail (status changes, reassigns, comments, viewpoint saves).
+
+        Read-only display. Data is whatever's already in
+        `clash_dict['history']`.
+        """
+        selected = list(self.dg_clashes.SelectedItems)
+        if not selected:
+            forms.alert("Select a clash from the list first.",
+                        title='History')
+            return
+        if len(selected) > 1:
+            forms.alert(
+                "History is a single-clash view. Select just one row, "
+                "then try again.",
+                title='History',
+            )
+            return
+        row = selected[0]
+        dialog = _HistoryDialog(row.Source)
+        dialog.Owner = self
+        dialog.ShowDialog()
+
+    # --- Bulk actions (Iteration 9) -------------------------------------
+
+    # Allowed values for the bulk-pickers — same set the detail panel
+    # offers, so bulk edits stay in lockstep with single-row edits.
+    _BULK_STATUSES = ('Open', 'Reviewed', 'Approved', 'Resolved')
+    _BULK_TRADES = ('Mechanical', 'Electrical', 'Plumbing', 'Fire Protection',
+                    'Technology', 'Architectural', 'Structural')
+
+    # Above this many rows we ask the user to confirm. Picked so a
+    # double-click misclick can't quietly reassign 100 clashes, but a
+    # deliberate 5-row selection isn't pestered.
+    _BULK_CONFIRM_THRESHOLD = 5
+
+    def _on_bulk_status(self, sender, args):
+        """Pick a new status, apply to every selected clash."""
+        selected = list(self.dg_clashes.SelectedItems)
+        if len(selected) < 2:
+            return
+        new_status = forms.SelectFromList.show(
+            list(self._BULK_STATUSES),
+            title='Change status for {} clash(es)'.format(len(selected)),
+            button_name='Apply',
+            multiselect=False,
+        )
+        if not new_status:
+            return
+        if not self._confirm_bulk_if_large(
+                selected, "Change status to '{}'".format(new_status)):
+            return
+        self._apply_bulk(
+            selected,
+            lambda clash, at: bulk_edit.apply_status(
+                clash, new_status, self._author, at=at),
+            action_label="Status set to {}".format(new_status))
+
+    def _on_bulk_reassign(self, sender, args):
+        """Pick a new trade, apply to every selected clash."""
+        selected = list(self.dg_clashes.SelectedItems)
+        if len(selected) < 2:
+            return
+        new_trade = forms.SelectFromList.show(
+            list(self._BULK_TRADES),
+            title='Reassign {} clash(es) to trade'.format(len(selected)),
+            button_name='Apply',
+            multiselect=False,
+        )
+        if not new_trade:
+            return
+        if not self._confirm_bulk_if_large(
+                selected, "Reassign to '{}'".format(new_trade)):
+            return
+        self._apply_bulk(
+            selected,
+            lambda clash, at: bulk_edit.apply_trade(
+                clash, new_trade, self._author, at=at),
+            action_label="Reassigned to {}".format(new_trade))
+
+    def _on_bulk_resolve(self, sender, args):
+        """Mark every selected clash as Resolved — no picker needed."""
+        selected = list(self.dg_clashes.SelectedItems)
+        if len(selected) < 2:
+            return
+        if not self._confirm_bulk_if_large(selected, "Mark as Resolved"):
+            return
+        self._apply_bulk(
+            selected,
+            lambda clash, at: bulk_edit.apply_status(
+                clash, 'Resolved', self._author, at=at),
+            action_label="Marked Resolved")
+
+    def _confirm_bulk_if_large(self, selected, action_text):
+        """Pop a yes/no confirmation when many rows are selected.
+
+        Returns True if the user confirmed (or selection is small enough
+        to skip the prompt), False if they cancelled.
+        """
+        if len(selected) < self._BULK_CONFIRM_THRESHOLD:
+            return True
+        return bool(forms.alert(
+            "{} for {} clash(es)?".format(action_text, len(selected)),
+            title='Bulk action — confirm',
+            yes=True, no=True,
+        ))
+
+    def _apply_bulk(self, selected, mutator, action_label):
+        """Loop `mutator` over each selected row, persist once at the end,
+        refresh the grid + detail panel + filters.
+
+        `mutator(clash_dict, at) -> bool` should return True when an
+        actual change was made (so we can report a meaningful count).
+        Uses one ISO timestamp for the whole batch so the audit log
+        groups the entries cleanly.
+        """
+        batch_at = _now_iso()
+        changed = 0
+        for row in selected:
+            try:
+                if mutator(row.Source, batch_at):
+                    row.refresh_from_source()
+                    changed += 1
+            except Exception:
+                # One bad row shouldn't kill the whole batch.
+                continue
+
+        if changed == 0:
+            self.txt_status.Text = (
+                'No changes — every selected clash was already at the target value.')
+            return
+
+        self.dg_clashes.Items.Refresh()
+        # Re-apply filters: a row whose status changed to one whose
+        # checkbox is unchecked should drop from the grid immediately.
+        if self._filters_wired:
+            self._apply_filters()
+        # Restore selection on the still-visible rows so the user can
+        # see what they just changed (re-render of detail panel for the
+        # current selection too).
+        try:
+            current = self._selected_row()
+            if current is not None:
+                self._populate_detail(current)
+        except Exception:
+            pass
+
+        if self._save_clashes(action_label=action_label):
+            self.txt_status.Text = '{} on {}/{} clash(es).'.format(
+                action_label, changed, len(selected))
+
+    def _on_loaded(self, sender, args):
+        """Window-shown hook: force a re-render of the current selection's
+        thumbnail.
+
+        Without this, the very first auto-selected clash on Browser open
+        shows the placeholder until the user clicks away and back. The
+        cause: SelectionChanged fires synchronously during __init__ —
+        before WPF has actually laid out + shown the Image control — so
+        the BitmapImage we set as the Source isn't painted by WPF when
+        the window eventually appears. Loaded fires AFTER the window has
+        been measured / arranged / shown, so a re-render here lands at
+        a moment when WPF will actually paint it.
+
+        One-shot — unsubscribe immediately so re-shows of the form (which
+        in pyRevit's modal flow shouldn't happen, but defensively...)
+        don't re-fire and waste work.
+        """
+        try:
+            self.Loaded -= self._on_loaded
+        except Exception:
+            pass
+        try:
+            current = self._selected_row()
+            if current is not None:
+                self._render_viewpoint(current.Source)
+        except Exception:
+            pass
+
     def _render_viewpoint(self, clash_dict):
         """Update the viewpoint thumbnail panel for the given clash.
 
@@ -936,6 +1292,61 @@ class _CommentRow(object):
             when = '{} {}'.format(d, t)
         self.When = when
         self.Body = comment_dict.get('body') or ''
+
+
+# ---------------------------------------------------------------------------
+# History dialog (Iteration 10) — sub-window listing one clash's audit trail
+# ---------------------------------------------------------------------------
+
+class _HistoryRow(object):
+    """View-model row for the history ItemsControl. Properties bind to
+    {Binding When|Author|Action} in HistoryDialog.xaml."""
+    def __init__(self, history_entry):
+        self.When   = history_format.format_when(history_entry)
+        self.Author = history_format.format_author(history_entry)
+        self.Action = history_format.format_action(history_entry)
+
+
+class _HistoryDialog(forms.WPFWindow):
+    """Sub-dialog that renders one clash's history list.
+
+    Read-only — no edits, no actions beyond Close. Modal so the user
+    finishes reading before going back to the main Browser. Entries
+    show in chronological order (oldest first) so the audit reads
+    top-to-bottom as the clash's life story.
+    """
+    def __init__(self, clash_dict):
+        forms.WPFWindow.__init__(self, HISTORY_DIALOG_XAML)
+
+        seq = (clash_dict or {}).get('seq') or '?'
+        self.txt_dialog_title.Text = 'History — Clash #{}'.format(seq)
+
+        # Build view-model rows from the clash's history list. The
+        # underlying list is already chronological (we always append),
+        # so display in original order.
+        history = (clash_dict or {}).get('history') or []
+        rows = [_HistoryRow(e) for e in history]
+        self.ic_history.ItemsSource = rows
+
+        # Empty-state placeholder vs the rendered list.
+        from System.Windows import Visibility
+        if not rows:
+            self.txt_empty_state.Visibility = Visibility.Visible
+            self.ic_history.Visibility = Visibility.Collapsed
+        else:
+            self.txt_empty_state.Visibility = Visibility.Collapsed
+
+        # Footer count.
+        self.txt_history_count.Text = (
+            '{} entry'.format(len(rows)) if len(rows) == 1
+            else '{} entries'.format(len(rows)))
+        self.txt_dialog_subtitle.Text = (
+            "Audit trail for the selected clash. Read-only.")
+
+        self.btn_close.Click += self._on_close
+
+    def _on_close(self, sender, args):
+        self.Close()
 
 
 ClashBrowserForm().ShowDialog()

@@ -208,12 +208,11 @@
                                 CornerRadius="3" Padding="8" Margin="0,12,0,0">
                             <StackPanel>
                                 <TextBlock Text="Filter Presets" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
-                                <Button Content="My open clashes" Style="{StaticResource MiniButton}"
-                                        HorizontalContentAlignment="Left" Margin="0,2"/>
-                                <Button Content="Mechanical only" Style="{StaticResource MiniButton}"
-                                        HorizontalContentAlignment="Left" Margin="0,2"/>
-                                <Button Content="Resolved this week" Style="{StaticResource MiniButton}"
-                                        HorizontalContentAlignment="Left" Margin="0,2"/>
+                                <!-- sp_presets is populated dynamically at runtime: built-in
+                                     presets first (always present), then any user-saved presets
+                                     (right-click on a custom one to delete it). See _build_preset_buttons
+                                     in the script. -->
+                                <StackPanel x:Name="sp_presets"/>
                                 <Button x:Name="btn_save_preset" Content="+ Save current as preset"
                                         Style="{StaticResource MiniButton}"
                                         HorizontalContentAlignment="Left" Margin="0,6,0,0"/>
@@ -243,11 +242,14 @@
                                        Margin="0,0,6,0" Foreground="#4A5568"/>
                         </DockPanel>
 
-                        <!-- Bulk actions appear when more than one row is selected -->
+                        <!-- Bulk actions appear when more than one row is selected.
+                             Visibility starts Hidden (not Collapsed) so the bar's
+                             slot in the layout is reserved either way — the grid
+                             below doesn't shift up/down when the bar appears. -->
                         <Border x:Name="brd_bulk_actions" DockPanel.Dock="Top"
                                 Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
                                 CornerRadius="3" Padding="8,4" Margin="0,8,0,0"
-                                Visibility="Collapsed">
+                                Visibility="Hidden">
                             <DockPanel LastChildFill="False">
                                 <TextBlock x:Name="txt_bulk_count" Text="0 selected:"
                                            Foreground="#744210" FontWeight="SemiBold"
