@@ -831,6 +831,8 @@ class VgCategoriesDialog(forms.WPFWindow):
         forms.WPFWindow.__init__(self, VG_CAT_XAML)
         self._kind  = kind
         self._names = template_names or []
+        self._cat_rows = []          # list of {row, chk_show, name}
+        self._selected_name = None
         self._populate_title()
         self._populate_lookups()
         self._populate_categories()
@@ -898,16 +900,48 @@ class VgCategoriesDialog(forms.WPFWindow):
         else:
             cats = MOCK_MODEL_CATEGORIES
         self.pnl_categories.Children.Clear()
+        self._cat_rows = []
         for cat_name in cats:
-            row = _build_category_row(cat_name, on_click=self._on_cat_click)
-            self.pnl_categories.Children.Add(row)
+            info = _build_category_row(cat_name, on_click=self._on_cat_click)
+            self.pnl_categories.Children.Add(info["row"])
+            self._cat_rows.append(info)
 
     def _on_cat_click(self, cat_name):
+        self._selected_name = cat_name
         self.txt_selected_cat.Text = cat_name
+        # Highlight the selected row, reset all others
+        hl_bg     = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
+        hl_border = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
+        normal_bg     = SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF))
+        normal_border = SolidColorBrush(Color.FromRgb(0xF1, 0xF5, 0xF9))
+        for info in self._cat_rows:
+            if info["name"] == cat_name:
+                info["row"].Background  = hl_bg
+                info["row"].BorderBrush = hl_border
+                info["row"].BorderThickness = Thickness(1)
+            else:
+                info["row"].Background  = normal_bg
+                info["row"].BorderBrush = normal_border
+                info["row"].BorderThickness = Thickness(0, 0, 0, 1)
 
     def _wire_events(self):
         self.btn_dlg_cancel.Click += lambda s, e: self.Close()
         self.btn_dlg_ok.Click     += lambda s, e: self.Close()
+        self.btn_cat_all.Click    += self._on_cat_all
+        self.btn_cat_none.Click   += self._on_cat_none
+        self.btn_cat_invert.Click += self._on_cat_invert
+
+    def _on_cat_all(self, sender, args):
+        for info in self._cat_rows:
+            info["chk_show"].IsChecked = True
+
+    def _on_cat_none(self, sender, args):
+        for info in self._cat_rows:
+            info["chk_show"].IsChecked = False
+
+    def _on_cat_invert(self, sender, args):
+        for info in self._cat_rows:
+            info["chk_show"].IsChecked = not bool(info["chk_show"].IsChecked)
 
 
 # ===========================================================================
@@ -918,6 +952,8 @@ class VgImportsDialog(forms.WPFWindow):
     def __init__(self, template_names=None):
         forms.WPFWindow.__init__(self, VG_IMP_XAML)
         self._names = template_names or []
+        self._imp_rows = []          # list of {row, chk_show, name}; both CADs and layers
+        self._selected_name = None
         self._populate_lookups()
         self._populate_imports()
         self._wire_events()
@@ -942,33 +978,54 @@ class VgImportsDialog(forms.WPFWindow):
 
     def _populate_imports(self):
         self.pnl_imports.Children.Clear()
+        self._imp_rows = []
+        # Track expander buttons so we can flip them on Expand/Collapse All
+        self._imp_expander_state = []  # list of (btn, panel)
         for cad in MOCK_CAD_IMPORTS:
-            cad_row = _build_import_link_row(
+            cad_info = _build_import_link_row(
                 cad["name"], on_click=lambda n=cad["name"]: self._on_imp_select(n))
-            self.pnl_imports.Children.Add(cad_row["row"])
+            self.pnl_imports.Children.Add(cad_info["row"])
+            self._imp_rows.append(cad_info)
             # Layer rows (collapsed by default)
             layer_panel = StackPanel()
             layer_panel.Visibility = Visibility.Collapsed
             for layer_name in cad["layers"]:
-                lr = _build_import_layer_row(
+                full = "{0} > {1}".format(cad["name"], layer_name)
+                lr_info = _build_import_layer_row(
                     layer_name, parent_cad=cad["name"],
-                    on_click=lambda n="{0} > {1}".format(cad["name"], layer_name): self._on_imp_select(n))
-                layer_panel.Children.Add(lr)
+                    on_click=lambda n=full: self._on_imp_select(n))
+                layer_panel.Children.Add(lr_info["row"])
+                self._imp_rows.append(lr_info)
             self.pnl_imports.Children.Add(layer_panel)
-            cad_row["expander_btn"].Click += self._make_layer_toggle(cad_row["expander_btn"], layer_panel)
+            cad_info["expander_btn"].Click += self._make_layer_toggle(cad_info["expander_btn"], layer_panel)
+            self._imp_expander_state.append((cad_info["expander_btn"], layer_panel))
 
     def _make_layer_toggle(self, btn, panel):
         def handler(sender, args):
             if panel.Visibility == Visibility.Collapsed:
                 panel.Visibility = Visibility.Visible
-                btn.Content = u"▾"  # ▾
+                btn.Content = u"▾"  # down-pointing
             else:
                 panel.Visibility = Visibility.Collapsed
-                btn.Content = u"▸"  # ▸
+                btn.Content = u"▸"  # right-pointing
         return handler
 
     def _on_imp_select(self, name):
+        self._selected_name = name
         self.txt_imp_selected.Text = name
+        hl_bg     = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
+        hl_border = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
+        for info in self._imp_rows:
+            if info["name"] == name:
+                info["row"].Background  = hl_bg
+                info["row"].BorderBrush = hl_border
+            else:
+                # CAD links keep their slight gray bg; layers stay white
+                if " > " in info["name"]:
+                    info["row"].Background = SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF))
+                else:
+                    info["row"].Background = SolidColorBrush(Color.FromRgb(0xF7, 0xFA, 0xFC))
+                info["row"].BorderBrush = SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF0))
 
     def _wire_events(self):
         self.btn_imp_cancel.Click       += lambda s, e: self.Close()
@@ -979,22 +1036,24 @@ class VgImportsDialog(forms.WPFWindow):
         self.btn_imp_collapse_all.Click += self._on_collapse_all
 
     def _on_show_all(self, sender, args):
-        # Iter-1: visual feedback only
-        self.txt_imp_status.Text = "Show All clicked - iter 3 will write to all selected templates."
+        for info in self._imp_rows:
+            info["chk_show"].IsChecked = True
+        self.txt_imp_status.Text = "All CAD imports + layers checked. (Iter 3 wires to API.)"
 
     def _on_hide_all(self, sender, args):
-        self.txt_imp_status.Text = "Hide All clicked - iter 3 will write to all selected templates."
+        for info in self._imp_rows:
+            info["chk_show"].IsChecked = False
+        self.txt_imp_status.Text = "All CAD imports + layers unchecked. (Iter 3 wires to API.)"
 
     def _on_expand_all(self, sender, args):
-        # Walk children: every StackPanel that's collapsed becomes visible
-        for child in list(self.pnl_imports.Children):
-            if isinstance(child, StackPanel):
-                child.Visibility = Visibility.Visible
+        for btn, panel in self._imp_expander_state:
+            panel.Visibility = Visibility.Visible
+            btn.Content = u"▾"
 
     def _on_collapse_all(self, sender, args):
-        for child in list(self.pnl_imports.Children):
-            if isinstance(child, StackPanel):
-                child.Visibility = Visibility.Collapsed
+        for btn, panel in self._imp_expander_state:
+            panel.Visibility = Visibility.Collapsed
+            btn.Content = u"▸"
 
 
 # ===========================================================================
@@ -1005,6 +1064,8 @@ class VgFiltersDialog(forms.WPFWindow):
     def __init__(self, template_names=None):
         forms.WPFWindow.__init__(self, VG_FLT_XAML)
         self._names = template_names or []
+        self._flt_rows = []
+        self._selected_name = None
         self._populate_lookups()
         self._populate_filters()
         self._wire_events()
@@ -1031,14 +1092,30 @@ class VgFiltersDialog(forms.WPFWindow):
 
     def _populate_filters(self):
         self.pnl_filters.Children.Clear()
+        self._flt_rows = []
         for f in MOCK_FILTERS:
-            row = _build_filter_row(
+            info = _build_filter_row(
                 f["name"], f["enabled"], f["visible"],
                 on_click=lambda n=f["name"]: self._on_flt_select(n))
-            self.pnl_filters.Children.Add(row)
+            self.pnl_filters.Children.Add(info["row"])
+            self._flt_rows.append(info)
 
     def _on_flt_select(self, name):
+        self._selected_name = name
         self.txt_flt_selected.Text = name
+        hl_bg     = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
+        hl_border = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
+        normal_bg     = SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF))
+        normal_border = SolidColorBrush(Color.FromRgb(0xF1, 0xF5, 0xF9))
+        for info in self._flt_rows:
+            if info["name"] == name:
+                info["row"].Background  = hl_bg
+                info["row"].BorderBrush = hl_border
+                info["row"].BorderThickness = Thickness(1)
+            else:
+                info["row"].Background  = normal_bg
+                info["row"].BorderBrush = normal_border
+                info["row"].BorderThickness = Thickness(0, 0, 0, 1)
 
     def _wire_events(self):
         self.btn_flt_cancel.Click += lambda s, e: self.Close()
@@ -1126,6 +1203,8 @@ class VgLinksDialog(forms.WPFWindow):
 # ===========================================================================
 
 def _build_category_row(cat_name, on_click=None):
+    """Return a dict {row, chk_show, name} so the dialog can later
+    bulk-toggle Show checkboxes and highlight the selected row."""
     outer = Border()
     outer.Padding = Thickness(0, 2, 0, 2)
     outer.BorderBrush = SolidColorBrush(Color.FromRgb(0xF1, 0xF5, 0xF9))
@@ -1180,7 +1259,7 @@ def _build_category_row(cat_name, on_click=None):
             on_click(cat_name)
         outer.MouseLeftButtonDown += handler
 
-    return outer
+    return {"row": outer, "chk_show": chk_show, "name": cat_name}
 
 
 def _build_import_link_row(cad_name, on_click=None):
@@ -1247,7 +1326,8 @@ def _build_import_link_row(cad_name, on_click=None):
             on_click()
         name_block.MouseLeftButtonDown += handler
 
-    return {"row": outer, "expander_btn": expander_btn, "chk_show": chk_show}
+    return {"row": outer, "expander_btn": expander_btn, "chk_show": chk_show,
+            "name": cad_name}
 
 
 def _build_import_layer_row(layer_name, parent_cad, on_click=None):
@@ -1303,12 +1383,13 @@ def _build_import_layer_row(layer_name, parent_cad, on_click=None):
 
     outer.Child = grid
 
+    full_label = "{0} > {1}".format(parent_cad, layer_name)
     if on_click is not None:
         def handler(sender, args):
             on_click()
         outer.MouseLeftButtonDown += handler
 
-    return outer
+    return {"row": outer, "chk_show": chk_show, "name": full_label}
 
 
 def _build_filter_row(filter_name, enabled, visible, on_click=None):
@@ -1365,7 +1446,7 @@ def _build_filter_row(filter_name, enabled, visible, on_click=None):
             on_click()
         outer.MouseLeftButtonDown += handler
 
-    return outer
+    return {"row": outer, "chk_visible": chk_vis, "chk_enabled": chk_en, "name": filter_name}
 
 
 def _semi_bold():

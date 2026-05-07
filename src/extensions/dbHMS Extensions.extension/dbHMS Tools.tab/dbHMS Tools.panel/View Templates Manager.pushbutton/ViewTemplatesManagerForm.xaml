@@ -146,29 +146,55 @@
         </Style>
 
         <!-- ===== Expander (sections) =====
-             Custom HeaderTemplate gives each section a gray background bar,
-             a thick blue accent stripe on the left, and a 15pt bold title so
-             section breaks stand out clearly when scanning the form. -->
+             Full custom Template so we can:
+               - replace the default chevron with a disclosure arrow that
+                 points right (&#x25B8;) when collapsed and down (&#x25BE;) when expanded
+               - keep the gray-bar / blue-stripe header, but at a more
+                 reasonable 13pt instead of the loud 15pt -->
         <Style x:Key="SectionExpander" TargetType="Expander">
             <Setter Property="IsExpanded" Value="True"/>
-            <Setter Property="Margin" Value="0,6,0,10"/>
-            <Setter Property="BorderBrush" Value="#E2E8F0"/>
-            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0,4,0,8"/>
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#1A202C"/>
-            <Setter Property="HeaderTemplate">
+            <Setter Property="Template">
                 <Setter.Value>
-                    <DataTemplate>
-                        <Border Background="#EDF2F7" Padding="6,8"
-                                BorderBrush="#CBD5E0" BorderThickness="0,0,0,2">
-                            <StackPanel Orientation="Horizontal">
-                                <Border Width="4" Height="22" Background="#2B6CB0"
-                                        CornerRadius="2" Margin="0,0,10,0"/>
-                                <TextBlock Text="{Binding}" FontSize="15" FontWeight="Bold"
-                                           Foreground="#1A202C" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
+                    <ControlTemplate TargetType="Expander">
+                        <DockPanel>
+                            <ToggleButton DockPanel.Dock="Top" Cursor="Hand"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          Background="Transparent" BorderThickness="0" Padding="0">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="#EDF2F7" BorderBrush="#CBD5E0"
+                                                BorderThickness="0,0,0,2" Padding="6,7">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock x:Name="arrow" Text="&#x25B8;" Width="14"
+                                                           FontSize="11" VerticalAlignment="Center"
+                                                           Foreground="#4A5568" Margin="0,0,4,0"/>
+                                                <Border Width="3" Height="16" Background="#2B6CB0"
+                                                        CornerRadius="2" Margin="0,0,8,0"/>
+                                                <ContentPresenter VerticalAlignment="Center"
+                                                                  TextBlock.FontSize="13"
+                                                                  TextBlock.FontWeight="Bold"
+                                                                  TextBlock.Foreground="#1A202C"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="arrow" Property="Text" Value="&#x25BE;"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <ContentPresenter ContentSource="Header"/>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="ExpandSite" Visibility="Collapsed"/>
+                        </DockPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
