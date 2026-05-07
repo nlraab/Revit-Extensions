@@ -36,6 +36,10 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
 
 **Documented exception:** the `Clash Detection.tab/` tool uses an extension-level `lib/` folder (`dbHMS Extensions.extension/lib/clash_*/`) shared across its six pushbuttons. Clash detection is a single coherent system — six buttons read and write the same JSON database, share the same data model, and use the same detection algorithms; duplicating thousands of lines across them would be unworkable. pyRevit auto-adds extension-level `lib/` to `sys.path`. The exception is scoped: only `lib/clash_*/` namespaces, only used by Clash Detection scripts. Architecture, data model, and storage layout are documented in `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — read that before making serious changes anywhere under `Clash Detection.tab/` or `lib/clash_*/`. If a future tool wants the same treatment, document it here first.
 
+**Tool-level READMEs:** some larger tools have their own `README.md` next to `script.py`. Read these before making serious changes inside that tool's folder; do not auto-load them outside that scope. Currently:
+- `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — Clash Detection architecture (see paragraph above).
+- `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/dbHMS Tools.panel/View Templates Manager.pushbutton/README.md` — multi-XAML structure, iteration plan, Revit API mapping, documented `LinkVisibility.Custom` API limitation. The tool ships 5 XAML files (main + 4 sub-dialogs) and is being built iteration-by-iteration; iter-1 is a UI shell with mock sub-dialog data and disabled Apply.
+
 ### Build / deploy model
 
 `build.ps1` zips the entire `dbHMS Extensions.extension` directory verbatim into `artifacts/dbHMS-Extensions-<timestamp>.zip`. `deploy.ps1` copies that same directory tree into a target pyRevit extensions root, deleting any existing `dbHMS Extensions.extension` folder there first. There is no compilation step and no manifest beyond the folder structure itself, so anything committed under `src/extensions/...` ships as-is.
