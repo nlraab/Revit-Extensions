@@ -43,7 +43,7 @@ from System.Windows.Threading import (
 
 from pyrevit import forms, script
 
-from clash_core import config, persistence, project, users, merge
+from clash_core import config, persistence, project, users, merge, dedupe
 from clash_core.models import _now_iso
 from clash_detect import linked, runner
 
@@ -557,6 +557,17 @@ class RunClashTestForm(forms.WPFWindow):
                 "\n**Detection finished. Raw clashes: {}** (errors during run: {})".format(
                     len(raw_clashes), error_count)
             )
+
+            # Dedupe across tests: drop soft clashes whose pair already
+            # has a hard clash in this run. The same physical contact
+            # otherwise produces both a hard hit and a soft "near miss"
+            # row in the Browser, which is duplicate noise.
+            if raw_clashes:
+                raw_clashes, dropped = dedupe.drop_soft_overlapping_hard(raw_clashes)
+                if dropped:
+                    output.print_md(
+                        "**Deduped {} soft clash(es)** (same pair already detected as hard).".format(dropped)
+                    )
         except Exception as ex:
             self._restore_ui()
             forms.alert(
@@ -589,6 +600,30 @@ class RunClashTestForm(forms.WPFWindow):
                 title='Save error',
             )
             return
+
+        # Auto-generate viewpoints for any new clashes (and for any
+        # existing clashes that don't already have one — catches up older
+        # data that was detected before this iteration shipped). Done
+        # AFTER the persist above so even if viewpoint generation fails,
+        # the clash data itself is safely on disk.
+        try:
+            from pyrevit import revit
+            from clash_view import viewpoint as vp_module
+            generated = vp_module.generate_for_all(
+                revit.uidoc, merged_clashes, run_role_map,
+                self._project_hash, captured_by=author,
+                log=output.print_md, only_missing=True,
+            )
+            if generated > 0:
+                # Re-persist now that viewpoints[] entries have been
+                # added to the clash dicts in-place.
+                new_data['clashes'] = merged_clashes
+                persistence.write_clashes(self._project_hash, new_data)
+        except Exception as ex:
+            output.print_md(
+                "**Viewpoint generation failed** (clashes are saved; "
+                "thumbnails will populate on first Show in 3D): `{}`".format(ex)
+            )
 
         # Show result
         self._restore_ui()

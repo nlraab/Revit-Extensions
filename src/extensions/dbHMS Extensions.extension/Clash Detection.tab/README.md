@@ -43,11 +43,53 @@ What's implemented and runs against real Revit + persistence:
 - `lib/clash_core/categories.py` — Revit `OST_*` ↔ friendly-name mapping
 - `lib/clash_core/identity.py` — **clash fingerprint** (stable hash so re-runs recognize the same clash)
 - `lib/clash_core/merge.py` — **diff/merge** of a fresh detection run with the previous one
+- `lib/clash_core/dedupe.py` — pre-merge dedupe: drop soft clashes whose pair already
+  has a hard clash in the same run (a pair that actually intersects isn't a "near miss")
+- `lib/clash_core/browser_filters.py` — pure-data filter predicate for the Browser's
+  Trade × Status × Test × Search filter card; built so the rule can be unit-tested
+  in CPython independently of WPF / Revit
 - `lib/clash_detect/linked.py` — live link enumeration + role-map + cross-doc geometry helpers
 - `lib/clash_detect/hard.py` — real `ElementIntersectsElementFilter` / `ElementIntersectsSolidFilter`
   detection (host vs host, host vs link, link vs link)
 - `lib/clash_detect/soft.py` — bounding-box-inflation "near miss" detection with tolerance
 - `lib/clash_detect/runner.py` — orchestrator that turns a saved test definition into raw clashes
+- `lib/clash_view/geometry.py` — bounding-box math: transform link-local boxes into host
+  coordinates (refits an AABB around all 8 transformed corners under rotation), union
+  multiple boxes, pad / box-around-point fallbacks
+- `lib/clash_view/threed_view.py` — find or create the persistent **Clash Navigator**
+  3D view (single named view we own and reuse across every Show in 3D click — keeps
+  the project file clean instead of accumulating one view per click)
+- `lib/clash_view/highlights.py` — view-scoped element color overrides: paint clash
+  element A red and element B blue in the Clash Navigator view only, clear on
+  next click / Browser close. Module-level state tracks the last-painted IDs so
+  the view never accumulates stale highlights across clicks.
+- `lib/clash_view/navigate.py` — `show_clash(uidoc, clash_dict, role_map)` resolves
+  the clash's two element refs back to live elements (host + linked), centers a 10 ft
+  cube section box on the clash midpoint, applies red/blue color overrides to the
+  host elements, switches to the navigator view, selects the host elements, zooms
+  tight on the section box. Plus `clear_highlights(uidoc)` for explicit cleanup.
+- `lib/clash_view/snapshot.py` — `export(doc, view, out_path, pixel_size)`:
+  Document.ExportImage wrapper for clash thumbnails (PNG, FitToPage zoom,
+  800px longer-edge default, 150 DPI). OFFSCREEN render — doesn't depend on
+  the view being active or visible, doesn't capture overlapping windows
+  (the Browser, dialogs, tooltips). Pairs with `threed_view.set_section_box`,
+  which sets both the section box AND a matching CropBox on the view —
+  the CropBox is what makes ExportImage's FitToPage zoom frame the clash
+  region tightly instead of zooming to project extents.
+- `lib/clash_view/viewpoint.py` — two capture entry points:
+  `generate_for_all(uidoc, clash_dicts, role_map, project_hash, captured_by,
+  log, only_missing=True)` — batch-generates viewpoint thumbnails for every
+  clash that needs one. Used by Run Clash Test (post-detection auto-gen for
+  new clashes) and the Browser (catch-up on open for older data). Per-clash
+  transaction stages section box + crop box + element color overrides on the
+  navigator view, then ExportImages to the deterministic PNG path. Doesn't
+  switch views or depend on UI state — pure offscreen render.
+  `capture_for_clash(uidoc, clash_dict, role_map, project_hash, captured_by)`
+  — single-clash capture used by the Browser's manual Save Viewpoint button.
+  Re-stages section box + highlights for the clash (so the manual save always
+  captures THAT clash, not whatever happened to be on screen) before exporting.
+  Plus `viewpoint_image_for(clash_dict, project_hash)` for the detail panel
+  to look up the image path on row selection.
 
 Wired forms:
 
@@ -57,7 +99,36 @@ Wired forms:
   `project.json`. Per-project disciplines roster also persists.
 - **Test Library** — reads the global library from `<shared>/global/test_library.json`.
   Auto-seeds from `default_tests.json` on first launch. Shows project overrides.
-  Editor view is read-only (writing edits to disk lands next iteration).
+  **Editor is fully wired** with a deliberate firm-vs-project safety model:
+    - Selecting a **firm-wide (global) default** opens the editor in
+      **read-only** mode with a blue locked banner. The prominent CTA is
+      **Customize for this Project** — forks the selected global into the
+      active project's `custom_tests` and switches the editor to that
+      override. A small grey **Edit firm-wide…** link in the bottom-right
+      of the editor unlocks the global for that one test (after a
+      confirmation dialog), turning the banner yellow with a "Cancel
+      firm-wide edit" out. Switching tests always relocks — firm-wide edit
+      is per-test, not session-wide, so a stray Save can't mutate the firm
+      library.
+    - Selecting a **project override** opens the editor fully editable
+      with a purple "Project override" badge and no banner. This is the
+      common path.
+    - **+ New Project Test** (footer) creates a blank in the active
+      project's overrides — the easy create path. **+ New Firm Test**
+      creates a blank in the global library and asks for confirmation
+      first; the new firm-wide test opens unlocked so the user can fill it
+      in without an extra unlock step.
+    - **Delete** removes the selection from whichever store it came from
+      (with a confirmation that names the scope so a misclick can't wipe
+      the firm library). **Reset to firm default** overwrites the global
+      with the shipped `default_tests.json` (project overrides untouched).
+  Multi-source sets (`["host", "link:Architectural"]` style) are edited via
+  three independent source checkboxes per set — the editor saves a single
+  string when one is checked and a list when 2+ are.
+  *Not yet wired:* the "Disabled override" flow — selecting a Disabled row
+  shows a read-only banner instead of letting you re-enable from here. The
+  4 broad firm defaults don't lend themselves to per-project disabling so
+  this is deferred.
 - **Run Clash Test** — runs **real detection** against the active doc + role-mapped
   linked models, merges with the existing `clashes.json`, and writes the result.
   Each new clash gets a per-project sequential number (`Clash #N`). On re-run:
@@ -67,19 +138,77 @@ Wired forms:
 - **Clash Browser** — reads real `clashes.json` and renders every clash. Status
   dropdown changes, trade reassignments, and posted comments persist back to
   disk **immediately** with a history entry recording who did what and when.
+  **Live filters** (Iteration 5): the Trade and Status checkboxes, Test
+  dropdown (populated from the actual loaded tests, not XAML mockup), and
+  Search box (case-insensitive substring match across element names, IDs,
+  trade, comment authors and bodies) all filter the visible grid in real
+  time. The Test, Trade, and Status filters compose with the existing
+  Group-by control. Reset returns to the firm-default coordination view
+  (all trades on, Open + Reviewed only, all tests, no search). Status /
+  trade reassignments and new comments re-apply the active filter set
+  immediately so a row changing status to one that's currently hidden
+  drops out of view without waiting for refresh.
+  **Show in 3D** (Iteration 3) frames the selected clash in the persistent
+  *Clash Navigator* 3D view. The section box is built **around the clash
+  midpoint** with a 5 ft half-size (10 ft cube) — not around the union of
+  the elements' bounding boxes, which would produce a section box the size
+  of whichever element is largest (a 40 ft duct that clashes a wall at one
+  end would otherwise produce a 40-ft section box rather than a 10-ft
+  window on the actual clash). The midpoint comes from detection time,
+  computed as the center of the bbox-overlap region. If that midpoint is
+  missing or malformed the show falls back to padded element bboxes so the
+  view still lands somewhere sensible. Host element(s) get selected so
+  Properties shows them; the view zooms tight to the section box (via
+  `ZoomAndCenterRectangle`, not `ZoomToFit` — `ZoomToFit` zooms to the
+  view's CROP region which for a 3D view is project extents).
+  **Element color overrides** (Iter 4): in the navigator view only, the
+  clash's element A is painted red, element B blue. The next click clears
+  the previous pair and paints the new one. Linked elements appear inside
+  the section box but aren't selected or color-overridden — Revit's
+  host-element APIs don't accept link refs cleanly and reference-based
+  link work is finicky enough to defer.
+  **Viewpoints** (Iter 6) are generated automatically and stored as PNG
+  thumbnails (offscreen ExportImage render, ~30-80 KB each) at
+  `<shared>/<project-hash>/viewpoints/<clash-id>.png` plus camera + section
+  box + author + timestamp on the clash dict. Single viewpoint per clash
+  (v1 design — every save overwrites the previous one in place). Three
+  trigger paths:
+    - **Post-detection batch** (Run Clash Test): every newly-detected clash
+      gets a viewpoint generated immediately after merge. By the time the
+      user opens the Browser, all thumbnails are already on disk.
+    - **Browser-open catch-up**: any clash without a viewpoint (older data,
+      detection paths that didn't auto-generate) gets one when the Browser
+      opens. Usually a no-op on a healthy project; status bar reports
+      progress when there are missing thumbnails to fill in.
+    - **Manual Save Viewpoint button**: re-captures with whatever angle the
+      user has rotated the navigator view to. Useful when the auto-generated
+      isometric angle isn't ideal for a specific clash.
+  Capture is **offscreen render via Document.ExportImage** (not a screenshot)
+  — works without the navigator view being active or visible, doesn't capture
+  overlapping windows like the Browser, and uses the view's CropBox to frame
+  tightly on the clash (without the matching CropBox, ExportImage's FitToPage
+  zooms to project extents — way zoomed out from where the user wants).
+  The detail panel's image area shows the saved thumbnail immediately on
+  selection; the placeholder text (with instructions) returns when no
+  viewpoint has been saved.
   Empty state shown if no clashes yet.
 
 Stubs / mockups still:
 
 - **Reports** — form renders; Export BCF pops "coming soon."
 - **Walkthrough** — launcher renders; Enter Walkthrough pops "coming soon."
-- **Clash Browser filters** — checkboxes and dropdowns render but don't filter
-  the live grid yet.
+- **Clash Browser filter presets** — the four "Filter Presets" buttons under the
+  filter card (My open clashes / Mechanical only / Resolved this week / + Save
+  current as preset) are visual-only; saved-preset persistence is the next
+  filter-related chunk. Live filter wiring (Trade / Status / Test / Search) IS
+  done as of Iteration 5.
 - **Bulk operations in Browser** (Change Status / Reassign / Group / Mark
   Resolved on multi-select) — pop "coming soon."
-- **Show in 3D / Save Viewpoint / Walkthrough Here / History buttons** in
-  Browser — pop "coming soon"; depend on viewport navigation modules.
-- **Editing tests in Test Library** — pops "coming soon."
+- **Walkthrough Here / History buttons** in Browser — pop "coming soon."
+  Walkthrough Here depends on the walkthrough package (later); History
+  needs a small sub-window to render the audit trail (small future
+  iteration). Save Viewpoint shipped in Iteration 6 — see Browser entry
+  below for behavior.
 - **BCF export, Walkthrough full-screen + XInput, clearance clashes** —
   not started; folders + stubs in place.
 

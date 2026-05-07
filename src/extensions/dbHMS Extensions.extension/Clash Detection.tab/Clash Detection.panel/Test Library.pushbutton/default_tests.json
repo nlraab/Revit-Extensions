@@ -89,7 +89,7 @@
     },
     {
       "id": "default-mep-soft-clearance",
-      "name": "MEP Soft Clearance (1 in.)",
+      "name": "MEP Soft Clearance",
       "kind": "soft",
       "tolerance_inches": 1.0,
       "set_a": {

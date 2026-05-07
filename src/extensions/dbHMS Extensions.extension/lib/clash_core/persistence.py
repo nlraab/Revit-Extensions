@@ -101,6 +101,18 @@ def viewpoints_dir(project_hash):
     return _ensure_dir(os.path.join(project_dir(project_hash), "viewpoints"))
 
 
+def viewpoint_image_path(project_hash, clash_id):
+    """Deterministic on-disk path for a clash's viewpoint thumbnail.
+
+    Single viewpoint per clash for v1 — file name is just the clash id,
+    so saving a new viewpoint overwrites the previous one in place. If
+    we ever go multi-viewpoint, the convention should change to include
+    the viewpoint id (and a small migration would copy the existing
+    file to its new name).
+    """
+    return os.path.join(viewpoints_dir(project_hash), "{}.png".format(clash_id))
+
+
 def clashes_path(project_hash):
     return os.path.join(project_dir(project_hash), "clashes.json")
 

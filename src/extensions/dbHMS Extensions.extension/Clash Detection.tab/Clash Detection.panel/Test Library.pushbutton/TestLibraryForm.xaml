@@ -80,12 +80,14 @@
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
             <DockPanel LastChildFill="False">
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                    <Button x:Name="btn_new_test" Content="+ New Test" Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" MinWidth="100"/>
-                    <Button x:Name="btn_delete_test" Content="Delete" Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" MinWidth="100"/>
-                    <Button x:Name="btn_reset_default" Content="Reset to firm default" Style="{StaticResource SecondaryButton}" MinWidth="0"/>
+                    <!-- Project-scoped create is the primary path; firm-wide create is secondary and prompts for confirmation. -->
+                    <Button x:Name="btn_new_project_test" Content="+ New Project Test" Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" MinWidth="0"/>
+                    <Button x:Name="btn_new_firm_test"    Content="+ New Firm Test"    Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" MinWidth="0"/>
+                    <Button x:Name="btn_delete_test"      Content="Delete"              Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" MinWidth="100"/>
+                    <Button x:Name="btn_reset_default"    Content="Reset to firm default" Style="{StaticResource SecondaryButton}" MinWidth="0"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
-                    <Button x:Name="btn_close" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
                     <Button x:Name="btn_save" Content="Save Changes" Style="{StaticResource PrimaryButton}"/>
                 </StackPanel>
             </DockPanel>
@@ -189,8 +191,75 @@
                                            FontWeight="SemiBold" Foreground="#2A4365"/>
                             </Border>
                         </DockPanel>
-                        <TextBlock Text="Pick a test on the left to edit it. Changes apply to whichever store it came from (Global / Override). Use New Project Override below to fork a global default into a per-project override."
-                                   Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+                        <TextBlock Text="Pick a test on the left to edit it. Firm-wide defaults are locked by default; click Customize for this Project to make a per-project copy."
+                                   Style="{StaticResource HelperText}" Margin="0,0,0,4"/>
+                        <TextBlock x:Name="txt_editor_status" Text="" Foreground="#4A5568"
+                                   FontStyle="Italic" FontSize="11" Margin="0,0,0,8"/>
+
+                        <!-- ============ Edit-context banners ============ -->
+                        <!-- One of these is visible at a time, depending on whether the
+                             selection is a global default (locked), a global default the
+                             user has explicitly unlocked for firm-wide editing (warning),
+                             or a project override (no banner). Switching tests always
+                             returns globals to the locked state, so a firm-wide edit is
+                             always a deliberate, per-test choice. The banners sit at the
+                             top of the editor — above the Name field — so the prominent
+                             "Customize for this Project" CTA is visible without scrolling. -->
+                        <Border x:Name="brd_locked_banner"
+                                Background="#EBF8FF" BorderBrush="#90CDF4" BorderThickness="1"
+                                CornerRadius="3" Padding="12" Margin="0,0,0,8"
+                                Visibility="Collapsed">
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="btn_customize_for_project"
+                                        DockPanel.Dock="Right"
+                                        Content="Customize for this Project"
+                                        Style="{StaticResource PrimaryButton}"
+                                        MinWidth="220" VerticalAlignment="Center"
+                                        Margin="12,0,0,0"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="This is a firm-wide test."
+                                               FontWeight="SemiBold" Foreground="#2A4365"/>
+                                    <TextBlock Text="Editing here is locked. Click Customize for this Project to make a copy you can change for just this project — without touching the firm default."
+                                               Foreground="#2C5282" FontSize="11"
+                                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </Border>
+
+                        <Border x:Name="brd_firmwide_warning"
+                                Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
+                                CornerRadius="3" Padding="12" Margin="0,0,0,8"
+                                Visibility="Collapsed">
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="btn_cancel_firmwide_edit"
+                                        DockPanel.Dock="Right"
+                                        Content="Cancel firm-wide edit"
+                                        Style="{StaticResource SecondaryButton}"
+                                        MinWidth="160" VerticalAlignment="Center"
+                                        Margin="12,0,0,0"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Firm-wide edit mode — affects every project."
+                                               FontWeight="SemiBold" Foreground="#744210"/>
+                                    <TextBlock Text="Save Changes will overwrite the firm default for everyone. Click Cancel firm-wide edit to lock the global back, or use Customize for this Project from the locked banner if you only want to change this one project."
+                                               Foreground="#744210" FontSize="11"
+                                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </Border>
+
+                        <!-- Hidden-by-default escape hatch: only shown when a global default
+                             is selected and locked. Deliberately small and grey so it doesn't
+                             compete with the prominent Customize CTA above. -->
+                        <DockPanel x:Name="dp_firmwide_link" LastChildFill="False"
+                                   Margin="0,0,0,8" Visibility="Collapsed">
+                            <Button x:Name="btn_edit_firmwide"
+                                    DockPanel.Dock="Right"
+                                    Content="Edit firm-wide…"
+                                    Background="Transparent" BorderThickness="0"
+                                    Foreground="#718096" FontSize="10"
+                                    Padding="4,2" Cursor="Hand"
+                                    MinWidth="0" Margin="0"/>
+                        </DockPanel>
 
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -230,12 +299,15 @@
                                 <StackPanel>
                                     <TextBlock Text="Set A  (these elements clash against Set B)"
                                                Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Source" Style="{StaticResource FieldLabel}"/>
-                                    <ComboBox x:Name="cmb_source_a">
-                                        <ComboBoxItem Content="Host (active project)" IsSelected="True"/>
-                                        <ComboBoxItem Content="Linked Architectural"/>
-                                        <ComboBoxItem Content="Linked Structural"/>
-                                    </ComboBox>
+                                    <TextBlock Text="Source(s)" Style="{StaticResource FieldLabel}"/>
+                                    <Border Background="White" BorderBrush="#CBD5E0" BorderThickness="1"
+                                            CornerRadius="3" Padding="6">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chk_src_a_host"   Content="Host (active project)"/>
+                                            <CheckBox x:Name="chk_src_a_arch"   Content="Linked Architectural"/>
+                                            <CheckBox x:Name="chk_src_a_struct" Content="Linked Structural"/>
+                                        </StackPanel>
+                                    </Border>
                                     <TextBlock Text="Categories" Style="{StaticResource FieldLabel}"/>
                                     <Border Background="White" BorderBrush="#CBD5E0" BorderThickness="1"
                                             CornerRadius="3" Padding="6" Height="160">
@@ -251,12 +323,15 @@
                                     BorderThickness="1" CornerRadius="3" Padding="10">
                                 <StackPanel>
                                     <TextBlock Text="Set B" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Source" Style="{StaticResource FieldLabel}"/>
-                                    <ComboBox x:Name="cmb_source_b">
-                                        <ComboBoxItem Content="Host (active project)" IsSelected="True"/>
-                                        <ComboBoxItem Content="Linked Architectural"/>
-                                        <ComboBoxItem Content="Linked Structural"/>
-                                    </ComboBox>
+                                    <TextBlock Text="Source(s)" Style="{StaticResource FieldLabel}"/>
+                                    <Border Background="White" BorderBrush="#CBD5E0" BorderThickness="1"
+                                            CornerRadius="3" Padding="6">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chk_src_b_host"   Content="Host (active project)"/>
+                                            <CheckBox x:Name="chk_src_b_arch"   Content="Linked Architectural"/>
+                                            <CheckBox x:Name="chk_src_b_struct" Content="Linked Structural"/>
+                                        </StackPanel>
+                                    </Border>
                                     <TextBlock Text="Categories" Style="{StaticResource FieldLabel}"/>
                                     <Border Background="White" BorderBrush="#CBD5E0" BorderThickness="1"
                                             CornerRadius="3" Padding="6" Height="160">
@@ -269,29 +344,18 @@
                             </Border>
                         </Grid>
 
-                        <Grid Margin="0,12,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" MinWidth="220"/>
-                                <ColumnDefinition Width="16"/>
-                                <ColumnDefinition Width="220" MinWidth="220"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="Default Assignee Trade" Style="{StaticResource FieldLabel}"/>
-                                <ComboBox x:Name="cmb_assignee">
-                                    <ComboBoxItem Content="Mechanical" IsSelected="True"/>
-                                    <ComboBoxItem Content="Electrical"/>
-                                    <ComboBoxItem Content="Plumbing"/>
-                                    <ComboBoxItem Content="Fire Protection"/>
-                                    <ComboBoxItem Content="Technology"/>
-                                    <ComboBoxItem Content="Architectural"/>
-                                    <ComboBoxItem Content="Structural"/>
-                                </ComboBox>
-                            </StackPanel>
-                            <Button x:Name="btn_add_override" Grid.Column="2"
-                                    Content="+ Add Project Override"
-                                    Style="{StaticResource SecondaryButton}"
-                                    VerticalAlignment="Bottom" MinWidth="0"/>
-                        </Grid>
+                        <StackPanel Margin="0,12,0,0" HorizontalAlignment="Left" Width="320">
+                            <TextBlock Text="Default Assignee Trade" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="cmb_assignee">
+                                <ComboBoxItem Content="Mechanical" IsSelected="True"/>
+                                <ComboBoxItem Content="Electrical"/>
+                                <ComboBoxItem Content="Plumbing"/>
+                                <ComboBoxItem Content="Fire Protection"/>
+                                <ComboBoxItem Content="Technology"/>
+                                <ComboBoxItem Content="Architectural"/>
+                                <ComboBoxItem Content="Structural"/>
+                            </ComboBox>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </Border>

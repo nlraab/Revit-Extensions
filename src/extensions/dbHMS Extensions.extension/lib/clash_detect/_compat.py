@@ -51,3 +51,34 @@ def bic_to_id(bic):
     """
     from Autodesk.Revit.DB import ElementId
     return ElementId(bic)
+
+
+def make_eid(value):
+    """Construct a Revit ElementId from an integer-like value, version-tolerant.
+
+    Revit 2024+ widened ElementId from Int32 to Int64; the Int32 constructor
+    is deprecated and on Revit 2026 has been observed to silently route through
+    the wrong overload (ElementId(BuiltInCategory) takes priority in IronPython
+    overload resolution because BuiltInCategory's underlying type is Int32, so
+    `ElementId(1250111)` produces an ElementId encoding the BIC value 1250111
+    rather than the element ID 1250111 — and `doc.GetElement(...)` then quietly
+    returns None instead of the intended element).
+
+    Going through `System.Int64` explicitly forces the Int64 constructor so we
+    get the element-id-as-id semantics we actually want. Falls back to the
+    Int32 constructor on Revit versions that don't have the Int64 overload.
+
+    Returns None if `value` is None or can't be converted.
+    """
+    if value is None:
+        return None
+    from Autodesk.Revit.DB import ElementId
+    try:
+        from System import Int64
+        return ElementId(Int64(int(value)))
+    except Exception:
+        pass
+    try:
+        return ElementId(int(value))
+    except Exception:
+        return None

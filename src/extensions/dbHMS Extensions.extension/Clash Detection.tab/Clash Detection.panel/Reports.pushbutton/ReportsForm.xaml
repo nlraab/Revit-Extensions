@@ -82,7 +82,7 @@
                            Foreground="#4A5568" VerticalAlignment="Center" FontStyle="Italic"
                            HorizontalAlignment="Left"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button x:Name="btn_close" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
                     <Button x:Name="btn_export" Content="Export BCF" Style="{StaticResource PrimaryButton}"/>
                 </StackPanel>
             </Grid>

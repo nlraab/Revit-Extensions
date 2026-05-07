@@ -2,7 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Clash Browser"
         Height="820" Width="1740"
-        MinHeight="620" MinWidth="1580"
+        MinHeight="560" MinWidth="1240"
         WindowStartupLocation="CenterScreen"
         Background="#F7FAFC"
         FontFamily="Segoe UI" FontSize="12"
@@ -80,13 +80,17 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
 
-        <!-- Cell text for the long-text DataGrid columns. Ellipsizes when the -->
-        <!-- column is narrower than the text and shows a tooltip with the full -->
-        <!-- value on hover, so nothing is silently hidden. -->
+        <!-- Cell text for the long-text DataGrid columns. Left-aligned (so it -->
+        <!-- reads like a normal table — text anchored to the left edge with -->
+        <!-- ellipsis on the right when the column is narrower than the text), -->
+        <!-- vertically centered, with a small left margin so it doesn't hug -->
+        <!-- the cell border. Tooltip shows the full value on hover so nothing -->
+        <!-- is silently hidden when the text gets ellipsized. -->
         <Style x:Key="EllipsisCellStyle" TargetType="TextBlock">
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Margin" Value="6,0,4,0"/>
             <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
         </Style>
     </Window.Resources>
@@ -130,15 +134,19 @@
         <!-- MAIN: 3-column grid -->
         <Grid Margin="20,16,20,16">
             <Grid.ColumnDefinitions>
-                <!-- Side columns are rigid. Middle squishes via the DataGrid's long -->
-                <!-- text columns ellipsizing (Test / Element A / Element B). All -->
-                <!-- columns stay fully visible at every window size; only their text -->
-                <!-- gets truncated with "..." (and tooltips reveal the full text). -->
-                <ColumnDefinition Width="320" MinWidth="320"/>
+                <!-- Each region keeps a min-width sized to "all content is visible
+                     but condensed" — not absolute survival minimums. Pushing
+                     smaller would start clipping the Status/Trade pills, hiding
+                     filter labels, and cropping element-name text past the point
+                     where it's still readable. The flex middle column squishes
+                     via the DataGrid's text columns ellipsizing — all columns
+                     stay visible at every size, only their text gets truncated
+                     (with tooltips revealing the full value on hover). -->
+                <ColumnDefinition Width="320" MinWidth="270"/>
                 <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="*" MinWidth="770"/>
+                <ColumnDefinition Width="*" MinWidth="600"/>
                 <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="380" MinWidth="380"/>
+                <ColumnDefinition Width="380" MinWidth="300"/>
             </Grid.ColumnDefinitions>
 
             <!-- ============ COLUMN 1: FILTERS ============ -->
@@ -165,7 +173,7 @@
                         </WrapPanel>
 
                         <TextBlock Text="Status" Style="{StaticResource FieldLabel}"/>
-                        <WrapPanel>
+                        <WrapPanel x:Name="wp_status_filter">
                             <CheckBox Content="Open" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Reviewed" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Approved" IsChecked="False" Margin="0,3,8,3"/>
@@ -174,6 +182,7 @@
 
                         <TextBlock Text="Test" Style="{StaticResource FieldLabel}"/>
                         <ComboBox x:Name="cmb_test_filter">
+                            <!-- Populated dynamically at runtime from the loaded clashes' test names. -->
                             <ComboBoxItem Content="(All tests)" IsSelected="True"/>
                             <ComboBoxItem Content="Mechanical Ducts vs Plumbing Pipes"/>
                             <ComboBoxItem Content="Mechanical Ducts vs Electrical Conduit"/>
@@ -224,8 +233,8 @@
                                        DockPanel.Dock="Left" VerticalAlignment="Center"/>
                             <ComboBox x:Name="cmb_group_by" Width="160" DockPanel.Dock="Right"
                                       Margin="0,0,0,0">
-                                <ComboBoxItem Content="No grouping" IsSelected="True"/>
-                                <ComboBoxItem Content="Group by trade"/>
+                                <ComboBoxItem Content="No grouping"/>
+                                <ComboBoxItem Content="Group by trade" IsSelected="True"/>
                                 <ComboBoxItem Content="Group by test"/>
                                 <ComboBoxItem Content="Group by level"/>
                                 <ComboBoxItem Content="Group by status"/>
@@ -307,21 +316,21 @@
                             </DataGrid.GroupStyle>
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="#" Binding="{Binding Id}"
-                                                    Width="50" MinWidth="50" IsReadOnly="True"
+                                                    Width="40" MinWidth="40" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                                 <DataGridTextColumn Header="Test" Binding="{Binding TestName}"
                                                     Width="*" MinWidth="90" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                                 <DataGridTextColumn Header="Element A" Binding="{Binding ElementA}"
-                                                    Width="2*" MinWidth="120" IsReadOnly="True"
+                                                    Width="2*" MinWidth="80" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                                 <DataGridTextColumn Header="Element B" Binding="{Binding ElementB}"
-                                                    Width="2*" MinWidth="120" IsReadOnly="True"
+                                                    Width="2*" MinWidth="80" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                                 <DataGridTextColumn Header="Level" Binding="{Binding Level}"
-                                                    Width="70" MinWidth="70" IsReadOnly="True"
+                                                    Width="50" MinWidth="50" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
-                                <DataGridTemplateColumn Header="Status" Width="90" MinWidth="90" IsReadOnly="True">
+                                <DataGridTemplateColumn Header="Status" Width="80" MinWidth="80" IsReadOnly="True">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <Border Background="{Binding StatusBrush}"
@@ -333,7 +342,7 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
-                                <DataGridTemplateColumn Header="Trade" Width="130" MinWidth="130" IsReadOnly="True">
+                                <DataGridTemplateColumn Header="Trade" Width="130" MinWidth="110" IsReadOnly="True">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <Border Background="{Binding TradeBgBrush}"
@@ -347,7 +356,7 @@
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
                                 <DataGridTextColumn Header="Notes" Binding="{Binding CommentCountStr}"
-                                                    Width="50" MinWidth="50" IsReadOnly="True"
+                                                    Width="50" MinWidth="45" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -379,9 +388,19 @@
                             <Border Background="#F7FAFC" BorderBrush="#CBD5E0" BorderThickness="1"
                                     CornerRadius="3" Height="180">
                                 <Grid>
-                                    <TextBlock Text="[ Viewpoint thumbnail ]" Foreground="#A0AEC0"
+                                    <!-- Image is wired up in code: when the selected clash has a
+                                         saved viewpoint, img_viewpoint.Source is set to the PNG and
+                                         the placeholder is hidden. When there's no viewpoint, the
+                                         image is hidden and the placeholder explains how to make
+                                         one. -->
+                                    <Image x:Name="img_viewpoint" Stretch="Uniform"
+                                           Visibility="Collapsed"/>
+                                    <TextBlock x:Name="txt_viewpoint_placeholder"
+                                               Text="No viewpoint saved. Click Show in 3D, frame the clash, then Save Viewpoint."
+                                               Foreground="#A0AEC0"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
-                                               FontStyle="Italic"/>
+                                               TextAlignment="Center" TextWrapping="Wrap"
+                                               Margin="20,0" FontStyle="Italic"/>
                                 </Grid>
                             </Border>
 
@@ -389,9 +408,11 @@
                             <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8">
                                 <StackPanel>
-                                    <TextBlock x:Name="txt_elem_a_name" Text="Round Duct - 12&quot; - Supply"/>
+                                    <TextBlock x:Name="txt_elem_a_name" Text="Round Duct - 12&quot; - Supply"
+                                               TextWrapping="Wrap"/>
                                     <TextBlock x:Name="txt_elem_a_id" Text="ID 4582193 - host model"
-                                               Style="{StaticResource MonoText}"/>
+                                               Style="{StaticResource MonoText}"
+                                               TextWrapping="Wrap"/>
                                 </StackPanel>
                             </Border>
 
@@ -399,9 +420,11 @@
                             <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8">
                                 <StackPanel>
-                                    <TextBlock x:Name="txt_elem_b_name" Text="PVC Pipe - 4&quot; - Sanitary"/>
+                                    <TextBlock x:Name="txt_elem_b_name" Text="PVC Pipe - 4&quot; - Sanitary"
+                                               TextWrapping="Wrap"/>
                                     <TextBlock x:Name="txt_elem_b_id" Text="ID 7831205 - host model"
-                                               Style="{StaticResource MonoText}"/>
+                                               Style="{StaticResource MonoText}"
+                                               TextWrapping="Wrap"/>
                                 </StackPanel>
                             </Border>
 
