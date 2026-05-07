@@ -48,6 +48,15 @@ What's implemented and runs against real Revit + persistence:
 - `lib/clash_core/browser_filters.py` — pure-data filter predicate for the Browser's
   Trade × Status × Test × Search filter card; built so the rule can be unit-tested
   in CPython independently of WPF / Revit
+- `lib/clash_core/bulk_edit.py` — single-clash mutators (`apply_status`, `apply_trade`)
+  used by the Browser's bulk-action handlers. Each appends a history entry matching
+  the shape of the single-row handlers (audit log looks identical regardless of bulk
+  vs single-row edit), skips no-op changes, and accepts an optional uniform
+  timestamp so a whole batch shares one ISO time
+- `lib/clash_core/history_format.py` — friendly-display formatters for clash history
+  entries: `format_action` ("Status changed: Open → Reviewed"), `format_when`
+  ("2026-05-06 05:11 UTC"), `format_author`. Used by the Browser's history sub-dialog;
+  pure data so the formatting rules are testable in CPython.
 - `lib/clash_detect/linked.py` — live link enumeration + role-map + cross-doc geometry helpers
 - `lib/clash_detect/hard.py` — real `ElementIntersectsElementFilter` / `ElementIntersectsSolidFilter`
   detection (host vs host, host vs link, link vs link)
@@ -76,6 +85,29 @@ What's implemented and runs against real Revit + persistence:
   which sets both the section box AND a matching CropBox on the view —
   the CropBox is what makes ExportImage's FitToPage zoom frame the clash
   region tightly instead of zooming to project extents.
+- `lib/clash_report/bcf.py` — BCF 2.1 file builder. `build_bcf_zip(project_meta,
+  clashes, viewpoints_dir, out_path, filter_predicate)` writes a `.bcfzip`
+  containing `bcf.version` + `project.bcfp` + per-topic folders with `markup.bcf`
+  (topic title / status / comments / assignee), `viewpoint.bcfv` (orthogonal
+  camera + 6 clipping planes from the section box), and `snapshot.png` (the
+  thumbnail captured by `clash_view.viewpoint`). Pure-Python (zipfile +
+  xml.etree.ElementTree, no external deps), atomic-rename writes (no half-zip
+  on failure), feet → meters coordinate conversion. Receivers tested:
+  Solibri, BIMcollab, Newforma.
+- `lib/clash_report/excel_summary.py` — `build_xlsx(clashes, out_path,
+  filter_predicate)` writes a formatted XLSX workbook for the internal-team
+  review path (open in Excel, sort, filter, save-as PDF if needed). 22
+  columns × N rows. Manual XLSX construction (zipfile + xml.sax.saxutils)
+  so there's no openpyxl dependency in IronPython. Includes:
+    - dbHMS-styled header row (white bold on dark slate, frozen)
+    - Status pills colored to match the Browser (Open=red, Reviewed=amber,
+      Approved=blue, Resolved=green)
+    - Trade pills with the same muted-tint backgrounds as the Browser
+    - Numeric columns right-aligned with thin borders
+    - Auto-filter dropdowns on every column header
+    - Per-column widths tuned for typical content
+  Atomic-rename writes, Unicode-safe (XML escaping). Validated end-to-end
+  against openpyxl in the test suite — the file opens cleanly in Excel.
 - `lib/clash_view/viewpoint.py` — two capture entry points:
   `generate_for_all(uidoc, clash_dicts, role_map, project_hash, captured_by,
   log, only_missing=True)` — batch-generates viewpoint thumbnails for every
@@ -191,26 +223,150 @@ Wired forms:
   The detail panel's image area shows the saved thumbnail immediately on
   selection; the placeholder text (with instructions) returns when no
   viewpoint has been saved.
+  **Filter presets** (Iter 11): the "Filter Presets" card under the filter
+  panel renders one button per preset. Three **built-ins** ship and can't
+  be deleted: *Active only (Open + Reviewed)*, *Mechanical only*, and
+  *Resolved only* — covering the common "what needs attention" / "single-
+  trade focus" / "what got cleared" workflows. The **+ Save current as
+  preset** button at the bottom snapshots the live filter state (trades,
+  statuses, test, search) under a user-supplied name. **Right-click** a
+  user-saved preset to delete it (with confirmation); built-ins have no
+  context menu. User saves persist per-machine at
+  `%APPDATA%/dbHMS_clash/filter_presets.json` (atomic-rename JSON write,
+  same pattern as `config.py`) so they follow the user across projects
+  rather than living in any one model. Pure-data persistence layer is
+  `clash_core.filter_presets`; the script.py side just calls
+  `make_preset` / `append_user_preset` / `delete_user_preset` and rebuilds
+  the button list. Applying a preset suspends filter events while it
+  re-checks every checkbox, picks the matching Test combo item (falling
+  back to "(All tests)" if the saved name no longer exists in the
+  project), and rewrites the search box, then runs `_apply_filters` once.
   Empty state shown if no clashes yet.
+- **Reports** (Iter 7) — exports the project's clashes in one of two formats
+  for sharing. Filter card mirrors the Browser (Trade / Status / Test /
+  Date range) and live-updates a preview count. Output folder defaults to
+  `<shared>/<project-hash>/reports/` and is browse-able. Filename template
+  supports `{date}`, `{project}`, `{filter}` tokens; the file extension
+  auto-swaps when the user changes format.
+    - **BCF 2.1 (.bcfzip)** — for outside coordination tools. Each topic
+      carries the full clash data (title / status / comments / assignee),
+      the section box as 6 clipping planes, the camera state, and the
+      saved thumbnail PNG. Opens in Solibri, BIMcollab, Newforma, BIM
+      Track, etc.
+    - **Excel (.xlsx)** — for internal team review. Native XLSX (manually
+      constructed; no openpyxl dependency) with full dbHMS-styled
+      formatting: dark-slate header (frozen), colored Status pills,
+      colored Trade pills, auto-filter dropdowns on every column, tuned
+      column widths. 22 columns per row; sortable / filterable / save-as
+      PDF directly from Excel.
+  Either format pops up the file in Explorer (selected, ready to right-click
+  → Send to) after a successful export.
+- **Walkthrough** (Iter 12) — free-fly through the building with WASD +
+  mouse-look, for coordination meetings. The first cut shipped a
+  guided clash-tour and was wrong scope — clash review belongs in the
+  Browser. The current build is a real free-fly walkthrough where you
+  fly through walls and ceilings looking for equipment, toggle
+  disciplines on/off, and save bookmark camera positions for the
+  meeting moderator to click through.
+  **Click "Open Walkthrough View"** → creates / activates the
+  dedicated `dbHMS Walkthrough` perspective view. **Click into the
+  Look Pad** (the dark area on the right of the form) to capture
+  mouse + keyboard. Cursor hides; the green "● ACTIVE" pill appears
+  in the header. Then:
+    - **WASD** — walk forward / back / strafe (always horizontal,
+      regardless of camera pitch — pressing W while looking at the
+      floor doesn't drive you into it)
+    - **Q / E** — move down / up along world Z (so "up" always means
+      "toward the sky", not "toward where the camera is looking")
+    - **Mouse drag** — yaw + pitch (yaw rotates around world Z so the
+      horizon stays level; pitch is clamped to ±88° so you can't flip
+      upside down)
+    - **Shift / Ctrl** — speed up (3×) / slow down (¼×) on the fly
+    - **Esc** — release mouse capture
+  **Speed slider** sets the base movement speed (2–60 ft/s, 15 default).
+  Modifier keys multiply on top.
+  **Visibility checkboxes** in the left card — Mechanical / Electrical /
+  Plumbing / Fire Protection / Architectural / Structural — toggle each
+  discipline's full set of categories together so during a meeting you
+  can hide architectural and see all the MEP, then turn arch back on for
+  context. The discipline → category map lives in
+  `walkthrough_view.DISCIPLINE_CATEGORIES` and is editable.
+  **Bookmarks** save the current camera (position + forward + up) under
+  a name. Persisted at `<shared>/<project-hash>/walkthrough_bookmarks.json`
+  via the same atomic-rename pattern as filter_presets. Per-project, on
+  the shared root — the whole team sees the same set, so a moderator
+  can prep "RTU-1 east", "Lobby", "Mech room corridor" the night before
+  and click through them on the call. Double-click a bookmark to snap
+  the camera to it; Delete key removes the selected one (with confirm).
+  **Render** captures the current view to a 1920×1080 PNG at 300 DPI
+  (`walkthrough_render.render_stop`) at
+  `<shared>/<project-hash>/walkthrough_renders/clash-view-<timestamp>.png`.
+  Same module the clash-stop renders used.
+  **Architecture:** modeless WPF (`__persistentengine__ = True` keeps
+  the IronPython engine alive after script.py exits — without this,
+  Revit fatal-crashes when invoking `Execute()` on a torn-down handler
+  class with `ExceptionCode=0xe0434352`). All Revit-API calls (view
+  create, camera set, discipline toggle, render) route through one
+  shared `IExternalEventHandler` so they land on Revit's UI thread in
+  a valid API context. WPF click handlers fire on the WPF thread and
+  can't legally call `Transaction.Start()` directly.
+  **Motion loop:** a `DispatcherTimer` ticks every ~33 ms (30 fps).
+  Each tick reads the pressed-keys set + accumulated mouse-look delta,
+  runs `walkthrough_motion.step` + `walkthrough_motion.look` to
+  compute a new camera state, and queues an ExternalEvent to apply
+  it. Mouse capture inside the look pad hides the cursor and recenters
+  it after every move so the user can drag indefinitely without
+  hitting screen edges.
+  **Honest limit:** the dedicated view is currently a minimum-viable
+  config (Realistic + Fine detail + cleared template). Sun, shadows,
+  ambient lighting, gradient background, and category-noise hiding
+  were stripped after they fatal-crashed Revit 2026 on first
+  view-create — they need to be added back one at a time, each with
+  testing, once we have a stable bones. A per-step debug log at
+  `%TEMP%\\dbhms_walkthrough.log` records every config call so the
+  next crash leaves a clear last-call-attempted line. None of this
+  reaches Enscape fidelity (the Revit viewport is Autodesk's own
+  rasterizer; without an external real-time renderer we can't hit
+  PBR / GI / SSR) — the goal is "much better than default Revit on a
+  projector," not photoreal.
 
 Stubs / mockups still:
 
-- **Reports** — form renders; Export BCF pops "coming soon."
-- **Walkthrough** — launcher renders; Enter Walkthrough pops "coming soon."
-- **Clash Browser filter presets** — the four "Filter Presets" buttons under the
-  filter card (My open clashes / Mechanical only / Resolved this week / + Save
-  current as preset) are visual-only; saved-preset persistence is the next
-  filter-related chunk. Live filter wiring (Trade / Status / Test / Search) IS
-  done as of Iteration 5.
-- **Bulk operations in Browser** (Change Status / Reassign / Group / Mark
-  Resolved on multi-select) — pop "coming soon."
-- **Walkthrough Here / History buttons** in Browser — pop "coming soon."
-  Walkthrough Here depends on the walkthrough package (later); History
-  needs a small sub-window to render the audit trail (small future
-  iteration). Save Viewpoint shipped in Iteration 6 — see Browser entry
-  below for behavior.
-- **BCF export, Walkthrough full-screen + XInput, clearance clashes** —
-  not started; folders + stubs in place.
+- ~~**Reports** — form renders; Export BCF pops "coming soon."~~ (Done — see Wired forms.)
+- ~~**Walkthrough** — launcher renders; Enter Walkthrough pops "coming soon."~~
+  (Done — see Walkthrough entry under Wired forms.)
+- ~~**Clash Browser filter presets** — visual-only mockup buttons.~~ (Done — see
+  Filter presets entry under Wired forms below.)
+- **Bulk operations in Browser** (Iter 9): the bulk-action bar appears
+  when 2+ rows are selected. **Change Status** and **Reassign** open a
+  picker for the new value; **Mark Resolved** applies directly. All
+  three loop `clash_core.bulk_edit.apply_*` over the selection, share
+  one ISO timestamp across the batch's history entries, skip no-op
+  changes (clashes already at the target value), persist once at the
+  end (single write, not N), and re-apply filters so rows that changed
+  to a now-hidden status drop out of view immediately. A confirmation
+  dialog appears when 5+ rows are selected so a misclick can't quietly
+  reassign 100 clashes. **Group** is still a placeholder — needs its
+  own data-model design pass.
+- **History panel** (Iter 10): clicking the **History** button in the
+  Browser's detail panel opens a modal sub-dialog (`HistoryDialog.xaml`)
+  that renders the selected clash's full audit trail — every status
+  change, reassign, comment, viewpoint save, and auto-resolve is one
+  row showing the formatted timestamp + author on the left and the
+  action label (with `before → after` arrow where relevant) on the
+  right. Read-only; data comes straight from `clash_dict['history']`,
+  formatted via `clash_core.history_format`. Empty state shows a hint
+  when a clash has no recorded history yet.
+- **Walkthrough Here** button in Browser — pops "coming soon"; this
+  was always meant to be a one-click "fly the walkthrough straight to
+  this clash" shortcut. v1 Walkthrough takes a filter card → tour list
+  approach; the per-clash shortcut is a future iteration.
+- **Walkthrough free-fly + XInput** — the previous Walkthrough mockup
+  also described WASD + mouse-look free navigation and Xbox controller
+  support. Both deferred — they're independently large pieces (Win32
+  hooks, P/Invoke against `xinput1_4.dll`) and v1 ships a guided tour
+  instead, which is what the team-meeting use case actually needs.
+- **Clearance clashes** — not started; folders + stubs in place.
 
 ### Identity / merge model (the key new bit)
 
@@ -300,19 +456,20 @@ src/extensions/dbHMS Extensions.extension/
                 volumes.py
         clash_view/
             __init__.py
+            geometry.py                      <- bbox math (transform / union / pad)
             navigate.py                      <- "show this clash" entry point
-            viewpoint.py                     <- save / restore camera + section box
-            snapshot.py                      <- PNG export
-            threed_view.py                   <- find or create the dedicated nav view
+            highlights.py                    <- per-element red/blue overrides
+            threed_view.py                   <- find or create the navigator view
+            viewpoint.py                     <- batch + single viewpoint capture
+            snapshot.py                      <- thumbnail PNG export (~800 px)
+            walkthrough_motion.py            <- WASD step + mouse-look math (pure data)
+            walkthrough_bookmarks.py         <- per-project saved camera positions (pure data)
+            walkthrough_view.py              <- create/configure dbHMS Walkthrough view
+            walkthrough_render.py            <- 1920px high-quality render export
         clash_report/
             __init__.py
             bcf.py                           <- BCF 2.1 zip builder
-        clash_walkthrough/
-            __init__.py
-            xinput.py                        <- Win32 XInput bindings (Xbox controller)
-            camera.py                        <- input deltas -> View camera updates
-            modes.py                         <- ClashNavigator + FreeFly mode controllers
-            render.py                        <- enter / exit full-screen, set visual style
+            xlsx.py                          <- native XLSX builder (no openpyxl dep)
 ```
 
 ### Why an extension-level `lib/` exists for *this* tool
@@ -593,61 +750,218 @@ each instance, not just the link type once.
 
 ## Walkthrough mode
 
-One full-screen window, two modes, switchable on the fly (gamepad START
-or keyboard Tab).
+Free-fly through the building with WASD + mouse-look, for coordination
+meetings where the team needs to walk the model and inspect equipment.
+Clash review belongs in the Browser; the Walkthrough is intentionally
+**not** a clash-stop tour.
 
-### Clash Navigator mode
+The first build (Iter 12) shipped a guided clash-stop tour and was
+wrong scope — it duplicated Browser functionality without adding the
+free-fly capability the team actually needs. The current build is the
+free-fly redesign.
 
-* Step through the filtered clash list one at a time.
-* Each step: `clash_view.navigate.show_clash` zooms + section-boxes the
-  view to the current clash and isolates the elements.
-* Bindings:
-  * **A button / Right arrow / N** - next clash
-  * **B button / Left arrow / P** - previous clash
-  * **X button / R** - mark Reviewed
-  * **Y button / Enter** - mark Resolved
-  * **Back button / Esc** - exit walkthrough
+### Architecture (modeless)
 
-### Free-Fly mode
+This is the only modeless WPF window in the extension. The Browser,
+Reports, Settings, etc. are all modal (`ShowDialog`); the Walkthrough
+must be modeless because Revit's viewport keeps redrawing while the
+camera updates each frame, and a modal window would block Revit's UI
+thread.
 
-* WASD + mouse-look (or Q/E for vertical) for keyboard.
-* Left stick translate, right stick rotate, LB/RB for vertical, A button
-  speed-up, B button slow down for gamepad.
-* Clash markers: colored spheres at each clash midpoint.
-  * **Red** = Open
-  * **Yellow** = Reviewed
-  * **Green** = Resolved
-* **Right shoulder / G** - jump to nearest clash.
-* **Left shoulder / N** - jump to next clash by id.
+Modeless requires three load-bearing pieces:
 
-### Rendering
+1. **`__persistentengine__ = True`** at the top of script.py. Without
+   this, pyRevit tears down the IronPython engine when script.py
+   exits, the `_WalkthroughHandler` class definition disappears, and
+   when the user clicks any button Revit fatal-crashes invoking
+   `Execute()` on a now-dead class. Symptom is `ExceptionCode=0xe0434352`
+   in the journal a second or two after the click, with no Python
+   output. This is the single most important line in the script.
 
-`clash_walkthrough.render.set_pretty_visual_style` sets:
+2. **Pin the wrapper alive.** A module-level `_ACTIVE_WINDOW = win`
+   prevents Python GC from collecting the WPF wrapper (and its event
+   handlers) after `Show()` returns. WPF keeps the underlying Window
+   alive on its own; the pin is for the Python side.
 
-* Visual Style: Consistent Colors
-* Shadows: ON (sun-driven)
-* Ambient Occlusion: ON
-* Sketchy Lines: OFF
-* Show edges: hidden detail level
+3. **Marshal Revit-API calls onto the API thread.** WPF click handlers
+   and DispatcherTimer ticks fire on the WPF UI thread, which is NOT
+   a valid Revit API context. One shared `IExternalEventHandler`
+   (`_WalkthroughHandler`) services every Revit-touching action;
+   handlers set `pending_action` + `kwargs` on it then call
+   `external_event.Raise()`, and Revit invokes `Execute(app)` on its
+   own thread when free. Completion callbacks marshal back onto the
+   WPF dispatcher (`Dispatcher.BeginInvoke(System.Action(...))`) so
+   any UI updates run on the WPF thread.
 
-This is the best Revit can do without an external renderer. It looks
-like nice CAD with shading - clearer than the default Revit workspace
-view, but not photoreal. If the firm needs photoreal walkthroughs,
-the right answer is fixing Enscape (or another real-time renderer);
-we cannot match GPU raytracing inside Revit.
+### Motion: WASD + mouse-look
 
-`enter_walkthrough` and `exit_walkthrough` hide / restore Revit's UI
-chrome (project browser, properties palette, ribbon). `exit_walkthrough`
-wraps every restore step in try/except so a failure mid-restore can't
-leave Revit in a half-broken UI state.
+Pure-data math lives in `clash_view.walkthrough_motion`:
 
-### Xbox controller (XInput)
+* `step(camera, keys, speed_fps, dt_seconds, world_up=True)` — given
+  the current camera tuple `(position, forward, up)` + the set of
+  pressed motion keys + speed + elapsed time, returns the new camera.
+  W/S walk along the camera's forward projected onto XY (so pressing
+  W while looking at the floor doesn't drive you into it). A/D strafe
+  along the right vector projected onto XY. Q/E by default move along
+  world +Z/-Z (so "up" always means "toward the sky", not "toward
+  where the camera is looking"); pass `world_up=False` for camera-up
+  vertical. Diagonal motion is normalized so W+D doesn't travel √2×
+  faster than W alone.
+* `look(camera, dx_pixels, dy_pixels, sensitivity)` — applies mouse-
+  drag deltas. Yaw rotates forward around world Z (no roll, horizon
+  stays level). Pitch is around the right vector and clamped to ±88°
+  so the camera can't flip upside down. Up vector is recomputed after
+  pitch so the orientation stays a valid rigid frame.
+* Rotations use Rodrigues' formula, vectors are renormalized after
+  each operation so numerical drift doesn't compound.
 
-`clash_walkthrough.xinput` does P/Invoke against `xinput1_4.dll`
-directly via `clr` + `System.Runtime.InteropServices.DllImport`. No
-external Python package needed. We poll on a `DispatcherTimer` at ~16 ms
-intervals (60 Hz). Wireless and wired controllers both work the same
-way - XInput presents them identically.
+Pure-data, fully unit-tested under CPython.
+
+### The motion loop
+
+The form runs a `DispatcherTimer` at ~33 ms (30 fps). Each tick:
+
+1. If no input is active (no keys pressed, no mouse delta), skip — don't
+   queue identical states.
+2. Measure `dt` from the last tick's wall-clock time (so movement is
+   distance-per-second regardless of frame-rate hiccups).
+3. Read `Keyboard.Modifiers` for Shift / Ctrl → multiply base speed by
+   3× / ¼× respectively.
+4. Run `walkthrough_motion.step` with the pressed keys + speed + dt.
+5. Run `walkthrough_motion.look` with the accumulated mouse deltas;
+   reset the deltas to zero.
+6. Update the cached camera state and queue a `set_camera` ExternalEvent.
+
+The Revit-side `_set_camera` handler opens a transaction, calls
+`SetOrientation(ViewOrientation3D(...))`, commits, and calls
+`uidoc.RefreshActiveView()` to force a paint. Without the per-tick
+`RefreshActiveView` Revit queues the orientation changes and shows
+them as a single jump.
+
+Frame rate target is 30 fps because faster (60 fps tick) queues
+ExternalEvents faster than Revit can drain them on dense MEP models —
+the queue backs up, the camera lags input, and users feel like they're
+fighting the controls. 30 fps + light per-tick work (a single
+`SetOrientation` + a single `RefreshActiveView`) keeps up cleanly.
+
+### Mouse capture inside the look pad
+
+Click into the dark "Look Pad" area on the right of the form:
+1. The look pad calls `CaptureMouse()` so MouseMove events keep flowing
+   even when the cursor leaves the look pad's bounds.
+2. The cursor is hidden (`Mouse.OverrideCursor = getattr(Cursors, 'None')`
+   — `Cursors.None` is a syntax error in Python because `None` is a
+   keyword).
+3. The window grabs keyboard focus so WASD KeyDown fires.
+4. On every MouseMove, the delta from the captured-origin point is
+   accumulated, then the system cursor is recentered to the origin via
+   `System.Windows.Forms.Cursor.Position`. This gives the user
+   unlimited dragging room.
+5. Esc, mouse-up, or LostMouseCapture releases everything cleanly.
+
+The "● ACTIVE" pill in the header turns green while captured so the
+user can see the mode at a glance.
+
+### Visibility — discipline buckets
+
+`walkthrough_view.DISCIPLINE_CATEGORIES` maps each discipline name
+(Mechanical / Electrical / Plumbing / Fire Protection / Architectural /
+Structural) to a list of `BuiltInCategory` name strings. Toggling a
+checkbox calls `set_discipline_visible(doc, view, name, visible)` which
+loops the categories and calls `view.SetCategoryHidden` on each (gated
+by `view.CanCategoryBeHidden`).
+
+Strings instead of direct `BuiltInCategory` references keep the module
+parsing in CPython for the test suite — the enum lookup happens at
+runtime via `getattr(BuiltInCategory, name, None)`. A category that
+doesn't exist in the current Revit version is silently skipped.
+
+The bucket map is editable; if a category needs to move (e.g. cable
+tray feels like Electrical but ends up under Mechanical in some
+firms' templates), it's a one-line fix.
+
+### Bookmarks
+
+`clash_view.walkthrough_bookmarks` is a pure-data persistence layer
+mirroring `clash_core.filter_presets`:
+
+* `make_bookmark(name, position, forward, up, ...)` — builds a fresh
+  bookmark dict with a synthetic `bm-<10char-hex>` id, ISO timestamp,
+  and the camera state.
+* `read_bookmarks(project_hash)` — list of dicts; empty on missing /
+  corrupt file (defensive — same "missing == empty" behavior as
+  filter_presets).
+* `write_bookmarks` / `append_bookmark` / `delete_bookmark` /
+  `rename_bookmark` — atomic-rename writes (write to .tmp, rename
+  onto path) so a crash mid-write can't truncate the JSON.
+
+Path: `<shared>/<project-hash>/walkthrough_bookmarks.json` — per-project
+on the shared root, so the whole team sees the same bookmark set. A
+meeting moderator can prep "RTU-1 east", "Lobby", "Mech room corridor"
+the night before and click through them on the call. Double-click in
+the Bookmarks ListBox jumps the camera; Delete key removes the selected
+one (with a yes/no confirm).
+
+Saved bookmarks are full camera state (position + forward + up); the
+jump action snaps the camera to that pose. v1 doesn't do eased
+interpolation between bookmarks — instant snap is fine for meeting use
+and the tour-style flight code from the previous iteration was deleted
+when the tour itself got removed.
+
+### Render export
+
+`clash_view.walkthrough_render.render_stop` wraps `Document.ExportImage`
+with high-quality settings (`PixelSize = 1920`,
+`ImageResolution.DPI_300`, `ZoomFitType.FitToPage`,
+`ExportRange.SetOfViews` pointed at the Walkthrough view). Output goes
+to `<shared>/<project-hash>/walkthrough_renders/clash-view-<timestamp>.png`.
+
+Timestamped filenames (not keyed by anything else) because the user
+often renders the same view multiple times during a meeting at
+different camera angles — each capture lands as a new file rather than
+overwriting.
+
+ExportImage occasionally appends a suffix to the filename it actually
+writes; `_resolve_actual_path` finds and renames it onto the intended
+path so the caller gets a stable result.
+
+### The dedicated view (and the Revit 2026 view-config crash)
+
+`clash_view.walkthrough_view.get_or_create_walkthrough_view` finds or
+creates a `dbHMS Walkthrough` perspective View3D in a single
+transaction. Falls back to isometric if `View3D.CreatePerspective`
+fails (some Revit 2026 ViewFamilyType configurations reject perspective).
+
+**Currently a minimum-viable config:** clear view template + Realistic
+display style (with ShadingWithEdges fallback) + Fine detail. That's
+it. Sun + shadows + ambient lighting + gradient background + ~20
+noise-category hides were stripped after they native-crashed Revit 2026
+on first view-create. They need to come back one at a time, each
+verified, once we have a stable bones.
+
+A per-step debug log at `%TEMP%\\dbhms_walkthrough.log` records every
+configuration call so the next crash leaves a clear "last call
+attempted" line. `walkthrough_view.log_path()` exposes the path.
+
+Deleting the view from the Project Browser is a clean reset — the
+next Open Walkthrough View re-creates it with these settings.
+
+### What's still deferred
+
+* **Eased bookmark transitions.** v1 snaps; eased flight (the math from
+  the deleted `walkthrough_camera`) could come back as a one-time
+  optional smooth-jump.
+* **XInput / Xbox controller polling.** P/Invoke against
+  `xinput1_4.dll`, `DispatcherTimer` at 60 Hz. The motion math doesn't
+  care about input source, so adding controller support is just an
+  input-binding layer.
+* **Visual fidelity restoration** — sun, shadows, AO, gradient sky,
+  category noise hiding. Each needs a Revit-2026 verification pass
+  with the debug log in hand.
+* **Photoreal rendering.** The Revit viewport is rasterized by
+  Autodesk's engine; without an external real-time renderer (Enscape /
+  Twinmotion / D5) we can't reach Enscape-level fidelity. The 1920px
+  Render export is the slide-deck path.
 
 ---
 

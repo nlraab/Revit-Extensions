@@ -83,7 +83,7 @@
                            HorizontalAlignment="Left"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
-                    <Button x:Name="btn_export" Content="Export BCF" Style="{StaticResource PrimaryButton}"/>
+                    <Button x:Name="btn_export" Content="Export" Style="{StaticResource PrimaryButton}"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -98,7 +98,7 @@
                                    Style="{StaticResource HelperText}" Margin="0,0,0,4"/>
 
                         <TextBlock Text="Trade" Style="{StaticResource FieldLabel}"/>
-                        <WrapPanel>
+                        <WrapPanel x:Name="wp_trade_filter">
                             <CheckBox Content="Mechanical" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Electrical" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Plumbing" IsChecked="True" Margin="0,3,8,3"/>
@@ -109,7 +109,7 @@
                         </WrapPanel>
 
                         <TextBlock Text="Status" Style="{StaticResource FieldLabel}"/>
-                        <WrapPanel>
+                        <WrapPanel x:Name="wp_status_filter">
                             <CheckBox Content="Open" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Reviewed" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Approved" IsChecked="False" Margin="0,3,8,3"/>
@@ -158,11 +158,9 @@
                         <TextBlock Text="Output" Style="{StaticResource SectionHeader}"/>
 
                         <TextBlock Text="Format" Style="{StaticResource FieldLabel}"/>
-                        <ComboBox x:Name="cmb_format" IsEnabled="False">
-                            <ComboBoxItem Content="BCF 2.1  (recommended - widest tool support)" IsSelected="True"/>
-                            <ComboBoxItem Content="BCF 3.0  (planned)"/>
-                            <ComboBoxItem Content="PDF Summary  (planned)"/>
-                            <ComboBoxItem Content="Excel  (planned)"/>
+                        <ComboBox x:Name="cmb_format">
+                            <ComboBoxItem Content="BCF 2.1 (.bcfzip — for coordination tools)" IsSelected="True"/>
+                            <ComboBoxItem Content="Excel (.xlsx — for internal review / save-as-PDF)"/>
                         </ComboBox>
 
                         <TextBlock Text="Output folder" Style="{StaticResource FieldLabel}"/>
