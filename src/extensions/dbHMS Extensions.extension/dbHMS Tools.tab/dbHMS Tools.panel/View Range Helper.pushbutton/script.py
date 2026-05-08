@@ -44,6 +44,16 @@ from Autodesk.Revit.DB import (
     ImageExportOptions, ImageFileType, ImageResolution,
     ZoomFitType, ExportRange,
 )
+# Workset visibility — wrapped because non-workshared docs and some
+# Revit builds raise on the import; we tolerate that and skip workset
+# fixes if unavailable.
+try:
+    from Autodesk.Revit.DB import (
+        FilteredWorksetCollector, WorksetKind, WorksetVisibility,
+    )
+    _HAVE_WORKSETS = True
+except Exception:
+    _HAVE_WORKSETS = False
 
 import System
 from System import Uri, UriKind
@@ -591,6 +601,44 @@ def _copy_view_param_int(src_view, dst_view, bip):
             pass
     except Exception:
         pass
+
+
+def _copy_workset_visibility(src_view, dst_view):
+    """Copy each user workset's visibility (Visible / Hidden /
+    UseGlobalSetting) from src_view to dst_view. Falls back to forcing
+    'Visible' on any workset that's currently visible in the source.
+
+    On production MEP projects with linked architectural models, the
+    link very often lives on a dedicated workset (e.g. 'Linked
+    Architecture'). New views inherit project workset defaults — and
+    those defaults frequently HIDE that workset on fresh views, so
+    spawning a temp ViewSection produces an empty image even though
+    OST_RvtLinks is technically a visible category. Mirroring the
+    active view's per-workset visibility makes the temp section see
+    exactly what the user already sees in plan."""
+    if not _HAVE_WORKSETS:
+        return
+    try:
+        if not doc.IsWorkshared:
+            return
+    except Exception:
+        return
+    try:
+        wsets = FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset)
+    except Exception:
+        return
+    for ws in wsets:
+        try:
+            try:
+                vis = src_view.GetWorksetVisibility(ws.Id)
+            except Exception:
+                vis = WorksetVisibility.Visible
+            try:
+                dst_view.SetWorksetVisibility(ws.Id, vis)
+            except Exception:
+                continue
+        except Exception:
+            continue
 
 
 def _apply_arch_only_visibility(view):
@@ -1503,13 +1551,23 @@ class ViewRangeHelperForm(forms.WPFWindow):
         and on the manual refresh button."""
         # Show progress feedback
         self.txt_section_hint.Text = "Rendering Revit section preview..."
+        # Reset diagnostic on each attempt so stale messages don't bleed
+        # through between renders.
+        self._last_render_msg = None
         try:
             path = self._render_revit_section()
         except Exception as ex:
             self.txt_section_hint.Text = "Render failed: {}".format(ex)
             return
         if not path or not os.path.exists(path):
-            self.txt_section_hint.Text = "Render produced no image."
+            # _render_revit_section sets _last_render_msg with a more
+            # actionable description (file count, paths it looked at,
+            # etc.) when it returns None at the export-output-search
+            # step. Fall back to the generic message only if nothing
+            # specific was set.
+            msg = getattr(self, '_last_render_msg', None) \
+                  or "Render produced no image."
+            self.txt_section_hint.Text = msg
             return
         try:
             self._load_image(path)
@@ -1737,16 +1795,30 @@ class ViewRangeHelperForm(forms.WPFWindow):
                     try: section.ViewTemplateId = ElementId(-1)
                     except Exception: pass
                 # Copy phase, phase filter, and discipline from the active
-                # plan view. Without this, ViewSection.CreateSection picks
-                # Revit's project defaults which very commonly mismatch
-                # the host's working phase — causing linked architectural
-                # models to phase-map to nothing and the section to render
-                # blank. Copying from the active view guarantees the
-                # section sees the same scene the user already sees in
-                # plan, which is the only sensible default for a preview.
-                _copy_view_param_id(view, section, BuiltInParameter.VIEW_PHASE)
-                _copy_view_param_id(view, section, BuiltInParameter.VIEW_PHASE_FILTER)
-                _copy_view_param_int(view, section, BuiltInParameter.VIEW_DISCIPLINE)
+                # plan view (`self.view_plan` — _render_revit_section
+                # doesn't have a local `view` variable; that only exists
+                # in _render_revit_plan, and using `view` here previously
+                # raised NameError, which the wider try/except surfaced
+                # as 'Section create failed: global name view is not
+                # defined' and rendered the whole section blank).
+                src_view = self.view_plan
+                _copy_view_param_id(src_view, section, BuiltInParameter.VIEW_PHASE)
+                _copy_view_param_id(src_view, section, BuiltInParameter.VIEW_PHASE_FILTER)
+                _copy_view_param_int(src_view, section, BuiltInParameter.VIEW_DISCIPLINE)
+                # Design option (some projects scope linked content to
+                # specific options — without this the section sees the
+                # main model only).
+                try:
+                    _copy_view_param_id(src_view, section,
+                                        BuiltInParameter.VIEW_DESIGN_OPTION_ID)
+                except Exception:
+                    pass
+                # Workset visibility — mirror per-workset visibility from
+                # the active view. Critical for MEP host + linked arch
+                # workflow: the link's workset defaults to hidden on new
+                # views in many projects, so the temp section renders
+                # blank without this fix.
+                _copy_workset_visibility(src_view, section)
                 # Force Hidden Line + Coarse so cut walls render with poché.
                 # Try the property first, then the BuiltInParameter as backup
                 # in case the property isn't writable in this Revit version.
@@ -1774,9 +1846,12 @@ class ViewRangeHelperForm(forms.WPFWindow):
             except Exception as ex:
                 try: t.RollBack()
                 except Exception: pass
-                # Surface the actual exception so we can debug section creation
+                # Surface the actual exception so we can debug section
+                # creation. Stashed on _last_render_msg so the caller
+                # (_refresh_revit_render) shows it rather than the
+                # generic 'Render produced no image' fallback.
                 tg.RollBack()
-                self.txt_section_hint.Text = "Section create failed: {}".format(ex)
+                self._last_render_msg = "Section create failed: {}".format(ex)
                 return None
 
             opts = ImageExportOptions()
@@ -1797,7 +1872,7 @@ class ViewRangeHelperForm(forms.WPFWindow):
                 doc.ExportImage(opts)
             except Exception as ex:
                 tg.RollBack()
-                self.txt_section_hint.Text = "Image export failed: {}".format(ex)
+                self._last_render_msg = "Image export failed: {}".format(ex)
                 return None
         finally:
             try: tg.RollBack()
@@ -1812,12 +1887,32 @@ class ViewRangeHelperForm(forms.WPFWindow):
         # level / plane markers. Plan PNG still gets trimmed (its bbox
         # = building footprint, no empty space).
         try:
-            for f in os.listdir(tmp_dir):
-                if f.lower().endswith('.png'):
-                    png_path = os.path.join(tmp_dir, f)
-                    return png_path
-        except Exception:
-            pass
+            files = os.listdir(tmp_dir)
+        except Exception as ex:
+            self._last_render_msg = ("Render output dir unreadable ({}): {}"
+                                     .format(tmp_dir, ex))
+            return None
+        for f in files:
+            if f.lower().endswith('.png'):
+                return os.path.join(tmp_dir, f)
+        # No PNG produced. Surface what's actually in the temp dir so
+        # we can tell whether ExportImage wrote nothing, wrote with a
+        # different extension, or wrote elsewhere. Without this the
+        # user only sees a generic "Render produced no image" message
+        # and we can't iterate.
+        if not files:
+            self._last_render_msg = (
+                "Section render: ExportImage produced no files in {}. "
+                "This usually means the section view rendered empty "
+                "(no geometry intersects the section bbox). Check that "
+                "the red section line on the plan crosses through "
+                "building elements, increase the far-clip handle, or "
+                "verify the active view's phase / workset settings show "
+                "the linked model.".format(tmp_dir))
+        else:
+            self._last_render_msg = (
+                "Section render: no PNG in {}; got files: {}"
+                .format(tmp_dir, ", ".join(files[:8])))
         return None
 
     def _update_status(self, dirty=False, extra=None):
