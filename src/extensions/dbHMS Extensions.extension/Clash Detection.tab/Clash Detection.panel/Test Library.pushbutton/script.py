@@ -39,6 +39,7 @@ from System.Windows.Controls import CheckBox
 from System.Windows.Media import SolidColorBrush, Color
 
 from pyrevit import forms
+import dbhms_ui
 
 from clash_core import config, persistence, project
 from clash_core import categories as cat_module
@@ -255,7 +256,7 @@ class TestLibraryForm(forms.WPFWindow):
 
     def _show_first_run_alert(self, sender, args):
         self.Loaded -= self._show_first_run_alert
-        forms.alert(
+        dbhms_ui.info(
             "The Test Library can't load:\n\n{}\n\n"
             "Open Settings (Clash Detection tab) and pick a shared "
             "clash-data folder, then come back.".format(self._setup_message),
@@ -616,7 +617,7 @@ class TestLibraryForm(forms.WPFWindow):
 
     def _on_save(self, sender, args):
         if not self._current_id or self._current_store not in ('global', 'override:custom'):
-            forms.alert(
+            dbhms_ui.info(
                 "Pick a test on the left first, or click + New Test to start a fresh one.",
                 title='Nothing to save',
             )
@@ -624,7 +625,7 @@ class TestLibraryForm(forms.WPFWindow):
         try:
             new_test = self._collect_editor_values(base_id=self._current_id)
         except ValueError as ex:
-            forms.alert(str(ex), title='Invalid input')
+            dbhms_ui.info(str(ex), title='Invalid input')
             return
         try:
             if self._current_store == 'global':
@@ -636,10 +637,10 @@ class TestLibraryForm(forms.WPFWindow):
                 store_label = 'project overrides'
                 select_in   = 'override'
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Setup needed')
+            dbhms_ui.info(str(ex), title='Setup needed')
             return
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Could not save the test:\n\n{}".format(ex),
                 title='Save failed',
             )
@@ -651,7 +652,7 @@ class TestLibraryForm(forms.WPFWindow):
     def _on_new_project_test(self, sender, args):
         """Create a blank test in the active project's overrides (the easy path)."""
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "Open a Revit project first so the new test has a project to live under.\n\n"
                 "If you want a firm-wide test that applies to every project, use "
                 "+ New Firm Test instead.",
@@ -662,9 +663,9 @@ class TestLibraryForm(forms.WPFWindow):
         try:
             self._persist_override(blank)
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Setup needed'); return
+            dbhms_ui.info(str(ex), title='Setup needed'); return
         except Exception as ex:
-            forms.alert("Could not create:\n\n{}".format(ex), title='Create failed'); return
+            dbhms_ui.info("Could not create:\n\n{}".format(ex), title='Create failed'); return
         self._reload(select_id=blank['id'], select_in='override')
         self.txt_editor_status.Text = (
             "New project test created. Edit name + categories, then Save Changes."
@@ -687,9 +688,9 @@ class TestLibraryForm(forms.WPFWindow):
         try:
             self._persist_global(blank)
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Setup needed'); return
+            dbhms_ui.info(str(ex), title='Setup needed'); return
         except Exception as ex:
-            forms.alert("Could not create:\n\n{}".format(ex), title='Create failed'); return
+            dbhms_ui.info("Could not create:\n\n{}".format(ex), title='Create failed'); return
         # Newly created firm-wide tests are immediately editable so the user
         # can fill in name + categories without an extra unlock step. Any
         # later edit of an existing firm-wide test still requires unlocking.
@@ -707,14 +708,14 @@ class TestLibraryForm(forms.WPFWindow):
         one project." Replaces the old + Add Project Override button.
         """
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "Open a Revit project first so the override has a project to live under.",
                 title='No active project',
             )
             return
         items_global = list(self.dg_global.SelectedItems)
         if not items_global:
-            forms.alert(
+            dbhms_ui.info(
                 "Select a firm-wide test on the left first, then click "
                 "Customize for this Project.",
                 title='Nothing selected',
@@ -735,9 +736,9 @@ class TestLibraryForm(forms.WPFWindow):
         try:
             self._persist_override(new_test)
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Setup needed'); return
+            dbhms_ui.info(str(ex), title='Setup needed'); return
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Could not create the project override:\n\n{}".format(ex),
                 title='Create failed')
             return
@@ -782,7 +783,7 @@ class TestLibraryForm(forms.WPFWindow):
 
     def _on_delete(self, sender, args):
         if not self._current_id or self._current_store not in ('global', 'override:custom'):
-            forms.alert(
+            dbhms_ui.info(
                 "Pick a test on the left first. (Disabled-override rows can't be deleted "
                 "from this iteration.)",
                 title='Nothing to delete',
@@ -803,9 +804,9 @@ class TestLibraryForm(forms.WPFWindow):
             try:
                 self._delete_global(self._current_id)
             except persistence.SharedFolderNotConfigured as ex:
-                forms.alert(str(ex), title='Setup needed'); return
+                dbhms_ui.info(str(ex), title='Setup needed'); return
             except Exception as ex:
-                forms.alert("Delete failed:\n\n{}".format(ex), title='Delete failed'); return
+                dbhms_ui.info("Delete failed:\n\n{}".format(ex), title='Delete failed'); return
             self._reload()
             self.txt_editor_status.Text = "Deleted from the firm-wide library."
         else:  # override:custom
@@ -821,7 +822,7 @@ class TestLibraryForm(forms.WPFWindow):
             try:
                 self._delete_override(self._current_id)
             except Exception as ex:
-                forms.alert("Delete failed:\n\n{}".format(ex), title='Delete failed'); return
+                dbhms_ui.info("Delete failed:\n\n{}".format(ex), title='Delete failed'); return
             self._reload()
             self.txt_editor_status.Text = "Deleted from project overrides."
 
@@ -831,13 +832,13 @@ class TestLibraryForm(forms.WPFWindow):
         try:
             seed_tests = _read_seed_tests()
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't read default_tests.json:\n\n{}".format(ex),
                 title='Reset failed',
             )
             return
         if not seed_tests:
-            forms.alert(
+            dbhms_ui.info(
                 "default_tests.json had no tests; nothing to reset to.",
                 title='Reset failed',
             )
@@ -861,10 +862,10 @@ class TestLibraryForm(forms.WPFWindow):
             new_library = {'$schema_version': 1, 'tests': seed_tests}
             persistence.write_global_test_library(new_library)
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Setup needed')
+            dbhms_ui.info(str(ex), title='Setup needed')
             return
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't write the global library:\n\n{}".format(ex),
                 title='Reset failed',
             )

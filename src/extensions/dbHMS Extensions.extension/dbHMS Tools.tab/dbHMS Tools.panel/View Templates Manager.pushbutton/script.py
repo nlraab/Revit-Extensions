@@ -64,6 +64,7 @@ from System.Windows.Input import Cursors
 from System import EventHandler
 
 from pyrevit import forms
+import dbhms_ui
 
 # Revit document handles
 doc   = __revit__.ActiveUIDocument.Document
@@ -525,10 +526,88 @@ def get_revit_link_types(rdoc):
 
 def get_imported_cad_links(rdoc):
     """Return list of {name, category, layers: [(layer_name, layer_category), ...]}.
-    Mirrors what shows under Imported Categories in Revit's V/G dialog: each
-    DWG/DXF/family-imported file is a sub-category of OST_ImportObjectStyles
-    and its layers are sub-sub-categories below that."""
+
+    Mirrors what shows under Imported Categories in Revit's V/G dialog. Each
+    DWG/DXF that is *actually placed* in the project (whether imported or
+    linked) shows up as one entry, with its layers expanded as children.
+
+    Implementation note: we walk `ImportInstance` elements to find the real
+    imports first, then group by their file-level Category. This is more
+    accurate than walking `OST_ImportObjectStyles.SubCategories` because the
+    sub-category list can include phantom/family-only entries, and because
+    on some projects Revit's category tree exposes the layers flat instead
+    of grouped under the file. If no `ImportInstance` elements exist, we
+    fall back to the sub-category walk so seed-file or family-internal
+    imports still surface.
+    """
     out = []
+    seen_cat_ids = set()
+
+    # 1. Primary path: enumerate ImportInstance elements (the actual placed
+    #    CAD imports + links). Group by their Category (= file-level entry).
+    try:
+        from Autodesk.Revit.DB import ImportInstance
+        try:
+            instances = list(FilteredElementCollector(rdoc).OfClass(ImportInstance))
+        except Exception:
+            instances = []
+        for inst in instances:
+            try:
+                cat = inst.Category
+                if cat is None:
+                    continue
+                cid = eid_int(cat.Id)
+                if cid in seen_cat_ids:
+                    continue
+                seen_cat_ids.add(cid)
+                # Prefer a clean display name: try the instance's Name first
+                # (often shows the original filename like "ARCH-Floor.dwg"),
+                # fall back to the category name.
+                disp = None
+                try:
+                    nm = inst.Name
+                    if nm and nm.strip():
+                        disp = nm.strip()
+                except Exception:
+                    pass
+                if not disp:
+                    try:
+                        disp = cat.Name
+                    except Exception:
+                        disp = "(unnamed import)"
+                # Mark linked vs imported so the user can tell at a glance
+                try:
+                    is_linked = bool(inst.IsLinked)
+                except Exception:
+                    is_linked = False
+                if is_linked and not disp.lower().endswith("  (linked)"):
+                    disp = "{0}  (linked)".format(disp)
+                layers = []
+                try:
+                    for layer in cat.SubCategories:
+                        try:
+                            layers.append((layer.Name, layer))
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                out.append({
+                    "name":     disp,
+                    "category": cat,
+                    "layers":   sorted(layers, key=lambda kv: kv[0].lower()),
+                })
+            except Exception:
+                continue
+    except Exception:
+        # ImportInstance class import failed — drop into the fallback below.
+        pass
+
+    if out:
+        return sorted(out, key=lambda d: d["name"].lower())
+
+    # 2. Fallback: walk the OST_ImportObjectStyles sub-tree directly. This
+    #    covers projects where ImportInstance enumeration is empty (rare —
+    #    e.g., imports that only live inside families).
     try:
         cats = rdoc.Settings.Categories
         for cat in cats:
@@ -539,19 +618,25 @@ def get_imported_cad_links(rdoc):
                 continue
             try:
                 for sub in cat.SubCategories:
-                    layers = []
+                    # Only treat sub-categories that have their own layer
+                    # children as real CAD files. A leaf-level sub here
+                    # is more likely to be a flat layer entry.
+                    layer_subs = []
                     try:
                         for layer in sub.SubCategories:
                             try:
-                                layers.append((layer.Name, layer))
+                                layer_subs.append((layer.Name, layer))
                             except Exception:
                                 continue
                     except Exception:
                         pass
+                    if not layer_subs:
+                        # Skip flat / phantom entries with no children
+                        continue
                     out.append({
                         "name":     sub.Name,
                         "category": sub,
-                        "layers":   sorted(layers, key=lambda kv: kv[0].lower()),
+                        "layers":   sorted(layer_subs, key=lambda kv: kv[0].lower()),
                     })
             except Exception:
                 pass
@@ -1701,7 +1786,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert(
+            dbhms_ui.info(
                 "Apply Changes hit an error and was rolled back:\n\n{0}\n\n"
                 "If this keeps happening, tell Claude which row(s) you were "
                 "editing and we'll narrow it down.".format(str(ex)),
@@ -1715,7 +1800,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
                 "Nothing was written — values were unchanged or the rows "
                 "didn't apply to the selected template(s).")
         elif successes == 0 and failures > 0 and last_error is not None:
-            forms.alert(
+            dbhms_ui.info(
                 "Apply Changes wrote 0 values; {0} attempts failed.\n\n"
                 "Last error:\n{1}".format(failures, str(last_error)),
                 title="View Templates Manager - Apply failed")
@@ -2188,7 +2273,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
     def _open_vg_categories(self, kind):
         checked = self._checked()
         if not checked:
-            forms.alert("Pick a template (or check 2+ for bulk edit) first.",
+            dbhms_ui.info("Pick a template (or check 2+ for bulk edit) first.",
                         title="View Templates Manager")
             return
         templates = [it.view for it in checked]
@@ -2200,7 +2285,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
     def _open_vg_imports(self):
         checked = self._checked()
         if not checked:
-            forms.alert("Pick a template (or check 2+ for bulk edit) first.",
+            dbhms_ui.info("Pick a template (or check 2+ for bulk edit) first.",
                         title="View Templates Manager")
             return
         templates = [it.view for it in checked]
@@ -2212,7 +2297,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
     def _open_vg_filters(self):
         names = self._selected_template_names()
         if not names:
-            forms.alert("Pick a template (or check 2+ for bulk edit) first.",
+            dbhms_ui.info("Pick a template (or check 2+ for bulk edit) first.",
                         title="View Templates Manager")
             return
         dlg = VgFiltersDialog(template_names=names)
@@ -2787,14 +2872,14 @@ class VgCategoriesDialog(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert(
+            dbhms_ui.info(
                 "V/G category apply hit an error and was rolled back:\n\n"
                 "{0}".format(str(ex)),
                 title="View Templates Manager - V/G apply failed")
             return
 
         if successes == 0 and failures > 0 and last_error is not None:
-            forms.alert(
+            dbhms_ui.info(
                 "V/G category apply wrote 0 changes; {0} attempts failed.\n\n"
                 "Last error:\n{1}".format(failures, str(last_error)),
                 title="View Templates Manager - V/G apply failed")
@@ -2880,7 +2965,7 @@ class VgCategoriesDialog(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert("Reset failed: {0}".format(str(ex)),
+            dbhms_ui.info("Reset failed: {0}".format(str(ex)),
                         title="V/G Reset Overrides")
             return
         # Reload panel from the (now-cleared) OGS so the user sees the result
@@ -3343,14 +3428,14 @@ class VgImportsDialog(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert(
+            dbhms_ui.info(
                 "V/G imports apply hit an error and was rolled back:\n\n"
                 "{0}".format(str(ex)),
                 title="View Templates Manager - V/G apply failed")
             return
 
         if successes == 0 and failures > 0 and last_error is not None:
-            forms.alert(
+            dbhms_ui.info(
                 "V/G imports apply wrote 0 changes; {0} attempts failed.\n\n"
                 "Last error:\n{1}".format(failures, str(last_error)),
                 title="View Templates Manager - V/G apply failed")
@@ -3429,7 +3514,7 @@ class VgImportsDialog(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert("Reset failed: {0}".format(str(ex)),
+            dbhms_ui.info("Reset failed: {0}".format(str(ex)),
                         title="V/G Reset Overrides")
             return
         self._load_ogs_panel(self._selected_names)
@@ -3498,7 +3583,7 @@ class VgFiltersDialog(forms.WPFWindow):
         self.btn_flt_remove.Click += self._on_remove
 
     def _on_add(self, sender, args):
-        forms.alert(
+        dbhms_ui.info(
             "Filter picker arrives in iter 3. For now, the list shows mock "
             "filters so you can see how the layout works.",
             title="V/G Overrides - Filters")
@@ -3920,14 +4005,14 @@ class VgLinksDialog(forms.WPFWindow):
                 t.RollBack()
             except Exception:
                 pass
-            forms.alert(
+            dbhms_ui.info(
                 "V/G RVT Link apply hit an error and was rolled back:\n\n{0}"
                 .format(str(ex)),
                 title="View Templates Manager - V/G apply failed")
             return
 
         if successes == 0 and failures > 0 and last_error is not None:
-            forms.alert(
+            dbhms_ui.info(
                 "V/G RVT Link apply wrote 0 changes; {0} attempts failed.\n\n"
                 "Last error:\n{1}".format(failures, str(last_error)),
                 title="View Templates Manager - V/G apply failed")
@@ -3935,7 +4020,7 @@ class VgLinksDialog(forms.WPFWindow):
         # Surface Custom-mode write limit if any templates skipped per-aspect
         # writes because the live mode is Custom (and user didn't switch out).
         if custom_aspects_skipped > 0 and any_aspect_dirty:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't write per-aspect overrides on {0} template{1} — the "
                 "link is in Custom mode there, and the Revit API doesn't "
                 "allow writing to a Custom-mode link's settings.\n\n"
@@ -4098,7 +4183,7 @@ class VgLinksDialog(forms.WPFWindow):
             except Exception:
                 pass
         if not posted:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't auto-open Revit's View Templates dialog "
                 "(PostableCommand wasn't recognized on this Revit version). "
                 "Open it manually: View tab → View Templates → Manage View "
@@ -4294,15 +4379,16 @@ def _build_category_row(cat_name, on_click=None):
 
 def _build_import_link_row(cad_name, on_click=None):
     outer = Border()
-    outer.Padding = Thickness(0, 2, 0, 2)
-    outer.BorderBrush = SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF0))
+    outer.Padding = Thickness(0, 4, 0, 4)
+    outer.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
     outer.BorderThickness = Thickness(0, 0, 0, 1)
-    outer.Background = SolidColorBrush(Color.FromRgb(0xF7, 0xFA, 0xFC))
+    outer.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
     outer.Cursor = Cursors.Hand
 
     grid = Grid()
     from System.Windows import GridLength, GridUnitType
-    widths = [20, 40, None, 50, 50]
+    # CAD-file row: wider expander column so the ▸/▾ glyph is unmistakable.
+    widths = [28, 40, None, 50, 50]
     for w in widths:
         c = ColumnDefinition()
         if w is None:
@@ -4312,12 +4398,15 @@ def _build_import_link_row(cad_name, on_click=None):
         grid.ColumnDefinitions.Add(c)
 
     expander_btn = Button()
-    expander_btn.Content = u"▸"  # ▸
-    expander_btn.Background = SolidColorBrush(Color.FromRgb(0xF7, 0xFA, 0xFC))
+    expander_btn.Content = u"▸"  # ▸ collapsed by default
+    expander_btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
     expander_btn.BorderThickness = Thickness(0)
     expander_btn.Cursor = Cursors.Hand
-    expander_btn.FontSize = 11
+    expander_btn.FontSize = 14
+    expander_btn.FontWeight = _semi_bold()
+    expander_btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
     expander_btn.Padding = Thickness(0)
+    expander_btn.ToolTip = "Expand / collapse layers in this CAD file"
     Grid.SetColumn(expander_btn, 0)
     grid.Children.Add(expander_btn)
 
@@ -4370,7 +4459,8 @@ def _build_import_layer_row(layer_name, parent_cad, on_click=None):
 
     grid = Grid()
     from System.Windows import GridLength, GridUnitType
-    widths = [20, 40, None, 50, 50]
+    # Match the CAD-row 28-wide expander column so columns align across rows.
+    widths = [28, 40, None, 50, 50]
     for w in widths:
         c = ColumnDefinition()
         if w is None:
@@ -4543,7 +4633,7 @@ def _render_multi_select(header_tb, names_panel, names, kind, on_show_all=None):
 def _show_full_name_list(title, names):
     """Open a simple modal listing every name. Used by the 'and N more' link."""
     body = "\n".join(u"• " + n for n in names)
-    forms.alert(body, title=title)
+    dbhms_ui.info(body, title=title)
 
 
 def _flash_applied(status_textblock, message, revert_text="", revert_italic=True):

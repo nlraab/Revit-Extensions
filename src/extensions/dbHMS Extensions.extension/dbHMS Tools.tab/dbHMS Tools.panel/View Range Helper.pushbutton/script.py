@@ -75,6 +75,7 @@ from System.Windows.Shapes import (
 from System.Windows.Input import Cursors, MouseButtonState, Key, MouseButton
 
 from pyrevit import revit, forms, script
+import dbhms_ui
 
 # Revit document / UI doc handles
 doc   = __revit__.ActiveUIDocument.Document
@@ -3425,7 +3426,7 @@ def main():
     except Exception:
         output.print_md("### View Range Helper failed")
         output.print_md("```\n{}\n```".format(traceback.format_exc()))
-        forms.alert("View Range Helper hit an error - see the pyRevit "
+        dbhms_ui.info("View Range Helper hit an error - see the pyRevit "
                     "output window for the traceback.", title="View Range Helper")
 
 

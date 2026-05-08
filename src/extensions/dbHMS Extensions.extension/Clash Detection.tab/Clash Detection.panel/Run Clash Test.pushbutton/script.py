@@ -42,6 +42,7 @@ from System.Windows.Threading import (
 )
 
 from pyrevit import forms, script
+import dbhms_ui
 
 from clash_core import config, persistence, project, users, merge, dedupe
 from clash_core.models import _now_iso
@@ -233,7 +234,7 @@ class RunClashTestForm(forms.WPFWindow):
         self.btn_select_all.Click    += self._on_select_all
         self.btn_select_none.Click   += self._on_select_none
         self.btn_open_browser.Click  += self._on_open_browser
-        self.btn_open_settings.Click += self._on_coming_soon
+        self.btn_open_settings.Click += self._on_open_settings
 
         # Excel-style bulk toggle for the test checkboxes
         self.dg_tests.AddHandler(
@@ -439,13 +440,13 @@ class RunClashTestForm(forms.WPFWindow):
     def _on_run(self, sender, args):
         n_selected = self._selected_count()
         if n_selected == 0:
-            forms.alert('No tests selected. Check the Run column for at least one test.',
+            dbhms_ui.info('No tests selected. Check the Run column for at least one test.',
                         title='Nothing to run')
             return
 
         # Hard prerequisites
         if not self._real_data:
-            forms.alert(
+            dbhms_ui.info(
                 "Can't run - no saved test library yet.\n\n"
                 "Open Test Library (Clash Detection tab) once. It will auto-seed "
                 "the firm-default tests from the shipped defaults file.",
@@ -459,11 +460,11 @@ class RunClashTestForm(forms.WPFWindow):
         except Exception:
             doc = None
         if doc is None:
-            forms.alert('No active Revit document.', title='No project')
+            dbhms_ui.info('No active Revit document.', title='No project')
             return
 
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "The project has no central-model path yet. Save the project, "
                 "then come back and run.",
                 title='Project not saved',
@@ -471,7 +472,7 @@ class RunClashTestForm(forms.WPFWindow):
             return
 
         if not config.shared_root():
-            forms.alert(
+            dbhms_ui.info(
                 "No shared folder is set. Open Settings and pick one first.",
                 title='Setup needed',
             )
@@ -570,7 +571,7 @@ class RunClashTestForm(forms.WPFWindow):
                     )
         except Exception as ex:
             self._restore_ui()
-            forms.alert(
+            dbhms_ui.info(
                 'Detection failed:\n\n{}\n\n{}'.format(ex, traceback.format_exc()),
                 title='Detection error',
             )
@@ -594,7 +595,7 @@ class RunClashTestForm(forms.WPFWindow):
             persistence.write_clashes(self._project_hash, new_data)
         except Exception as ex:
             self._restore_ui()
-            forms.alert(
+            dbhms_ui.info(
                 'Detection finished but saving the result failed:\n\n{}\n\n{}'.format(
                     ex, traceback.format_exc()),
                 title='Save error',
@@ -679,7 +680,7 @@ class RunClashTestForm(forms.WPFWindow):
             SCRIPT_DIR, '..', 'Clash Browser.pushbutton', 'script.py',
         ))
         if not os.path.isfile(browser_script):
-            forms.alert(
+            dbhms_ui.info(
                 "Clash Browser script not found at:\n\n{}\n\n"
                 "Close this window and click the Clash Browser button in the "
                 "toolbar instead.".format(browser_script),
@@ -693,17 +694,107 @@ class RunClashTestForm(forms.WPFWindow):
             ns['__name__'] = '__main__'
             execfile(browser_script, ns)
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't launch Clash Browser:\n\n{}\n\n"
                 "Click the Clash Browser button in the toolbar instead.".format(ex),
                 title='Open failed',
             )
 
-    def _on_coming_soon(self, sender, args):
-        forms.alert(
-            "Manage role mapping in Settings.",
-            title='Manage links',
-        )
+    def _on_open_settings(self, sender, args):
+        """Close this Run Clash Test form, then auto-launch the
+        Settings toolbar button via Revit's ribbon. Same AdWindows
+        approach as Browser → Walkthrough Here.
+        """
+        launched = self._post_settings_command()
+        self.Close()
+        if not launched:
+            dbhms_ui.info(
+                "Click the Settings button on the dbHMS Clash Detection "
+                "toolbar to manage role mapping.",
+                title='Settings',
+            )
+
+    @staticmethod
+    def _post_settings_command():
+        """Walk the Revit ribbon and click our **Clash Detection >
+        Settings** button. The text-only match in the original was too
+        greedy — pyRevit's own Settings button (Core Settings /
+        Environment Variables / etc.) shares the text "Settings" and
+        was being invoked instead, opening pyRevit's settings dialog
+        rather than our Clash Detection settings.
+
+        Fix: scope the search to the tab whose title contains "Clash
+        Detection". Skip every other tab — pyRevit, dbHMS Tools,
+        anything else — so we can only possibly land on the right
+        button.
+        """
+        try:
+            import clr
+            clr.AddReference("AdWindows")
+            from Autodesk.Windows import ComponentManager
+        except Exception:
+            return False
+        try:
+            ribbon = ComponentManager.Ribbon
+        except Exception:
+            return False
+        if ribbon is None:
+            return False
+        try:
+            for tab in ribbon.Tabs:
+                try:
+                    tab_title = str(getattr(tab, "Title", "") or "")
+                except Exception:
+                    tab_title = ""
+                # Only walk the Clash Detection tab — keeps us out of
+                # pyRevit's own "Settings" button, which would
+                # otherwise match first.
+                if "Clash Detection" not in tab_title:
+                    continue
+                try:
+                    for panel in tab.Panels:
+                        try:
+                            source = panel.Source
+                            if source is None:
+                                continue
+                            for item in source.Items:
+                                text = None
+                                for attr in ("Text", "AutomationName",
+                                             "Cookie", "Description"):
+                                    try:
+                                        v = getattr(item, attr, None)
+                                        if v:
+                                            text = str(v)
+                                            break
+                                    except Exception:
+                                        continue
+                                if not text:
+                                    continue
+                                normalized = text.replace("\n", "") \
+                                                  .replace("\r", "") \
+                                                  .replace("-", "") \
+                                                  .replace(" ", "") \
+                                                  .lower()
+                                if normalized == "settings":
+                                    handler = getattr(item, "CommandHandler", None)
+                                    if handler is None:
+                                        continue
+                                    try:
+                                        handler.Execute(item)
+                                        return True
+                                    except Exception:
+                                        try:
+                                            handler.Execute(None)
+                                            return True
+                                        except Exception:
+                                            continue
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
 
     def _on_close(self, sender, args):
         self.Close()

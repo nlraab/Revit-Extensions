@@ -1,0 +1,69 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="dbHMS"
+        SizeToContent="Height" Width="520"
+        MinHeight="180" MaxHeight="600"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="13"
+        ShowInTaskbar="False">
+
+    <Window.Resources>
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="100"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- dbHMS slate header bar — identical to the main forms but
+             without the wordmark (popups are too small for it). -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <!-- Green checkmark — explicitly says "this worked,"
+                     more friendly than the warning-triangle that
+                     pyRevit's forms.alert paints by default and
+                     warmer than a neutral info glyph. Color is
+                     dbHMS green (#48BB78), matches the active-mode
+                     pill in the Walkthrough form. -->
+                <TextBlock Grid.Column="0" Text="✓"
+                           Foreground="#48BB78" FontSize="24"
+                           FontWeight="Bold" VerticalAlignment="Center"
+                           Margin="0,0,12,0"/>
+                <TextBlock x:Name="txt_title" Grid.Column="1"
+                           Text="dbHMS" Foreground="White"
+                           FontSize="16" FontWeight="Bold"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+            </Grid>
+        </Border>
+
+        <!-- Footer with OK button -->
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0"
+                Padding="20,12">
+            <Button x:Name="btn_ok" Content="OK"
+                    Style="{StaticResource PrimaryButton}"
+                    HorizontalAlignment="Right" IsDefault="True"/>
+        </Border>
+
+        <!-- Message body -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      MaxHeight="380">
+            <TextBlock x:Name="txt_message" Margin="20"
+                       Foreground="#2D3748" FontSize="13"
+                       TextWrapping="Wrap" LineHeight="18"/>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

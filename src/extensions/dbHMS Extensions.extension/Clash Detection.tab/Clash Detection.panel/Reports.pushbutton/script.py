@@ -31,18 +31,22 @@ clr.AddReference("System")
 from System.Diagnostics import Process
 
 from pyrevit import forms
+import dbhms_ui
 
 from clash_core import config, persistence, project
 from clash_report import bcf, excel_summary
+from clash_report import html as html_report
 
 
 # Internal format keys.
 _FORMAT_BCF   = 'bcf'
 _FORMAT_XLSX  = 'xlsx'
+_FORMAT_HTML  = 'html'
 
 _FORMAT_EXTENSIONS = {
     _FORMAT_BCF:  '.bcfzip',
     _FORMAT_XLSX: '.xlsx',
+    _FORMAT_HTML: '.html',
 }
 
 
@@ -270,16 +274,22 @@ class ReportsForm(forms.WPFWindow):
         """Return the internal format key for the currently-selected
         cmb_format item. Defaults to BCF if unrecognized."""
         text = (self._combo_text(self.cmb_format) or '').lower()
+        if 'html' in text:
+            return _FORMAT_HTML
         if 'xlsx' in text or 'excel' in text:
             return _FORMAT_XLSX
         return _FORMAT_BCF
 
     def _on_export(self, sender, args):
         fmt = self._selected_format()
-        title_label = {_FORMAT_BCF: 'Export BCF', _FORMAT_XLSX: 'Export Excel'}[fmt]
+        title_label = {
+            _FORMAT_BCF:  'Export BCF',
+            _FORMAT_XLSX: 'Export Excel',
+            _FORMAT_HTML: 'Export HTML',
+        }[fmt]
 
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't determine the active project. Open Settings and "
                 "confirm the active project is set up.",
                 title=title_label,
@@ -288,13 +298,13 @@ class ReportsForm(forms.WPFWindow):
 
         out_dir = (self.txt_output_folder.Text or '').strip()
         if not out_dir:
-            forms.alert("Pick an output folder first.", title=title_label)
+            dbhms_ui.info("Pick an output folder first.", title=title_label)
             return
         try:
             if not os.path.isdir(out_dir):
                 os.makedirs(out_dir)
         except Exception as ex:
-            forms.alert("Couldn't create the output folder:\n\n{}".format(ex),
+            dbhms_ui.info("Couldn't create the output folder:\n\n{}".format(ex),
                         title=title_label)
             return
 
@@ -325,14 +335,49 @@ class ReportsForm(forms.WPFWindow):
                     filter_predicate=predicate,
                     project_name=self._project_meta.get('display_name'),
                 )
-            else:  # XLSX
+            elif fmt == _FORMAT_XLSX:
                 written = excel_summary.build_xlsx(
                     clashes=self._clashes,
                     out_path=out_path,
                     filter_predicate=predicate,
                 )
+            else:  # HTML
+                viewpoints_dir = None
+                try:
+                    viewpoints_dir = persistence.viewpoints_dir(self._project_hash)
+                except Exception:
+                    pass
+                # Build the test name lookup so each clash card can show
+                # its test name (the clash dict only stores the test id).
+                test_name_lookup = {}
+                try:
+                    library = persistence.read_global_test_library()
+                    for t in library.get('tests') or []:
+                        tid = t.get('id')
+                        if tid:
+                            test_name_lookup[tid] = t.get('name', '<unnamed>')
+                except Exception:
+                    pass
+                # Resolve current user inline — Reports form doesn't
+                # cache an _author like the Browser does. Best-effort.
+                generated_by = None
+                try:
+                    from clash_core import users as _users
+                    from pyrevit import revit as _revit
+                    generated_by = _users.current_user(_revit.uiapp)
+                except Exception:
+                    pass
+                written = html_report.build_html(
+                    clashes=self._clashes,
+                    out_path=out_path,
+                    filter_predicate=predicate,
+                    project_name=self._project_meta.get('display_name'),
+                    viewpoints_dir=viewpoints_dir,
+                    generated_by=generated_by,
+                    test_name_lookup=test_name_lookup,
+                )
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Export failed:\n\n{}\n\n{}".format(ex, traceback.format_exc()),
                 title=title_label + ' failed',
             )
@@ -346,7 +391,7 @@ class ReportsForm(forms.WPFWindow):
         except Exception:
             pass
 
-        forms.alert(
+        dbhms_ui.info(
             "Exported {} clash(es) to:\n\n{}".format(written, out_path),
             title='Export complete',
         )

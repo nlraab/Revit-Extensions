@@ -34,7 +34,31 @@ Renaming any `*.extension`, `*.tab`, `*.panel`, or `*.pushbutton` folder changes
 
 Each `script.py` is self-contained: it sets `__title__` / `__author__` for the toolbar, imports `pyrevit` + .NET WPF types (`System.Windows.*`), reads its sibling `config.json` / `*.xaml`, and runs inside a Revit transaction. Tools do not share helper modules — duplication across pushbuttons is intentional so each one can be deployed standalone.
 
-**Documented exception:** the `Clash Detection.tab/` tool uses an extension-level `lib/` folder (`dbHMS Extensions.extension/lib/clash_*/`) shared across its six pushbuttons. Clash detection is a single coherent system — six buttons read and write the same JSON database, share the same data model, and use the same detection algorithms; duplicating thousands of lines across them would be unworkable. pyRevit auto-adds extension-level `lib/` to `sys.path`. The exception is scoped: only `lib/clash_*/` namespaces, only used by Clash Detection scripts. Architecture, data model, and storage layout are documented in `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — read that before making serious changes anywhere under `Clash Detection.tab/` or `lib/clash_*/`. If a future tool wants the same treatment, document it here first.
+**Documented exceptions to "no shared modules":**
+
+1. **`lib/clash_*/`** — the `Clash Detection.tab/` tool uses an
+   extension-level `lib/` folder (`dbHMS Extensions.extension/lib/clash_*/`)
+   shared across its six pushbuttons. Clash detection is a single coherent
+   system — six buttons read and write the same JSON database, share the
+   same data model, and use the same detection algorithms; duplicating
+   thousands of lines across them would be unworkable. pyRevit auto-adds
+   extension-level `lib/` to `sys.path`. Architecture, data model, and
+   storage layout are documented in
+   `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md`
+   — read that before making serious changes anywhere under
+   `Clash Detection.tab/` or `lib/clash_*/`.
+
+2. **`lib/dbhms_ui/`** — shared UI helpers used by every tool in the
+   repo. Currently exports `dbhms_ui.info(message, title=...)`, the
+   friendly dbHMS-branded replacement for `forms.alert(...)` on
+   informational popups (see UI conventions section below). Scoped so
+   other tools can simply `import dbhms_ui` and not worry about the
+   internals. Exists because every tool needs the same look on popups
+   and duplicating the dialog markup would make any change a 10+ file
+   edit.
+
+If a future tool wants the same treatment, document the exception here
+first.
 
 **Tool-level READMEs:** some larger tools have their own `README.md` next to `script.py`. Read these before making serious changes inside that tool's folder; do not auto-load them outside that scope. Currently:
 - `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — Clash Detection architecture (see paragraph above).
@@ -192,5 +216,43 @@ class ToolForm(forms.WPFWindow):
         # bind events, populate combos, etc.
 ```
 
-User-facing dialogs use `forms.alert(...)` (with `title=` for non-default titles, and `exitscript=True` for fatal preconditions). All Revit document mutations happen inside a `revit.Transaction("...")` block.
+User-facing dialogs:
+
+- **Informational popups** use `dbhms_ui.info(message, title=title)` — a
+  shared lib helper that renders a friendly dbHMS-branded modal dialog
+  (slate header bar, blue "ⓘ" glyph, OK button styled as PrimaryButton).
+  This replaces `pyrevit.forms.alert(message, title=title)` for any
+  popup that just reports state ("Export complete", "Walkthrough is
+  queued", "View created OK"). pyRevit's `forms.alert` paints the
+  Windows yellow-warning-triangle icon even on success messages, which
+  reads as failure to users. The `dbhms_ui` dialog drops that and
+  matches the rest of the firm's UI. Lives at
+  `src/extensions/dbHMS Extensions.extension/lib/dbhms_ui/`. Import as
+  `import dbhms_ui` (the lib root is on `sys.path` via pyRevit's
+  extension-level `lib/`).
+- **Yes/no confirmations** still use `forms.alert(msg, title=title,
+  yes=True, no=True)` — pyRevit's confirmation dialog has the right
+  shape for a question, and the Yes/No buttons are clearly different
+  from a plain OK. Don't replace these.
+- **Fatal-precondition gates** still use `forms.alert(msg,
+  exitscript=True)` — they should look severe, the warning-triangle is
+  appropriate when the script is about to terminate.
+
+Pattern: import once at module level after `from pyrevit import ...`:
+```python
+from pyrevit import forms
+import dbhms_ui
+
+dbhms_ui.info("Saved 13 clashes to clashes.json.", title='Run complete')
+```
+
+`dbhms_ui` is the second documented `lib/` exception (alongside
+`clash_*` for clash detection — see Architecture section). It exists
+because EVERY tool puts up popups, and duplicating the WPF dialog
+across every pushbutton would make a "make all popups blue" tweak a
+30-file edit. Scoped under the `dbhms_ui` namespace so other tools'
+scripts can ignore it. If a future tool wants a similar shared
+helper, document the exception here first.
+
+All Revit document mutations happen inside a `revit.Transaction("...")` block.
 

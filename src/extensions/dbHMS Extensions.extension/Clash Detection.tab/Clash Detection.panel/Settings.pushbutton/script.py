@@ -37,6 +37,7 @@ from System.Windows.Forms import FolderBrowserDialog, DialogResult
 from System.Windows.Media import SolidColorBrush, Color, FontFamily
 
 from pyrevit import forms
+import dbhms_ui
 
 from clash_core import config, persistence, project
 from clash_detect import linked
@@ -228,7 +229,7 @@ class SettingsForm(forms.WPFWindow):
             if threshold < 1:
                 raise ValueError()
         except (ValueError, TypeError):
-            forms.alert(
+            dbhms_ui.info(
                 'Warn threshold must be a positive whole number (e.g. 2000).\n\n'
                 'Got: "{}"'.format(threshold_raw),
                 title='Invalid value',
@@ -243,7 +244,7 @@ class SettingsForm(forms.WPFWindow):
         try:
             config.save(cfg)
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 'Could not save per-machine config:\n\n{}\n\n{}'.format(
                     ex, traceback.format_exc()),
                 title='Save failed',
@@ -263,7 +264,7 @@ class SettingsForm(forms.WPFWindow):
                 persistence.write_project_meta(self._project_hash, meta)
                 per_project_saved = True
             except Exception as ex:
-                forms.alert(
+                dbhms_ui.info(
                     'Per-machine settings saved, but per-project save failed:\n\n{}'.format(ex),
                     title='Partial save',
                 )
@@ -301,11 +302,11 @@ class SettingsForm(forms.WPFWindow):
     def _on_open_shared(self, sender, args):
         path = self.txt_shared_folder.Text.strip()
         if not path:
-            forms.alert('No shared folder is set yet. Use Browse to pick one.',
+            dbhms_ui.info('No shared folder is set yet. Use Browse to pick one.',
                         title='Nothing to open')
             return
         if not os.path.isdir(path):
-            forms.alert(
+            dbhms_ui.info(
                 "The shared folder doesn't exist on disk yet:\n\n{}\n\n"
                 'Pick a different folder or create that one first.'.format(path),
                 title='Folder missing',
@@ -314,11 +315,11 @@ class SettingsForm(forms.WPFWindow):
         try:
             os.startfile(path)
         except Exception as ex:
-            forms.alert("Couldn't open folder:\n\n{}".format(ex), title='Open failed')
+            dbhms_ui.info("Couldn't open folder:\n\n{}".format(ex), title='Open failed')
 
     def _on_open_project_folder(self, sender, args):
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "No active project, or the project hasn't been saved yet.",
                 title='No project',
             )
@@ -326,12 +327,12 @@ class SettingsForm(forms.WPFWindow):
         try:
             folder = persistence.project_dir(self._project_hash)
         except persistence.SharedFolderNotConfigured as ex:
-            forms.alert(str(ex), title='Shared folder not set')
+            dbhms_ui.info(str(ex), title='Shared folder not set')
             return
         try:
             os.startfile(folder)
         except Exception as ex:
-            forms.alert("Couldn't open project folder:\n\n{}".format(ex),
+            dbhms_ui.info("Couldn't open project folder:\n\n{}".format(ex),
                         title='Open failed')
 
     def _on_open_readme(self, sender, args):
@@ -340,9 +341,9 @@ class SettingsForm(forms.WPFWindow):
             try:
                 os.startfile(readme)
             except Exception as ex:
-                forms.alert("Couldn't open README:\n\n{}".format(ex), title='Open failed')
+                dbhms_ui.info("Couldn't open README:\n\n{}".format(ex), title='Open failed')
         else:
-            forms.alert('README not found at:\n\n{}'.format(readme), title='README missing')
+            dbhms_ui.info('README not found at:\n\n{}'.format(readme), title='README missing')
 
     def _on_close(self, sender, args):
         self.Close()

@@ -21,6 +21,7 @@ import codecs
 import traceback
 
 from pyrevit import revit, DB, forms, script
+import dbhms_ui
 
 # WPF / .NET imports for the dynamic form controls
 import clr  # noqa: F401
@@ -498,15 +499,15 @@ class AlignViewsForm(forms.WPFWindow):
 
     def _on_run(self, sender, e):
         if self._master is None:
-            forms.alert('Pick a master viewport first.')
+            dbhms_ui.info('Pick a master viewport first.')
             return
         if not any(self._view_checks.values()):
-            forms.alert('Check at least one viewport to align.')
+            dbhms_ui.info('Check at least one viewport to align.')
             return
         if not (self.chk_match_position.IsChecked or
                 self.chk_match_title_pos.IsChecked or
                 self.chk_match_title_line.IsChecked):
-            forms.alert('Choose at least one thing to match.')
+            dbhms_ui.info('Choose at least one thing to match.')
             return
         self.confirmed = True
         self.Close()
@@ -613,7 +614,7 @@ def _execute(settings):
     master_id = settings['master']['viewport_id']
     master_vp = doc.GetElement(master_id)
     if master_vp is None:
-        forms.alert('Master viewport could not be loaded; aborting.')
+        dbhms_ui.info('Master viewport could not be loaded; aborting.')
         return
 
     match_opts = settings['match']
@@ -691,7 +692,7 @@ def main():
     except Exception:
         output.print_md('### Align Views failed')
         output.print_md('```\n{}\n```'.format(traceback.format_exc()))
-        forms.alert(
+        dbhms_ui.info(
             'Align Views ran into an error - see the pyRevit output window '
             'for the traceback.', title='Align Views')
 

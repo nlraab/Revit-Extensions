@@ -62,6 +62,7 @@ from System import TimeSpan
 from Autodesk.Revit.UI import IExternalEventHandler, ExternalEvent
 
 from pyrevit import forms, revit
+import dbhms_ui
 
 from clash_core import persistence, project, users
 from clash_view import (
@@ -72,6 +73,14 @@ from clash_view import (
 
 SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'WalkthroughForm.xaml')
+
+
+# Mark every script execution so we know definitively whether the
+# Walkthrough script is running. If this line doesn't appear in the log
+# after a Walkthrough button click, the script literally isn't being
+# invoked (pyRevit cache, persistent engine staleness, etc.).
+walkthrough_view._log("====== script.py imported ======")
+walkthrough_view._log("log path: {}".format(walkthrough_view.log_path()))
 
 
 # Movement key map. WPF Key enum → motion-module key name.
@@ -224,27 +233,41 @@ class _WalkthroughHandler(IExternalEventHandler):
         """Apply the camera tuple inside a transaction + refresh the view."""
         from Autodesk.Revit.DB import Transaction
         if camera is None:
+            walkthrough_view._log("_set_camera: no camera passed")
             return False, "No camera passed.", None
         uidoc = app.ActiveUIDocument
         if uidoc is None:
+            walkthrough_view._log("_set_camera: no ActiveUIDocument")
             return False, "No active document.", None
         doc = uidoc.Document
         view = walkthrough_view.find_walkthrough_view(doc)
         if view is None:
+            walkthrough_view._log("_set_camera: walkthrough view not found")
             return False, "Walkthrough view not found.", None
+        active_view_id = None
+        try:
+            active_view_id = uidoc.ActiveView.Id
+        except Exception:
+            pass
+        walkthrough_view._log(
+            "_set_camera: view.Id={}, active_view.Id={}, pos={}"
+            .format(view.Id, active_view_id, camera[0]))
         txn = Transaction(doc, "dbHMS Walkthrough camera step")
         try:
             txn.Start()
             walkthrough_view.set_camera(view, camera)
             txn.Commit()
+            walkthrough_view._log("_set_camera: txn committed")
         except Exception as ex:
+            walkthrough_view._log("_set_camera: txn raised {}".format(ex))
             if txn.HasStarted() and not txn.HasEnded():
                 txn.RollBack()
             return False, "Camera set failed: {}".format(ex), None
         try:
             uidoc.RefreshActiveView()
-        except Exception:
-            pass
+            walkthrough_view._log("_set_camera: RefreshActiveView OK")
+        except Exception as ex:
+            walkthrough_view._log("_set_camera: RefreshActiveView raised {}".format(ex))
         return True, "OK", None
 
     def _set_discipline(self, app, discipline=None, visible=True):
@@ -310,6 +333,7 @@ class WalkthroughForm(forms.WPFWindow):
     """
 
     def __init__(self):
+        walkthrough_view._log("WalkthroughForm.__init__ start")
         forms.WPFWindow.__init__(self, FORM_XAML)
 
         self._project_hash = None
@@ -381,6 +405,11 @@ class WalkthroughForm(forms.WPFWindow):
         # clicks into Revit — avoids the "still flying after I came
         # back" bug.
         self.Deactivated += self._on_window_deactivated
+        # Window-activated: also a trigger to pick up any pending
+        # Walkthrough Here handoff. Catches the case where the form
+        # is already open and the user brings it to front from the
+        # taskbar / Revit toolbar.
+        self.Activated += self._on_window_activated
 
         # DispatcherTimer for the motion loop. Created stopped; started
         # when the view opens.
@@ -399,6 +428,15 @@ class WalkthroughForm(forms.WPFWindow):
 
         # Bookmarks
         self._refresh_bookmarks()
+
+        # Auto-open the Walkthrough view on launch. Saves a click in
+        # the common case (especially Walkthrough Here from Browser)
+        # where the user always wants to start by opening the view.
+        # Idempotent — find_walkthrough_view returns the existing view
+        # on subsequent calls.
+        # Hooked to Loaded (not done from __init__) so the WPF window
+        # is fully laid out before we kick off the Revit-side work.
+        self.Loaded += self._on_window_loaded
 
     # --- Setup --------------------------------------------------------
 
@@ -435,8 +473,10 @@ class WalkthroughForm(forms.WPFWindow):
     # --- Open view + camera seeding -----------------------------------
 
     def _on_open_view(self, sender, args):
+        walkthrough_view._log("btn_open_view clicked, project_hash={}"
+                              .format(self._project_hash))
         if not self._project_hash:
-            forms.alert("No active project.", title='Walkthrough')
+            dbhms_ui.info("No active project.", title='Walkthrough')
             return
         self.txt_status.Text = "Opening Walkthrough view..."
         self._queue_action("open_view")
@@ -816,31 +856,96 @@ class WalkthroughForm(forms.WPFWindow):
     # file and queues a set_camera to the target.
 
     def _on_handoff_poll(self, sender, args):
+        # Log every tick so we can confirm the timer is alive — if this
+        # line isn't appearing in the log, the timer was never started
+        # or has been stopped.
+        walkthrough_view._log(
+            "handoff_poll: tick (camera={}, ph={})".format(
+                "set" if self._camera is not None else "None",
+                self._project_hash))
         if self._camera is None or not self._project_hash:
             return
         self._consume_pending_handoff()
 
+    def _on_window_activated(self, sender, args):
+        """Bring-to-front trigger — also consume pending if there is
+        one. Catches the case where the user clicks the Walkthrough
+        toolbar button and the persistent-engine pyRevit just brings
+        the existing form to the front instead of creating a fresh
+        one (script body never re-runs, so _open_view's consume path
+        doesn't fire either)."""
+        walkthrough_view._log("window_activated")
+        if self._camera is not None and self._project_hash:
+            self._consume_pending_handoff()
+
+    def _on_window_loaded(self, sender, args):
+        """Window is fully shown — conditionally auto-open the
+        Walkthrough view.
+
+        Behavior:
+          * **Pending Walkthrough Here command on disk** (Browser just
+            queued one): auto-open the view + consume → camera flies.
+            Truly one-click from the Browser.
+          * **No pending command** (manual Walkthrough toolbar click):
+            do nothing. The user wants to come up to the form to
+            adjust sliders / browse bookmarks / read the controls
+            cheatsheet without the walkthrough view being forced open.
+            They'll click Open Walkthrough View when ready.
+
+        One-shot — unsubscribe immediately so a second Loaded raise
+        (shouldn't happen, but safe) doesn't re-fire the auto-open.
+        """
+        try:
+            self.Loaded -= self._on_window_loaded
+        except Exception:
+            pass
+        if not self._project_hash or self._camera is not None:
+            return
+        # Only auto-open if there's a queued fly-here command waiting.
+        try:
+            pending = walkthrough_handoff.read_pending(self._project_hash)
+        except Exception:
+            pending = None
+        if pending is not None:
+            walkthrough_view._log(
+                "auto-open: pending handoff present — queueing open_view")
+            self._queue_action("open_view")
+        else:
+            walkthrough_view._log(
+                "auto-open: no pending handoff — waiting for manual Open")
+
     def _consume_pending_handoff(self):
+        walkthrough_view._log("consume_pending_handoff: enter, ph={}"
+                              .format(self._project_hash))
         if not self._project_hash:
             return
         try:
             cmd = walkthrough_handoff.read_pending(self._project_hash)
-        except Exception:
+        except Exception as ex:
+            walkthrough_view._log(
+                "consume_pending_handoff: read raised {}".format(ex))
             cmd = None
         if cmd is None:
+            walkthrough_view._log("consume_pending_handoff: no pending file")
             return
-        # Translate the saved viewpoint shape (position + target + up)
-        # to the motion module's shape (position + forward + up) and
-        # apply.
+        walkthrough_view._log(
+            "consume_pending_handoff: read pending for clash_seq={}"
+            .format(cmd.get("clash_seq")))
         target_camera = walkthrough_handoff.viewpoint_to_camera_tuple(cmd)
         try:
             walkthrough_handoff.clear_pending(self._project_hash)
-        except Exception:
-            pass
+        except Exception as ex:
+            walkthrough_view._log(
+                "consume_pending_handoff: clear failed {}".format(ex))
         if target_camera is None:
+            walkthrough_view._log(
+                "consume_pending_handoff: translation returned None")
             self.txt_status.Text = (
                 "Couldn't fly to queued clash — viewpoint is malformed.")
             return
+        walkthrough_view._log(
+            "consume_pending_handoff: queueing set_camera to pos={}, fwd={}"
+            .format(target_camera[0], target_camera[1]))
         self._camera = target_camera
         self._queue_action("set_camera", camera=target_camera)
         seq = cmd.get("clash_seq")
@@ -851,11 +956,11 @@ class WalkthroughForm(forms.WPFWindow):
 
     def _on_save_bookmark(self, sender, args):
         if self._camera is None:
-            forms.alert("Open the Walkthrough view first.",
+            dbhms_ui.info("Open the Walkthrough view first.",
                         title='Save bookmark')
             return
         if not self._project_hash:
-            forms.alert("No active project.", title='Save bookmark')
+            dbhms_ui.info("No active project.", title='Save bookmark')
             return
         name = forms.ask_for_string(
             default='New bookmark',
@@ -872,7 +977,7 @@ class WalkthroughForm(forms.WPFWindow):
         try:
             walkthrough_bookmarks.append_bookmark(self._project_hash, bm)
         except Exception as ex:
-            forms.alert("Couldn't save bookmark:\n\n{}".format(ex),
+            dbhms_ui.info("Couldn't save bookmark:\n\n{}".format(ex),
                         title='Save bookmark failed')
             return
         self._refresh_bookmarks()
@@ -907,7 +1012,7 @@ class WalkthroughForm(forms.WPFWindow):
             walkthrough_bookmarks.delete_bookmark(
                 self._project_hash, bm.get("id"))
         except Exception as ex:
-            forms.alert("Couldn't delete: {}".format(ex),
+            dbhms_ui.info("Couldn't delete: {}".format(ex),
                         title='Delete bookmark failed')
             return
         self._refresh_bookmarks()
@@ -916,10 +1021,10 @@ class WalkthroughForm(forms.WPFWindow):
 
     def _on_render(self, sender, args):
         if not self._project_hash:
-            forms.alert("No active project.", title='Render')
+            dbhms_ui.info("No active project.", title='Render')
             return
         if self._camera is None:
-            forms.alert("Open the Walkthrough view first.", title='Render')
+            dbhms_ui.info("Open the Walkthrough view first.", title='Render')
             return
         self.txt_status.Text = "Rendering current view..."
         self._queue_action("render", project_hash=self._project_hash)
@@ -937,6 +1042,7 @@ class WalkthroughForm(forms.WPFWindow):
                         "Shift/Ctrl = faster/slower.")
                     self._timer.Start()
                     self._handoff_timer.Start()
+                    walkthrough_view._log("timers started (motion + handoff)")
                     self._apply_initial_visibility()
                     # Window must have keyboard focus for WASD to fire.
                     # The Open View button stole it on click; grab it
@@ -985,6 +1091,7 @@ class WalkthroughForm(forms.WPFWindow):
             self.txt_status.Text = "Couldn't queue action: {}".format(ex)
 
     def _on_close(self, sender, args):
+        walkthrough_view._log("WalkthroughForm closing")
         try:
             self._timer.Stop()
         except Exception:

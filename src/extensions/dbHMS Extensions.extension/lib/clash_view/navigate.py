@@ -432,6 +432,44 @@ def _schedule_view_activated_zoom(uiapp, view_id, bbox_min, bbox_max):
         except Exception:
             pass
 
+    # Belt-and-suspenders fallback: poll Idling up to N times, zooming
+    # on each tick. The ViewActivated chain above is the "right" path
+    # but on FIRST click of a fresh navigator view it can miss for
+    # one of two reasons:
+    #   (a) ViewActivated fires synchronously inside the
+    #       `uidoc.ActiveView = view` setter — BEFORE our handler is
+    #       subscribed — so we miss it entirely.
+    #   (b) The single Idling tick after ViewActivated fires before
+    #       Revit's auto-fit for the freshly-activated view has
+    #       completed; our zoom lands, then auto-fit overwrites it.
+    #
+    # Multi-tick polling defends against both. Each tick we just call
+    # ZoomAndCenterRectangle again. Once Revit settles (auto-fit done,
+    # UIView present), the zoom takes; subsequent ticks are visual
+    # no-ops (already at the right zoom). Capped so we don't poll
+    # forever if something genuinely goes wrong.
+    #
+    # Earlier "polling-burst" patterns we'd avoided: those mixed
+    # transactions and dialog popups into Idling handlers, which
+    # caused real Revit-side issues. Pure UIView.ZoomAndCenterRectangle
+    # is a no-state UI operation — repeating it is safe.
+    fallback_attempts = [0]
+    MAX_ATTEMPTS = 8
+
+    def fallback_idling(sender, args):
+        fallback_attempts[0] += 1
+        _zoom_now()
+        if fallback_attempts[0] >= MAX_ATTEMPTS:
+            try:
+                uiapp.Idling -= fallback_idling
+            except Exception:
+                pass
+
+    try:
+        uiapp.Idling += fallback_idling
+    except Exception:
+        pass
+
     try:
         uiapp.ViewActivated += view_activated_handler
         _pending_view_activation['uiapp'] = uiapp

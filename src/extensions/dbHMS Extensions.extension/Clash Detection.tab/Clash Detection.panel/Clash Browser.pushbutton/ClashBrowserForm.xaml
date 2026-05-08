@@ -176,27 +176,17 @@
                         <WrapPanel x:Name="wp_status_filter">
                             <CheckBox Content="Open" IsChecked="True" Margin="0,3,8,3"/>
                             <CheckBox Content="Reviewed" IsChecked="True" Margin="0,3,8,3"/>
-                            <CheckBox Content="Approved" IsChecked="False" Margin="0,3,8,3"/>
-                            <CheckBox Content="Resolved" IsChecked="False" Margin="0,3,8,3"/>
+                            <CheckBox Content="Approved" IsChecked="True" Margin="0,3,8,3"/>
+                            <CheckBox Content="Resolved" IsChecked="True" Margin="0,3,8,3"/>
                         </WrapPanel>
 
                         <TextBlock Text="Test" Style="{StaticResource FieldLabel}"/>
                         <ComboBox x:Name="cmb_test_filter">
-                            <!-- Populated dynamically at runtime from the loaded clashes' test names. -->
+                            <!-- Populated dynamically at runtime by _populate_test_filter
+                                 from the loaded clashes' test names. The single
+                                 (All tests) item below is just a designer-time
+                                 placeholder so the combo isn't empty in XAML preview. -->
                             <ComboBoxItem Content="(All tests)" IsSelected="True"/>
-                            <ComboBoxItem Content="Mechanical Ducts vs Plumbing Pipes"/>
-                            <ComboBoxItem Content="Mechanical Ducts vs Electrical Conduit"/>
-                            <ComboBoxItem Content="Plumbing Pipes vs Structural Framing"/>
-                            <ComboBoxItem Content="Mechanical Equipment vs Architectural Walls"/>
-                        </ComboBox>
-
-                        <TextBlock Text="Level" Style="{StaticResource FieldLabel}"/>
-                        <ComboBox x:Name="cmb_level_filter">
-                            <ComboBoxItem Content="(All levels)" IsSelected="True"/>
-                            <ComboBoxItem Content="Level 1"/>
-                            <ComboBoxItem Content="Level 2"/>
-                            <ComboBoxItem Content="Level 3"/>
-                            <ComboBoxItem Content="Roof"/>
                         </ComboBox>
 
                         <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
@@ -227,7 +217,7 @@
                 <Border Style="{StaticResource CardBorder}">
                     <DockPanel>
                         <DockPanel DockPanel.Dock="Top" LastChildFill="False">
-                            <TextBlock x:Name="txt_grid_header" Text="Clashes (12 of 87)"
+                            <TextBlock x:Name="txt_grid_header" Text="Clashes"
                                        Style="{StaticResource SectionHeader}"
                                        DockPanel.Dock="Left" VerticalAlignment="Center"/>
                             <ComboBox x:Name="cmb_group_by" Width="160" DockPanel.Dock="Right"
@@ -398,7 +388,7 @@
                                     <Image x:Name="img_viewpoint" Stretch="Uniform"
                                            Visibility="Collapsed"/>
                                     <TextBlock x:Name="txt_viewpoint_placeholder"
-                                               Text="No viewpoint saved. Click Show in 3D, frame the clash, then Save Viewpoint."
+                                               Text="No viewpoint yet. Viewpoints generate automatically on Run Clash Test (and again when the Browser opens for any that are missing)."
                                                Foreground="#A0AEC0"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                                TextAlignment="Center" TextWrapping="Wrap"
@@ -410,9 +400,9 @@
                             <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8">
                                 <StackPanel>
-                                    <TextBlock x:Name="txt_elem_a_name" Text="Round Duct - 12&quot; - Supply"
+                                    <TextBlock x:Name="txt_elem_a_name" Text=""
                                                TextWrapping="Wrap"/>
-                                    <TextBlock x:Name="txt_elem_a_id" Text="ID 4582193 - host model"
+                                    <TextBlock x:Name="txt_elem_a_id" Text=""
                                                Style="{StaticResource MonoText}"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
@@ -422,9 +412,9 @@
                             <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8">
                                 <StackPanel>
-                                    <TextBlock x:Name="txt_elem_b_name" Text="PVC Pipe - 4&quot; - Sanitary"
+                                    <TextBlock x:Name="txt_elem_b_name" Text=""
                                                TextWrapping="Wrap"/>
-                                    <TextBlock x:Name="txt_elem_b_id" Text="ID 7831205 - host model"
+                                    <TextBlock x:Name="txt_elem_b_id" Text=""
                                                Style="{StaticResource MonoText}"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
@@ -453,14 +443,11 @@
                                 <Button x:Name="btn_show_3d" Content="Show in 3D"
                                         Style="{StaticResource SecondaryButton}"
                                         MinWidth="0" Margin="0,0,3,0"/>
-                                <Button x:Name="btn_save_viewpoint" Content="Save Viewpoint"
+                                <Button x:Name="btn_walkthrough_here" Content="Walkthrough Here"
                                         Style="{StaticResource SecondaryButton}"
                                         MinWidth="0" Margin="3,0,0,0"/>
                             </UniformGrid>
-                            <UniformGrid Columns="2" Margin="0,6,0,0">
-                                <Button x:Name="btn_walkthrough_here" Content="Walkthrough Here"
-                                        Style="{StaticResource SecondaryButton}"
-                                        MinWidth="0" Margin="0,0,3,0"/>
+                            <UniformGrid Columns="1" Margin="0,6,0,0">
                                 <Button x:Name="btn_history" Content="History"
                                         Style="{StaticResource SecondaryButton}"
                                         MinWidth="0" Margin="3,0,0,0"/>

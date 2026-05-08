@@ -161,6 +161,7 @@
                         <ComboBox x:Name="cmb_format">
                             <ComboBoxItem Content="BCF 2.1 (.bcfzip — for coordination tools)" IsSelected="True"/>
                             <ComboBoxItem Content="Excel (.xlsx — for internal review / save-as-PDF)"/>
+                            <ComboBoxItem Content="HTML summary (.html — for sharing / save-as-PDF in browser)"/>
                         </ComboBox>
 
                         <TextBlock Text="Output folder" Style="{StaticResource FieldLabel}"/>

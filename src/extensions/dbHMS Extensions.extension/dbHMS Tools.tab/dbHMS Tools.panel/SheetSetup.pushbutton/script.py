@@ -24,6 +24,7 @@ import hashlib
 import traceback
 
 from pyrevit import revit, DB, forms, script
+import dbhms_ui
 
 # WPF / .NET imports for the dynamic form controls
 import clr  # noqa: F401
@@ -902,7 +903,7 @@ class ModelSetupForm(forms.WPFWindow):
                 'uniqueid': r['level'].UniqueId,
             })
         if not active_levels:
-            forms.alert(
+            dbhms_ui.info(
                 'Check at least one level in the main form '
                 'before configuring per-plan-type filters.',
                 title='No levels selected')
@@ -1124,9 +1125,9 @@ class ModelSetupForm(forms.WPFWindow):
         self._read_form_into_cfg()
         try:
             _save_config(self._cfg)
-            forms.alert('Defaults saved to config.json.', title='Saved')
+            dbhms_ui.info('Defaults saved to config.json.', title='Saved')
         except Exception as ex:
-            forms.alert('Failed to save: {}'.format(ex), title='Error')
+            dbhms_ui.info('Failed to save: {}'.format(ex), title='Error')
 
     def _on_cancel(self, sender, e):
         self.confirmed = False
@@ -1848,18 +1849,18 @@ def main():
 
         # Validation
         if settings['title_block'] is None:
-            forms.alert('Pick a title block before continuing.')
+            dbhms_ui.info('Pick a title block before continuing.')
             continue
         if not settings['levels']:
-            forms.alert('Select at least one level.')
+            dbhms_ui.info('Select at least one level.')
             continue
         if not settings['disciplines']:
-            forms.alert('Enable at least one discipline + plan type.')
+            dbhms_ui.info('Enable at least one discipline + plan type.')
             continue
 
         plan = _build_plan(settings)
         if not plan:
-            forms.alert('Nothing to create with the current selection.')
+            dbhms_ui.info('Nothing to create with the current selection.')
             continue
 
         if cfg['options'].get('show_preview', True):

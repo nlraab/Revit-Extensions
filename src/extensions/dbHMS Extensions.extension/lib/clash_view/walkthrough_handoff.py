@@ -59,38 +59,89 @@ def pending_path(project_hash):
                         PENDING_FILE_NAME)
 
 
+# How far (feet) to back the perspective camera off from the clash
+# midpoint. Picked to give a "framed" view of typical MEP clashes —
+# duct/pipe-scale geometry reads cleanly at 15 ft, you can see the
+# clashing parts plus enough surrounding context to navigate.
+_PERSPECTIVE_OFFSET_FEET = 15.0
+
+
 def make_pending_fly_to(clash_dict, viewpoint_dict):
     """Build the command dict the Browser writes when the user clicks
     Walkthrough Here.
 
-    `viewpoint_dict` is the saved viewpoint shape from
-    `clash_core.models.make_viewpoint` — has `camera.position`,
-    `camera.target`, `camera.up`. We copy those through verbatim;
-    the Walkthrough side translates target → forward unit at consume
-    time.
+    The saved viewpoint was captured from an ISOMETRIC navigator view
+    where the camera position is conceptually "far away in iso
+    projection space" — geometrically valid for that iso view but
+    visually disorienting when applied verbatim to a PERSPECTIVE
+    walkthrough camera (you teleport into a weird spot looking at the
+    iso angle, often inside a wall or looking away from the clash).
 
-    Returns None if the clash has no usable viewpoint (no save yet,
-    or malformed). Caller treats None as "can't fly there — tell the
-    user to save a viewpoint first."
+    Instead, we derive a perspective-friendly camera from:
+      * The clash midpoint (where the action is) — used as the look-at
+        point.
+      * The saved viewpoint's direction (target - position normalized)
+        — used as the *approach angle* so the camera sees the clash
+        from roughly the same orientation the iso view did.
+      * `_PERSPECTIVE_OFFSET_FEET` standoff distance — places the camera
+        back from the midpoint along that approach direction.
+
+    Result: the user lands ~15 ft from the clash, looking at it from a
+    sensible angle. They can then WASD/look around to inspect.
+
+    Falls back to copying the saved viewpoint verbatim if the clash
+    has no midpoint (older data shouldn't happen — every detected clash
+    gets one — but defend against it). Returns None if the saved
+    viewpoint is missing/malformed.
     """
     if not viewpoint_dict:
         return None
     cam = viewpoint_dict.get('camera') or {}
-    pos = cam.get('position')
-    tgt = cam.get('target')
-    up  = cam.get('up')
-    if not (_is_xyz(pos) and _is_xyz(tgt) and _is_xyz(up)):
+    saved_pos = cam.get('position')
+    saved_tgt = cam.get('target')
+    saved_up  = cam.get('up')
+    if not (_is_xyz(saved_pos) and _is_xyz(saved_tgt) and _is_xyz(saved_up)):
         return None
+
     clash = clash_dict or {}
+    midpoint = clash.get('midpoint')
+
+    if _is_xyz(midpoint):
+        # Saved viewpoint's direction = (target - position) normalized.
+        # That's the direction the iso camera was looking IN. We want
+        # the perspective camera to look the same direction, so we
+        # back the camera off ALONG THE OPPOSITE direction from the
+        # midpoint — i.e., midpoint - offset * direction.
+        dx = float(saved_tgt[0]) - float(saved_pos[0])
+        dy = float(saved_tgt[1]) - float(saved_pos[1])
+        dz = float(saved_tgt[2]) - float(saved_pos[2])
+        dlen = (dx * dx + dy * dy + dz * dz) ** 0.5
+        if dlen < 1e-9:
+            # Saved camera + target collapsed (shouldn't happen, but
+            # guard). Use a default approach from +X.
+            dx, dy, dz = 1.0, 0.0, 0.0
+        else:
+            dx, dy, dz = dx / dlen, dy / dlen, dz / dlen
+        new_pos = [
+            float(midpoint[0]) - _PERSPECTIVE_OFFSET_FEET * dx,
+            float(midpoint[1]) - _PERSPECTIVE_OFFSET_FEET * dy,
+            float(midpoint[2]) - _PERSPECTIVE_OFFSET_FEET * dz,
+        ]
+        new_tgt = [float(midpoint[0]), float(midpoint[1]), float(midpoint[2])]
+    else:
+        new_pos = [float(saved_pos[0]), float(saved_pos[1]), float(saved_pos[2])]
+        new_tgt = [float(saved_tgt[0]), float(saved_tgt[1]), float(saved_tgt[2])]
+
     return {
         "schema_version": SCHEMA_VERSION,
         "queued_at":      models._now_iso(),
         "clash_id":       clash.get('id'),
         "clash_seq":      clash.get('seq'),
         "camera": {
-            "position": [float(pos[0]), float(pos[1]), float(pos[2])],
-            "target":   [float(tgt[0]), float(tgt[1]), float(tgt[2])],
-            "up":       [float(up[0]),  float(up[1]),  float(up[2])],
+            "position": new_pos,
+            "target":   new_tgt,
+            "up":       [float(saved_up[0]), float(saved_up[1]),
+                         float(saved_up[2])],
         },
     }
 

@@ -65,7 +65,9 @@ def _viewpoint(position, target, up):
 
 class MakePendingTests(unittest.TestCase):
 
-    def test_builds_full_command_dict(self):
+    def test_falls_back_to_saved_viewpoint_when_no_midpoint(self):
+        # No clash midpoint → can't compute perspective offset, so we
+        # fall back to copying the saved viewpoint verbatim.
         clash = {"id": "clash-42", "seq": 42}
         vp = _viewpoint([1, 2, 3], [4, 5, 6], [0, 0, 1])
         cmd = wh.make_pending_fly_to(clash, vp)
@@ -76,6 +78,35 @@ class MakePendingTests(unittest.TestCase):
         self.assertEqual(cmd["camera"]["target"],   [4.0, 5.0, 6.0])
         self.assertEqual(cmd["camera"]["up"],       [0.0, 0.0, 1.0])
         self.assertIn("T", cmd["queued_at"])
+
+    def test_uses_midpoint_with_perspective_offset(self):
+        # When the clash has a midpoint, we should get a perspective-
+        # friendly camera position: backed off from the midpoint along
+        # the saved viewpoint's view direction by the offset distance.
+        # Saved viewpoint at (0,0,0) looking at (1,0,0) → direction = +X.
+        # Midpoint at (100, 50, 10). Camera should land 15 ft back in -X
+        # from the midpoint, looking AT the midpoint.
+        clash = {"id": "x", "seq": 1, "midpoint": [100, 50, 10]}
+        vp = _viewpoint([0, 0, 0], [1, 0, 0], [0, 0, 1])
+        cmd = wh.make_pending_fly_to(clash, vp)
+        # Camera position = midpoint - 15 * (+X) = (85, 50, 10)
+        self.assertAlmostEqual(cmd["camera"]["position"][0], 85.0, places=4)
+        self.assertAlmostEqual(cmd["camera"]["position"][1], 50.0, places=4)
+        self.assertAlmostEqual(cmd["camera"]["position"][2], 10.0, places=4)
+        # Look-at point = midpoint
+        self.assertEqual(cmd["camera"]["target"], [100.0, 50.0, 10.0])
+
+    def test_perspective_offset_distance_is_15ft(self):
+        # Verify the standoff distance. Direction is unit +Y.
+        clash = {"id": "x", "midpoint": [0, 0, 0]}
+        vp = _viewpoint([0, -1, 0], [0, 0, 0], [0, 0, 1])  # looking at origin from -Y
+        cmd = wh.make_pending_fly_to(clash, vp)
+        # Direction from camera to target is (0,1,0). Camera should be
+        # at midpoint - 15 * (0,1,0) = (0, -15, 0).
+        pos = cmd["camera"]["position"]
+        dist = (pos[0]**2 + pos[1]**2 + pos[2]**2) ** 0.5
+        self.assertAlmostEqual(dist, 15.0, places=4)
+        self.assertAlmostEqual(pos[1], -15.0, places=4)
 
     def test_returns_none_for_missing_viewpoint(self):
         self.assertIsNone(wh.make_pending_fly_to({"id": "x"}, None))

@@ -242,12 +242,13 @@ Wired forms:
   back to "(All tests)" if the saved name no longer exists in the
   project), and rewrites the search box, then runs `_apply_filters` once.
   Empty state shown if no clashes yet.
-- **Reports** (Iter 7) — exports the project's clashes in one of two formats
-  for sharing. Filter card mirrors the Browser (Trade / Status / Test /
-  Date range) and live-updates a preview count. Output folder defaults to
-  `<shared>/<project-hash>/reports/` and is browse-able. Filename template
-  supports `{date}`, `{project}`, `{filter}` tokens; the file extension
-  auto-swaps when the user changes format.
+- **Reports** (Iter 7, +14) — exports the project's clashes in one of
+  three formats for sharing. Filter card mirrors the Browser (Trade /
+  Status / Test / Date range) and live-updates a preview count. Output
+  folder defaults to `<shared>/<project-hash>/reports/` and is
+  browse-able. Filename template supports `{date}`, `{project}`,
+  `{filter}` tokens; the file extension auto-swaps when the user
+  changes format.
     - **BCF 2.1 (.bcfzip)** — for outside coordination tools. Each topic
       carries the full clash data (title / status / comments / assignee),
       the section box as 6 clipping planes, the camera state, and the
@@ -259,8 +260,22 @@ Wired forms:
       colored Trade pills, auto-filter dropdowns on every column, tuned
       column widths. 22 columns per row; sortable / filterable / save-as
       PDF directly from Excel.
-  Either format pops up the file in Explorer (selected, ready to right-click
-  → Send to) after a successful export.
+    - **HTML summary (.html)** (Iter 14) — for sharing with non-Revit
+      users (clients, GCs, project managers). Self-contained single
+      file: inline CSS, inline base64-encoded thumbnails (~50 KB each),
+      no external assets. dbHMS-branded header (slate bar + "db | HMS"
+      wordmark) + run metadata + summary cards (counts by status, counts
+      by trade) + one detail block per clash with thumbnail, element
+      refs, status pill, trade pill, comments, and history snippet.
+      Save-as-PDF works from any browser (Ctrl+P → Save as PDF) — gives
+      us PDF for free without an IronPython PDF library, with
+      `page-break-inside: avoid` on each clash so per-clash pages come
+      out cleanly. HTML escaping on every user-supplied string defends
+      against ill-formed clash data + accidental script content in
+      element names. Pure-data builder at `lib/clash_report/html.py`,
+      24 unit tests.
+  All three formats pop up the file in Explorer (selected, ready to
+  right-click → Send to) after a successful export.
 - **Walkthrough** (Iter 12) — free-fly through the building with WASD +
   mouse-look, for coordination meetings. The first cut shipped a
   guided clash-tour and was wrong scope — clash review belongs in the
@@ -493,7 +508,12 @@ src/extensions/dbHMS Extensions.extension/
         clash_report/
             __init__.py
             bcf.py                           <- BCF 2.1 zip builder
-            xlsx.py                          <- native XLSX builder (no openpyxl dep)
+            excel_summary.py                 <- native XLSX builder (no openpyxl dep)
+            html.py                          <- self-contained HTML summary (Iter 14)
+        dbhms_ui/                            <- shared friendly popup (Iter 15)
+            __init__.py
+            dialogs.py                       <- info(message, title=...)
+            InfoDialog.xaml                  <- dbHMS-branded modal markup
 ```
 
 ### Why an extension-level `lib/` exists for *this* tool

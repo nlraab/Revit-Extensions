@@ -36,6 +36,7 @@ from System.Windows.Media import SolidColorBrush, Color
 from System.Collections.Generic import List as NetList
 
 from pyrevit import forms
+import dbhms_ui
 
 from clash_core import config, persistence, project, users, models, browser_filters, bulk_edit, history_format, filter_presets
 from clash_core.models import _now_iso
@@ -209,7 +210,6 @@ class ClashBrowserForm(forms.WPFWindow):
         # bulk-action buttons still need their respective backends, so
         # they're left on the placeholder until those iterations land.
         self.btn_show_3d.Click       += self._on_show_in_3d
-        self.btn_save_viewpoint.Click += self._on_save_viewpoint
         self.btn_history.Click        += self._on_show_history
         # Bulk action bar (visible when 2+ rows selected) — Iteration 9.
         # Group is left on the placeholder; "group these clashes as a
@@ -301,7 +301,6 @@ class ClashBrowserForm(forms.WPFWindow):
         clash_dicts, name_lookup, banner = _read_clashes_safe(self._project_hash)
         self._clash_dicts = clash_dicts
         self._test_names  = name_lookup
-        self._comment_lookup = {}  # not used anymore; comments live on each clash dict
 
         self._clashes = [ClashRow(c, name_lookup) for c in clash_dicts]
 
@@ -638,7 +637,7 @@ class ClashBrowserForm(forms.WPFWindow):
     def _save_clashes(self, action_label=None):
         """Write the current clash list back to clashes.json."""
         if not self._project_hash:
-            forms.alert(
+            dbhms_ui.info(
                 "No project hash - can't save changes. Open Settings first.",
                 title='Save failed',
             )
@@ -651,7 +650,7 @@ class ClashBrowserForm(forms.WPFWindow):
                 self.txt_status.Text = '{} - saved.'.format(action_label)
             return True
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't save clashes.json:\n\n{}\n\n{}".format(
                     ex, traceback.format_exc()),
                 title='Save failed',
@@ -706,8 +705,11 @@ class ClashBrowserForm(forms.WPFWindow):
         """Reset every filter back to the form's default coordination state:
 
         Trade  — all checked
-        Status — Open + Reviewed checked, Approved + Resolved unchecked
-                 (the standard "show me what needs attention" default)
+        Status — all four checked (Open, Reviewed, Approved, Resolved).
+                 Defaulting Approved + Resolved on too — most coordination
+                 reviews want to see the full picture including resolved
+                 items, and unchecking a status to focus is a one-click
+                 operation when needed.
         Test   — "(All tests)"
         Search — empty
         """
@@ -717,8 +719,7 @@ class ClashBrowserForm(forms.WPFWindow):
             for chk in self._iter_checkboxes(self.wp_trade_filter):
                 chk.IsChecked = True
             for chk in self._iter_checkboxes(self.wp_status_filter):
-                content = str(getattr(chk, 'Content', ''))
-                chk.IsChecked = content in ('Open', 'Reviewed')
+                chk.IsChecked = True
             self.cmb_test_filter.SelectedIndex = 0  # "(All tests)"
             self.txt_search.Text = ''
         finally:
@@ -835,7 +836,7 @@ class ClashBrowserForm(forms.WPFWindow):
         try:
             filter_presets.append_user_preset(preset)
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't save preset:\n\n{}".format(ex),
                 title='Save preset failed',
             )
@@ -855,7 +856,7 @@ class ClashBrowserForm(forms.WPFWindow):
         try:
             removed = filter_presets.delete_user_preset(preset_id)
         except Exception as ex:
-            forms.alert(
+            dbhms_ui.info(
                 "Couldn't delete preset:\n\n{}".format(ex),
                 title='Delete preset failed',
             )
@@ -943,11 +944,11 @@ class ClashBrowserForm(forms.WPFWindow):
         """
         selected = list(self.dg_clashes.SelectedItems)
         if not selected:
-            forms.alert("Select a clash from the list first.",
+            dbhms_ui.info("Select a clash from the list first.",
                         title='Nothing selected')
             return
         if len(selected) > 1:
-            forms.alert(
+            dbhms_ui.info(
                 "Show in 3D works on a single clash. Select just one row, "
                 "then try again.",
                 title='Pick one clash',
@@ -971,70 +972,14 @@ class ClashBrowserForm(forms.WPFWindow):
             revit.uidoc, clash_dict, role_map)
         self.txt_status.Text = message
         if not success:
-            forms.alert(message, title='Show in 3D')
+            dbhms_ui.info(message, title='Show in 3D')
 
-    def _on_save_viewpoint(self, sender, args):
-        """Capture the current Clash Navigator view as the viewpoint for the
-        selected clash. Single viewpoint per clash — overwrites any previous
-        save (image file overwritten in place, dict replaced).
-
-        Caller must have run Show in 3D for this clash first so the
-        navigator view exists and is framed correctly. The capture
-        operates on whatever the navigator view is showing right now
-        (so the user can manually adjust the camera before saving for
-        a better angle).
-        """
-        if not self._project_hash:
-            forms.alert(
-                "Couldn't determine the project hash for this Revit doc — "
-                "viewpoints save under <shared>/<project-hash>/viewpoints/. "
-                "Open Settings and confirm the active project is set up.",
-                title='Save viewpoint',
-            )
-            return
-        selected = list(self.dg_clashes.SelectedItems)
-        if not selected:
-            forms.alert("Select a clash from the list first.",
-                        title='Nothing selected')
-            return
-        if len(selected) > 1:
-            forms.alert(
-                "Save Viewpoint works on a single clash. Select just one "
-                "row, then try again.",
-                title='Pick one clash',
-            )
-            return
-
-        row = selected[0]
-        clash_dict = row.Source
-
-        try:
-            meta = persistence.read_project_meta(self._project_hash)
-            role_map = meta.get('link_role_map') or {}
-        except Exception:
-            role_map = {}
-
-        from pyrevit import revit
-        from clash_view import viewpoint as vp_module
-        success, message = vp_module.capture_for_clash(
-            revit.uidoc, clash_dict, role_map, self._project_hash,
-            captured_by=self._author,
-        )
-        if not success:
-            forms.alert(message, title='Save viewpoint')
-            return
-
-        # Append a history entry so the audit trail records the capture.
-        history = clash_dict.setdefault('history', [])
-        history.append(models.make_history_entry(
-            self._author, 'viewpoint_saved'))
-
-        # Persist the modified clash dict (with new viewpoints[] entry)
-        # and refresh the detail panel so the new thumbnail appears
-        # immediately.
-        if self._save_clashes(action_label="Viewpoint saved"):
-            self._render_viewpoint(clash_dict)
-            self.txt_status.Text = message
+    # _on_save_viewpoint removed — the manual Save Viewpoint button is
+    # gone from the detail panel. Viewpoints are auto-generated on Run
+    # Clash Test (post-detection batch) and on Browser open (catch-up
+    # for any clashes missing one), so there's no need for the manual
+    # save flow. `clash_view.viewpoint.capture_for_clash` is still
+    # available as a library function if a future tool needs it.
 
     def _on_walkthrough_here(self, sender, args):
         """Hand the selected clash off to the modeless Walkthrough form.
@@ -1053,25 +998,25 @@ class ClashBrowserForm(forms.WPFWindow):
         from clash_view import walkthrough_handoff
         selected = list(self.dg_clashes.SelectedItems)
         if not selected:
-            forms.alert("Select a clash from the list first.",
+            dbhms_ui.info("Select a clash from the list first.",
                         title='Walkthrough Here')
             return
         if len(selected) > 1:
-            forms.alert(
+            dbhms_ui.info(
                 "Walkthrough Here flies to one clash. Select just one "
                 "row, then try again.",
                 title='Walkthrough Here',
             )
             return
         if not self._project_hash:
-            forms.alert("No active project — can't queue a walkthrough.",
+            dbhms_ui.info("No active project — can't queue a walkthrough.",
                         title='Walkthrough Here')
             return
         clash = selected[0].Source
         viewpoints = clash.get('viewpoints') or []
         viewpoint = viewpoints[0] if viewpoints else None
         if not viewpoint:
-            forms.alert(
+            dbhms_ui.info(
                 "This clash has no saved viewpoint yet. Click Save "
                 "Viewpoint first, then try again.",
                 title='Walkthrough Here',
@@ -1079,7 +1024,7 @@ class ClashBrowserForm(forms.WPFWindow):
             return
         cmd = walkthrough_handoff.make_pending_fly_to(clash, viewpoint)
         if cmd is None:
-            forms.alert(
+            dbhms_ui.info(
                 "The saved viewpoint for this clash is malformed. "
                 "Re-save it from the Browser and try again.",
                 title='Walkthrough Here',
@@ -1088,26 +1033,181 @@ class ClashBrowserForm(forms.WPFWindow):
         try:
             ok = walkthrough_handoff.write_pending(self._project_hash, cmd)
         except Exception as ex:
-            forms.alert("Couldn't queue: {}".format(ex),
+            dbhms_ui.info("Couldn't queue: {}".format(ex),
                         title='Walkthrough Here')
             return
         if not ok:
-            forms.alert("Couldn't write the pending command file.",
+            dbhms_ui.info("Couldn't write the pending command file.",
                         title='Walkthrough Here')
             return
-        # Browser is itself modal — a popup alert here would block the
-        # user from clicking the Walkthrough toolbar button next, so
-        # the helpful "queued!" message turns into an extra-click
-        # annoyance. Skip the alert; close the Browser instead so the
-        # user is one click away from the Walkthrough button.
-        # (If the Walkthrough form is already open, its 2 Hz polling
-        # timer will pick the file up within ~2 seconds. The user can
-        # see the status update there.)
+        # Try to launch the Walkthrough button automatically via
+        # Revit's PostCommand API — after the Browser closes,
+        # PostCommand fires the queued command, opening the Walkthrough
+        # form. The form's Loaded handler then auto-opens the view +
+        # consumes the pending file + flies the camera. True one-click.
         seq = clash.get('seq') or '?'
         self.txt_status.Text = (
-            "Queued for Walkthrough: Clash #{}. Closing Browser — "
-            "click the Walkthrough button next.".format(seq))
+            "Queued for Walkthrough: Clash #{} — launching...".format(seq))
+        launched = self._post_walkthrough_command()
         self.Close()
+        if not launched:
+            # Posting failed (Revit didn't recognize the command id).
+            # Tell the user to click the toolbar button manually so the
+            # queued file still gets used — the file's still on disk
+            # waiting for the next Walkthrough form launch.
+            dbhms_ui.info(
+                "Walkthrough is queued for Clash #{}. Click the "
+                "Walkthrough toolbar button to fly there now."
+                .format(seq),
+                title='Walkthrough Here',
+            )
+
+    def _post_walkthrough_command(self):
+        """Try to auto-launch the Walkthrough toolbar button so the
+        Walkthrough form opens after this Browser script returns.
+
+        Two strategies, tried in order:
+
+          1. **Revit PostCommand API.** Standard for postable commands;
+             works for pyRevit-registered commands when the id format
+             matches. Brittle because pyRevit's command id depends on
+             extension/tab/panel naming and version.
+
+          2. **AdWindows ribbon walk.** Autodesk.Windows is the
+             low-level UI framework Revit's ribbon is built on. We walk
+             the ribbon's tab → panel → item tree looking for the
+             Walkthrough button by display text and call its
+             `CommandHandler.Execute()`. Bypasses the command id system
+             entirely — works whenever the ribbon has the button visible.
+
+        Returns True if either strategy succeeded; False if both
+        failed. Caller falls back to a popup instructing the user.
+        """
+        if self._post_via_revit_command():
+            return True
+        if self._post_via_adwindows_ribbon():
+            return True
+        return False
+
+    def _post_via_revit_command(self):
+        try:
+            from Autodesk.Revit.UI import RevitCommandId
+            from pyrevit import revit
+        except Exception:
+            return False
+        candidates = [
+            "CustomCtrl_%CustomCtrl_%Clash Detection%Clash Detection%Walkthrough",
+            "CustomCtrl_%Clash Detection%Clash Detection%Walkthrough",
+            "dbhmsextensions_clashdetection_clashdetection_walkthrough",
+        ]
+        for cid_str in candidates:
+            try:
+                cid = RevitCommandId.LookupCommandId(cid_str)
+                if cid is None:
+                    continue
+                revit.uiapp.PostCommand(cid)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _post_via_adwindows_ribbon(self):
+        """Walk Revit's actual ribbon and click the Walkthrough button
+        programmatically. AdWindows is the Autodesk WPF-based ribbon
+        framework — every Revit ribbon button lives in this tree as a
+        `RibbonButton` with a `CommandHandler.Execute(...)` method.
+        """
+        try:
+            import clr
+            clr.AddReference("AdWindows")
+            from Autodesk.Windows import ComponentManager
+        except Exception:
+            return False
+        try:
+            ribbon = ComponentManager.Ribbon
+        except Exception:
+            return False
+        if ribbon is None:
+            return False
+        # Walk every tab/panel/item looking for a button with text
+        # "Walkthrough" (matching what __title__ produces on the
+        # ribbon — `__title__ = 'Walk-\nthrough'` so the displayed
+        # text contains "Walk" + newline + "through").
+        try:
+            for tab in ribbon.Tabs:
+                try:
+                    tab_title = str(getattr(tab, "Title", "") or "")
+                except Exception:
+                    tab_title = ""
+                # Scope to the Clash Detection tab — defends against
+                # any other tab eventually adding a "Walkthrough"
+                # button (e.g. third-party add-ins).
+                if "Clash Detection" not in tab_title:
+                    continue
+                try:
+                    for panel in tab.Panels:
+                        try:
+                            source = panel.Source
+                            if source is None:
+                                continue
+                            for item in source.Items:
+                                text = self._ribbon_item_text(item)
+                                if not text:
+                                    continue
+                                # Match "Walkthrough" with possible
+                                # newline / whitespace artifacts from
+                                # the __title__ split.
+                                normalized = text.replace("\n", "") \
+                                                  .replace("\r", "") \
+                                                  .replace("-", "") \
+                                                  .replace(" ", "") \
+                                                  .lower()
+                                if normalized == "walkthrough":
+                                    return self._invoke_ribbon_item(item)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _ribbon_item_text(item):
+        """Extract the display text of a RibbonItem. Different button
+        types expose it under different property names — Text on a
+        normal button, Cookie / AutomationName as fallbacks.
+        """
+        for attr in ("Text", "AutomationName", "Cookie", "Description"):
+            try:
+                v = getattr(item, attr, None)
+                if v:
+                    return str(v)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _invoke_ribbon_item(item):
+        """Call `item.CommandHandler.Execute()` to fire the button as
+        if the user clicked it. The `Execute` overload takes
+        `(parameter)` so we pass the item itself."""
+        try:
+            handler = getattr(item, "CommandHandler", None)
+            if handler is None:
+                return False
+            try:
+                handler.Execute(item)
+                return True
+            except Exception:
+                # Some handlers expect (parameter) only.
+                try:
+                    handler.Execute(None)
+                    return True
+                except Exception:
+                    return False
+        except Exception:
+            return False
 
     def _on_show_history(self, sender, args):
         """Pop a modal sub-window listing the selected clash's audit
@@ -1118,11 +1218,11 @@ class ClashBrowserForm(forms.WPFWindow):
         """
         selected = list(self.dg_clashes.SelectedItems)
         if not selected:
-            forms.alert("Select a clash from the list first.",
+            dbhms_ui.info("Select a clash from the list first.",
                         title='History')
             return
         if len(selected) > 1:
-            forms.alert(
+            dbhms_ui.info(
                 "History is a single-clash view. Select just one row, "
                 "then try again.",
                 title='History',
@@ -1336,7 +1436,7 @@ class ClashBrowserForm(forms.WPFWindow):
             self.txt_viewpoint_placeholder.Visibility = Visibility.Visible
 
     def _on_coming_soon(self, sender, args):
-        forms.alert(
+        dbhms_ui.info(
             "This action isn't wired up yet. It depends on viewport navigation / "
             "viewpoint capture / BCF export, which are the next chunks.",
             title='Coming Soon',

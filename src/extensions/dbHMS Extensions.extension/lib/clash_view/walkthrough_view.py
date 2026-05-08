@@ -21,7 +21,6 @@ silently. The log captures intent, not Python errors.)
 """
 
 import os
-import tempfile
 
 
 WALKTHROUGH_VIEW_NAME = "dbHMS Walkthrough"
@@ -34,10 +33,36 @@ QUALITY_PRESENT  = "present"    # Realistic — at stops
 
 
 # ---------------------------------------------------------------------------
-# Debug log — append-only file so we can trace what crashed Revit
+# Debug log — append-only file at a STABLE location.
+#
+# Previously used `tempfile.gettempdir()` which on Windows (especially under
+# pyRevit/IronPython) returns a per-session GUID directory like
+# `%LOCALAPPDATA%\Temp\<sessionguid>`. That made the log a moving target —
+# every Revit restart wrote to a different folder, and looking for "the"
+# log meant searching a tree of GUIDs. Moving to %LOCALAPPDATA%\dbhms_clash
+# (same root as filter_presets / config) so logs accumulate in one
+# predictable place regardless of which Revit session wrote them.
 # ---------------------------------------------------------------------------
 
-_LOG_PATH = os.path.join(tempfile.gettempdir(), "dbhms_walkthrough.log")
+def _resolve_log_path():
+    """Return the canonical log path, creating the parent directory if
+    needed. Falls back to %TEMP% (less ideal but always writable) if
+    %LOCALAPPDATA% isn't set for some reason."""
+    appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if appdata:
+        d = os.path.join(appdata, "dbhms_clash")
+        try:
+            if not os.path.isdir(d):
+                os.makedirs(d)
+            return os.path.join(d, "walkthrough.log")
+        except Exception:
+            pass
+    # Fallback — older path under per-session temp.
+    import tempfile as _tf
+    return os.path.join(_tf.gettempdir(), "dbhms_walkthrough.log")
+
+
+_LOG_PATH = _resolve_log_path()
 
 
 def _log(msg):
@@ -197,6 +222,7 @@ def set_orientation(view, position_xyz, target_xyz, up_xyz):
     """
     from Autodesk.Revit.DB import ViewOrientation3D, XYZ
     if view is None:
+        _log("set_orientation: view is None")
         return
     try:
         forward = XYZ(
@@ -206,12 +232,14 @@ def set_orientation(view, position_xyz, target_xyz, up_xyz):
         )
         length = (forward.X ** 2 + forward.Y ** 2 + forward.Z ** 2) ** 0.5
         if length < 1e-9:
+            _log("set_orientation: zero-length forward (pos==target?)")
             return
         forward = XYZ(forward.X / length,
                       forward.Y / length,
                       forward.Z / length)
         view.SetOrientation(ViewOrientation3D(
             position_xyz, up_xyz, forward))
+        _log("set_orientation: SetOrientation OK")
     except Exception as ex:
         _log("set_orientation: failed ({})".format(ex))
 
