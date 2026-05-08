@@ -560,27 +560,37 @@ def get_imported_cad_links(rdoc):
                 if cid in seen_cat_ids:
                     continue
                 seen_cat_ids.add(cid)
-                # Prefer a clean display name: try the instance's Name first
-                # (often shows the original filename like "ARCH-Floor.dwg"),
-                # fall back to the category name.
+                # Best display name: the CADLinkType's Name is the DWG
+                # filename (e.g. "ARCH-Floor.dwg"). Fall back to the
+                # category name. We deliberately ignore inst.Name because
+                # for ImportInstance it returns positioning info like
+                # "location <Not Shared>", not the filename.
                 disp = None
                 try:
-                    nm = inst.Name
-                    if nm and nm.strip():
-                        disp = nm.strip()
+                    tid = inst.GetTypeId()
+                    if tid is not None:
+                        type_elem = rdoc.GetElement(tid)
+                        if type_elem is not None:
+                            tname = type_elem.Name
+                            if tname and tname.strip():
+                                disp = tname.strip()
                 except Exception:
                     pass
                 if not disp:
                     try:
-                        disp = cat.Name
+                        cn = cat.Name
+                        if cn and cn.strip():
+                            disp = cn.strip()
                     except Exception:
-                        disp = "(unnamed import)"
+                        pass
+                if not disp:
+                    disp = "(unnamed import)"
                 # Mark linked vs imported so the user can tell at a glance
                 try:
                     is_linked = bool(inst.IsLinked)
                 except Exception:
                     is_linked = False
-                if is_linked and not disp.lower().endswith("  (linked)"):
+                if is_linked and "(linked)" not in disp.lower():
                     disp = "{0}  (linked)".format(disp)
                 layers = []
                 try:
