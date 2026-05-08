@@ -291,7 +291,7 @@
                         <TextBlock Text="Tips" Style="{StaticResource SectionHeader}"/>
                         <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,4"
                                    Foreground="#2B6CB0" FontWeight="SemiBold">
-                            &#x2022; [GIT TRANSFER TEST] If you can see this line, the work computer is loading the latest pulled code.
+                            &#x2022; [GIT TRANSFER TEST v2] Pan threshold + bigger bubble hit area. If you can see this line, the work computer is loading the latest pulled code.
                         </TextBlock>
                         <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,4">
                             &#x2022; Drag the colored lines in the section view to raise / lower each plane.

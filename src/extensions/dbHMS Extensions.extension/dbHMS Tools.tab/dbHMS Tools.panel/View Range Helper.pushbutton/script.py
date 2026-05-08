@@ -876,10 +876,17 @@ class ViewRangeHelperForm(forms.WPFWindow):
         # Drag state (transient - reset between drags)
         self._plan_drag     = None    # dict: kind ('endpoint_a'/'endpoint_b'/'body'), ...
         self._sec_drag      = None    # dict: kind ('top'/'cut'/'bot'/'vd'), start_y, start_z
-        # Plan pan drag (middle-mouse) - separate from left-drag state
+        # Active pan drag (middle-mouse OR confirmed left-empty drag)
         self._plan_pan_drag = None    # dict: 'start_x'/'_y' window coords, 'init_tx'/'_ty'
-        # Section pan drag (middle-mouse) - same shape as the plan pan drag
         self._sec_pan_drag  = None
+        # PENDING left-button pan — set on left-click on empty space, but the
+        # actual pan only ENGAGES once the cursor moves past _PAN_THRESHOLD_PX.
+        # Without this, a near-miss click on a bubble (a few pixels off) feels
+        # like the bubble silently broke and the canvas started panning. With
+        # the threshold, releasing without dragging stays a no-op so the user
+        # can simply click again. See _plan_mouse_down for the rationale.
+        self._plan_pan_pending = None
+        self._sec_pan_pending  = None
 
         # Suppress event re-entry
         self._suppress_editor_events = False
@@ -2030,6 +2037,20 @@ class ViewRangeHelperForm(forms.WPFWindow):
     # Far clip handle radius (px). Used by both draw + hit-test.
     _FC_HANDLE_R = 11
 
+    # Cursor must travel this many pixels (in WINDOW coords) before a
+    # left-click on empty space is promoted to a pan. Stops near-miss
+    # clicks on bubbles from feeling like the bubble broke and the
+    # canvas started panning instead.
+    _PAN_THRESHOLD_PX = 5
+    # Square of the threshold so the move-handler can avoid sqrt.
+    _PAN_THRESHOLD_PX_SQ = 25
+
+    # Bubble / body hit-test slack (extra px outside the visible
+    # element that still registers as a hit). Generous targets reduce
+    # the rate of accidental empty-space clicks → unwanted pans.
+    _BUBBLE_HIT_SLACK = 6
+    _BODY_HIT_SLACK   = 4
+
     def _far_clip_handle_screen(self, m2c):
         """Return the screen (x, y) of the draggable far clip handle, or
         None if the handle isn't currently rendered (far_clip_offset = 0)."""
@@ -2303,16 +2324,19 @@ class ViewRangeHelperForm(forms.WPFWindow):
             fc_r = self._FC_HANDLE_R * inv_s
             if (pos.X - fc[0]) ** 2 + (pos.Y - fc[1]) ** 2 <= fc_r * fc_r:
                 return 'far_clip_handle'
-        # Endpoints (use bubble radius)
-        R = self._BUBBLE_R * inv_s
+        # Endpoints — hit radius is the visible bubble radius PLUS slack,
+        # so a click that lands a few pixels outside the drawn ring still
+        # registers. Without slack, near-miss clicks would fall into the
+        # empty-space-pan code path and feel like the bubble broke.
+        R = (self._BUBBLE_R + self._BUBBLE_HIT_SLACK) * inv_s
         if (pos.X - ax) ** 2 + (pos.Y - ay) ** 2 <= R * R:
             return 'endpoint_a'
         if (pos.X - bx) ** 2 + (pos.Y - by) ** 2 <= R * R:
             return 'endpoint_b'
-        # Body — generous 14 px screen tolerance so the user doesn't have
-        # to be pixel-perfect (the line is dashed and only ~2 px thick;
-        # without slack a click that visually lands on the line can miss).
-        body_r = 14.0 * inv_s
+        # Body — generous tolerance so the user doesn't have to be
+        # pixel-perfect (the line is dashed and only ~2 px thick; without
+        # slack a click that visually lands on the line can miss).
+        body_r = (14.0 + self._BODY_HIT_SLACK) * inv_s
         dx = bx - ax; dy = by - ay
         L2 = dx * dx + dy * dy
         if L2 < 1e-6: return None
@@ -2327,11 +2351,20 @@ class ViewRangeHelperForm(forms.WPFWindow):
         pos = e.GetPosition(self.cnv_plan)
         kind = self._plan_hit(pos)
         if kind is None:
-            # Empty space → start a left-button pan. This makes the
-            # canvas feel like a normal Revit view: anywhere not on a
-            # handle is grabbable. Middle-button pan still works in
-            # parallel via _plan_mouse_down_any.
-            self._begin_plan_pan(e, button='left')
+            # Empty space → record a PENDING pan, but don't engage yet.
+            # Pan only starts after the cursor moves more than
+            # _PAN_THRESHOLD_PX while the button is held (see
+            # _plan_mouse_move). Without this threshold, a near-miss
+            # click on a bubble would feel like the bubble silently
+            # broke — the click would fall into this branch, mouse
+            # capture would engage, and any further movement would pan
+            # the canvas instead of the bubble. The threshold makes a
+            # release-without-drag a no-op so the user can simply re-aim
+            # and click again.
+            pos_w = e.GetPosition(self)
+            self._plan_pan_pending = {
+                'start_x_w': pos_w.X, 'start_y_w': pos_w.Y,
+            }
             try: e.Handled = True
             except Exception: pass
             return
@@ -2372,6 +2405,43 @@ class ViewRangeHelperForm(forms.WPFWindow):
         except Exception: pass
 
     def _plan_mouse_move(self, sender, e):
+        # Promote a PENDING left-button pan to an ACTIVE pan once the
+        # cursor crosses the movement threshold. This is what stops
+        # near-miss bubble clicks from instantly engaging a pan.
+        if self._plan_pan_pending is not None:
+            if e.LeftButton != MouseButtonState.Pressed:
+                # User released without dragging far — discard the
+                # pending pan, do nothing.
+                self._plan_pan_pending = None
+                return
+            pos_w = e.GetPosition(self)
+            dx = pos_w.X - self._plan_pan_pending['start_x_w']
+            dy = pos_w.Y - self._plan_pan_pending['start_y_w']
+            if dx * dx + dy * dy < self._PAN_THRESHOLD_PX_SQ:
+                return  # below threshold — keep waiting
+            # Threshold crossed: promote to a real pan. Carry over the
+            # ORIGINAL window-coord click position as the pan anchor so
+            # the move that just promoted the pan still applies cleanly
+            # (no jump on the first frame).
+            try:
+                init_tx = float(self.trf_plan_pan.X)
+                init_ty = float(self.trf_plan_pan.Y)
+            except Exception:
+                init_tx = init_ty = 0.0
+            self._plan_pan_drag = {
+                'start_x': self._plan_pan_pending['start_x_w'],
+                'start_y': self._plan_pan_pending['start_y_w'],
+                'init_tx': init_tx, 'init_ty': init_ty,
+                'button':  'left',
+            }
+            self._plan_pan_pending = None
+            try: self.cnv_plan.CaptureMouse()
+            except Exception: pass
+            try: self.cnv_plan.Cursor = Cursors.SizeAll
+            except Exception: pass
+            # Fall through to the active-pan branch below to apply
+            # this move's translation immediately.
+
         # Pan in progress takes priority over the section/bubble/far-clip drag
         if self._plan_pan_drag is not None:
             btn = self._plan_pan_drag.get('button', 'middle')
@@ -2515,6 +2585,12 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._draw_plan()
 
     def _plan_mouse_up(self, sender, e):
+        # Pending pan that never crossed the threshold → just discard.
+        # This is the path that makes a click-without-drag on empty
+        # space a no-op, instead of locking into a pan.
+        if self._plan_pan_pending is not None:
+            self._plan_pan_pending = None
+            return
         # End a left-button pan IF the button was actually released.
         # MouseLeave is wired to this handler too, but it can fire while
         # the button is still held — we must not end the pan in that
@@ -2997,10 +3073,15 @@ class ViewRangeHelperForm(forms.WPFWindow):
         pos = e.GetPosition(self.cnv_section)
         key = self._sec_hit(pos)
         if key is None:
-            # Empty space → start a left-button pan. Mirrors the plan
-            # canvas; works on laptops without a middle button and is
-            # the gesture users reach for naturally.
-            self._begin_sec_pan(e, button='left')
+            # Empty space → record a PENDING left-button pan, but don't
+            # engage yet. Pan only starts after the cursor moves past
+            # _PAN_THRESHOLD_PX (see _sec_mouse_move). Same rationale as
+            # the plan canvas: stops near-miss clicks on plane / extent
+            # handles from feeling like the handle broke.
+            pos_w = e.GetPosition(self)
+            self._sec_pan_pending = {
+                'start_x_w': pos_w.X, 'start_y_w': pos_w.Y,
+            }
             try: e.Handled = True
             except Exception: pass
             return
@@ -3051,6 +3132,36 @@ class ViewRangeHelperForm(forms.WPFWindow):
         except Exception: pass
 
     def _sec_mouse_move(self, sender, e):
+        # Promote a PENDING left-button pan to an ACTIVE pan once the
+        # cursor crosses the movement threshold. Mirrors the plan
+        # canvas — see _plan_mouse_move for the rationale.
+        if self._sec_pan_pending is not None:
+            if e.LeftButton != MouseButtonState.Pressed:
+                self._sec_pan_pending = None
+                return
+            pos_w = e.GetPosition(self)
+            dx = pos_w.X - self._sec_pan_pending['start_x_w']
+            dy = pos_w.Y - self._sec_pan_pending['start_y_w']
+            if dx * dx + dy * dy < self._PAN_THRESHOLD_PX_SQ:
+                return
+            try:
+                init_tx = float(self.trf_sec_pan.X)
+                init_ty = float(self.trf_sec_pan.Y)
+            except Exception:
+                init_tx = init_ty = 0.0
+            self._sec_pan_drag = {
+                'start_x': self._sec_pan_pending['start_x_w'],
+                'start_y': self._sec_pan_pending['start_y_w'],
+                'init_tx': init_tx, 'init_ty': init_ty,
+                'button':  'left',
+            }
+            self._sec_pan_pending = None
+            try: self.cnv_section.CaptureMouse()
+            except Exception: pass
+            try: self.cnv_section.Cursor = Cursors.SizeAll
+            except Exception: pass
+            # Fall through to apply the first frame of pan immediately.
+
         # Pan in progress takes priority over plane / extent drags
         if self._sec_pan_drag is not None:
             btn = self._sec_pan_drag.get('button', 'middle')
@@ -3117,6 +3228,10 @@ class ViewRangeHelperForm(forms.WPFWindow):
         self._validate_state()
 
     def _sec_mouse_up(self, sender, e):
+        # Pending pan that never crossed the threshold → just discard.
+        if self._sec_pan_pending is not None:
+            self._sec_pan_pending = None
+            return
         # End a left-button pan IF the button was actually released.
         # MouseLeave is wired to this same handler; we ignore those.
         if self._sec_pan_drag is not None \
