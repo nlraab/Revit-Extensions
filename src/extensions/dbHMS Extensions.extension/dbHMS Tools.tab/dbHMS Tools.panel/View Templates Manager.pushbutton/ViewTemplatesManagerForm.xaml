@@ -165,16 +165,16 @@
                                 <ToggleButton.Template>
                                     <ControlTemplate TargetType="ToggleButton">
                                         <Border Background="#EDF2F7" BorderBrush="#CBD5E0"
-                                                BorderThickness="0,0,0,2" Padding="6,7">
+                                                BorderThickness="0,0,0,2" Padding="6,8">
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock x:Name="arrow" Text="&#x25B8;" Width="14"
-                                                           FontSize="11" VerticalAlignment="Center"
+                                                           FontSize="12" VerticalAlignment="Center"
                                                            Foreground="#4A5568" Margin="0,0,4,0"/>
-                                                <Border Width="3" Height="16" Background="#2B6CB0"
-                                                        CornerRadius="2" Margin="0,0,8,0"/>
+                                                <Border Width="3" Height="20" Background="#2B6CB0"
+                                                        CornerRadius="2" Margin="0,0,10,0"/>
                                                 <ContentPresenter VerticalAlignment="Center"
-                                                                  TextBlock.FontSize="13"
-                                                                  TextBlock.FontWeight="Bold"
+                                                                  TextBlock.FontSize="15"
+                                                                  TextBlock.FontWeight="ExtraBold"
                                                                   TextBlock.Foreground="#1A202C"/>
                                             </StackPanel>
                                         </Border>
@@ -255,16 +255,6 @@
             </Grid>
         </Border>
 
-        <!-- ============= ITER-1 PREVIEW BANNER ============= -->
-        <Border x:Name="bnr_preview" DockPanel.Dock="Top"
-                Background="#EBF8FF" BorderBrush="#3182CE" BorderThickness="0,0,0,1"
-                Padding="20,8">
-            <TextBlock Foreground="#2C5282" FontSize="11" TextWrapping="Wrap">
-                <Run FontWeight="SemiBold" Text="Iteration 1 &#x2014; UI preview."/>
-                <Run Text=" Sub-dialogs use mock data. Apply buttons are disabled until iteration 2 wires the API. Click around freely &#x2014; nothing in your project will change."/>
-            </TextBlock>
-        </Border>
-
         <!-- ============= FOOTER ============= -->
         <Border DockPanel.Dock="Bottom" Background="White"
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
@@ -274,9 +264,11 @@
                                VerticalAlignment="Center" FontStyle="Italic"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_close" Content="Done" Style="{StaticResource SecondaryButton}"
+                            ToolTip="Close the window. Every Apply Changes / OK click during this session ran its own Revit Transaction, so all your edits are already saved in the project."/>
                     <Button x:Name="btn_apply" Content="Apply Changes" Style="{StaticResource PrimaryButton}"
-                            IsEnabled="False" ToolTip="Wiring coming in iteration 2"/>
+                            IsEnabled="False"
+                            ToolTip="Write the spec'd parameter rows back to the checked template(s). Disabled when no template is selected."/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -320,7 +312,7 @@
             <Border Grid.Column="2" Style="{StaticResource CardBorder}" Padding="0">
                 <DockPanel>
                     <!-- Header above table: template name + view count -->
-                    <Border DockPanel.Dock="Top" Background="White" Padding="14,12,14,10"
+                    <Border DockPanel.Dock="Top" Background="White" Padding="14,14,14,16"
                             BorderBrush="#E2E8F0" BorderThickness="0,0,0,1">
                         <Grid>
                             <StackPanel HorizontalAlignment="Left">
@@ -545,8 +537,12 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="V/G Overrides RVT Links" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_vg_links" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" x:Name="txt_vg_links_note"
+                                                       Text="Edit in Revit's native V/G dialog (API limitation)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Bulk-editing RVT Link Display Settings through the Revit API isn't practical: Custom mode (the only mode where per-aspect overrides actually do anything) is read-only via API, and ByHost / ByLinked modes have nothing meaningful to bulk-edit per aspect. Manage RVT link overrides per template in Revit's native View Templates dialog instead."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_vg_links"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_vg_links"/>
                                         </Grid>
@@ -568,8 +564,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Model Display" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_model_display" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Model Display is a multi-field dialog (Style, Transparency, Silhouettes, Smooth Lines). Bulk-editing across templates isn't practical &#x2014; tweak per template in Revit's native View Templates dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_model_display"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_model_display"/>
                                         </Grid>
@@ -584,8 +583,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Shadows" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_shadows" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Shadow settings (sun shadows, ambient shadows) are best edited per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_shadows"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_shadows"/>
                                         </Grid>
@@ -600,8 +602,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Sketchy Lines" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_sketchy" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Sketchy Lines (jitter, extension) is a multi-field dialog. Manage per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_sketchy"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_sketchy"/>
                                         </Grid>
@@ -616,8 +621,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Lighting" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_lighting" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Lighting (sun setting, ambient light, scheme) is a multi-field dialog. Manage per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_lighting"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_lighting"/>
                                         </Grid>
@@ -632,8 +640,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Photographic Exposure" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_photo" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Photographic Exposure (EV, highlights, shadows, saturation, white point) is a multi-field dialog. Manage per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_photo"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_photo"/>
                                         </Grid>
@@ -648,8 +659,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="Background" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_gd_background" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="Background (sky, gradient, image) is a multi-field dialog. Manage per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_gd_background"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_gd_background"/>
                                         </Grid>
@@ -746,8 +760,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="System Color Schemes" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_sys_color" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Edit in Revit's native View Templates dialog (multi-field sub-dialog)"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="System Color Schemes (per-discipline color overrides for HVAC, Piping, Electrical) is a multi-field dialog. Manage per template in Revit's native dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_sys_color"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_sys_color"/>
                                         </Grid>
@@ -784,8 +801,11 @@
                                                 <ColumnDefinition Width="80"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="View Range" Style="{StaticResource ParamLabel}"/>
-                                            <Button    Grid.Column="1" x:Name="btn_view_range" Content="Edit&#x2026;"
-                                                       Style="{StaticResource EditButton}" Margin="0,0,8,0"/>
+                                            <TextBlock Grid.Column="1" Text="Use the View Range Helper tool, or edit in Revit's native dialog"
+                                                       VerticalAlignment="Center" FontStyle="Italic"
+                                                       Foreground="#A0AEC0" FontSize="11"
+                                                       Margin="0,0,8,0"
+                                                       ToolTip="View Range (Top / Cut Plane / Bottom / View Depth) is a multi-field plan-view setting. The dbHMS View Range Helper tool gives you a visual editor for it; otherwise edit per template in Revit's native View Templates dialog. The Include checkbox at right still controls whether this aspect is part of the template."/>
                                             <CheckBox  Grid.Column="2" x:Name="chk_inc_view_range"/>
                                             <CheckBox  Grid.Column="3" x:Name="chk_app_view_range"/>
                                         </Grid>

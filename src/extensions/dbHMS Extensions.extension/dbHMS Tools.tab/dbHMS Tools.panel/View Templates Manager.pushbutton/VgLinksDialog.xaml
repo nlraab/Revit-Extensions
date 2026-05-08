@@ -125,11 +125,12 @@
             <Grid>
                 <TextBlock x:Name="txt_lnk_status" HorizontalAlignment="Left" VerticalAlignment="Center"
                            Foreground="#4A5568" FontStyle="Italic"
-                           Text="Iter 1: layout preview &#x2014; OK is disabled until iter 4."/>
+                           Text="Iter 4a: link visibility mode wired."/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button x:Name="btn_lnk_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_lnk_cancel" Content="Close" Style="{StaticResource SecondaryButton}"
+                            ToolTip="Close the dialog. Each OK click ran its own Revit Transaction so anything you've already applied is saved."/>
                     <Button x:Name="btn_lnk_ok" Content="OK" Style="{StaticResource PrimaryButton}"
-                            IsEnabled="False" ToolTip="Wiring coming in iteration 4"/>
+                           />
                 </StackPanel>
             </Grid>
         </Border>
@@ -151,182 +152,178 @@
             </Grid>
         </Border>
 
-        <!-- Custom-mode notice -->
+        <!-- Heads-up — two plain-English limitations -->
         <Border x:Name="bnr_custom" DockPanel.Dock="Top" Background="#FFFBEA"
                 BorderBrush="#D69E2E" BorderThickness="1" CornerRadius="3"
-                Padding="12,8" Margin="16,0,16,8" Visibility="Visible">
-            <TextBlock Foreground="#744210" FontSize="11" TextWrapping="Wrap">
-                <Run FontWeight="SemiBold" Text="Heads up &#x2014; Custom mode is read-only."/>
-                <Run Text=" The Revit API does not allow setting LinkVisibility.Custom. If a link needs Custom (per-category checklists in the tabs below), use the &quot;Open in Revit's native dialog&quot; button above."/>
-            </TextBlock>
+                Padding="14,10" Margin="16,0,16,8">
+            <StackPanel>
+                <TextBlock Foreground="#744210" FontSize="12" FontWeight="SemiBold"
+                           Text="Heads up — two things this dialog can't do (Revit API limits):"/>
+                <TextBlock Foreground="#744210" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap">
+                    <Run FontWeight="SemiBold" Text="1."/>
+                    <Run Text="Switch a link to Custom mode. You have to do that yourself in Revit's V/G Overrides dialog &#x2014; click the &quot;Open in Revit's native dialog&quot; button above and Revit will take you there."/>
+                </TextBlock>
+                <TextBlock Foreground="#744210" FontSize="11" Margin="0,2,0,0" TextWrapping="Wrap">
+                    <Run FontWeight="SemiBold" Text="2."/>
+                    <Run Text="Edit per-category checklists for the linked file (Model / Annotation / Analytical / Import categories). Same fix &#x2014; open Revit's native dialog and tick what you want there."/>
+                </TextBlock>
+                <TextBlock Foreground="#744210" FontSize="11" Margin="0,4,0,0" FontStyle="Italic"
+                           Text="Everything below this banner you CAN change from here, across however many templates you've selected on the main form."/>
+            </StackPanel>
         </Border>
 
-        <!-- Tabs: Basics + 4 category tabs -->
-        <TabControl x:Name="tab_link_settings" Margin="16,0,16,16" Background="White"
-                    BorderBrush="#E2E8F0" BorderThickness="1">
-
-            <!-- ============= BASICS TAB ============= -->
-            <TabItem Header="Basics">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
+        <!-- Single-page layout (no more tabs — the per-link-category tabs were
+             only placeholders for things the API can't reach anyway) -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="16,0,16,16">
+            <StackPanel>
+                <!-- Visibility mode card -->
+                <Border Style="{StaticResource CardBorder}">
                     <StackPanel>
-                        <!-- Mode radio buttons -->
-                        <Border Style="{StaticResource CardBorder}">
-                            <StackPanel>
-                                <TextBlock Text="Visibility mode" Style="{StaticResource SectionHeader}"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                                    <RadioButton x:Name="rb_link_byhost"  GroupName="LinkMode" IsChecked="True"
-                                                 Content="By host view" Margin="0,0,20,0"/>
-                                    <RadioButton x:Name="rb_link_bylinked" GroupName="LinkMode"
-                                                 Content="By linked view" Margin="0,0,20,0"/>
-                                    <RadioButton x:Name="rb_link_custom"  GroupName="LinkMode"
-                                                 Content="Custom (read-only via API)" IsEnabled="False"/>
-                                </StackPanel>
-                                <TextBlock Style="{StaticResource HelperText}" Margin="0,8,0,0">
-                                    <Run Text="By host view: link inherits all settings from this template."/>
-                                    <LineBreak/>
-                                    <Run Text="By linked view: link uses a specific view from inside the linked file."/>
-                                    <LineBreak/>
-                                    <Run Text="Custom: per-category overrides &#x2014; configure via Revit's native dialog."/>
-                                </TextBlock>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- Per-aspect overrides (only relevant when not ByHostView) -->
-                        <Border Style="{StaticResource CardBorder}">
-                            <StackPanel>
-                                <TextBlock Text="Per-aspect overrides" Style="{StaticResource SectionHeader}"/>
-                                <TextBlock Style="{StaticResource HelperText}"
-                                           Text="Each aspect can independently follow the host view, follow the linked view, or use a custom value (where API allows)."/>
-
-                                <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="140"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Linked view:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="0" Grid.Column="1" x:Name="cmb_lnk_linkedview"/>
-
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="View filters:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="1" Grid.Column="1" x:Name="cmb_lnk_filters"/>
-
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="View range:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="2" Grid.Column="1" x:Name="cmb_lnk_viewrange"/>
-
-                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Phase:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="3" Grid.Column="1" x:Name="cmb_lnk_phase"/>
-
-                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Phase filter:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="4" Grid.Column="1" x:Name="cmb_lnk_phasefilter"/>
-
-                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Detail level:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="5" Grid.Column="1" x:Name="cmb_lnk_detail"/>
-
-                                    <TextBlock Grid.Row="6" Grid.Column="0" Text="Discipline:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="6" Grid.Column="1" x:Name="cmb_lnk_discipline"/>
-
-                                    <TextBlock Grid.Row="7" Grid.Column="0" Text="Color fill:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="7" Grid.Column="1" x:Name="cmb_lnk_colorfill"/>
-
-                                    <TextBlock Grid.Row="8" Grid.Column="0" Text="Object styles:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="8" Grid.Column="1" x:Name="cmb_lnk_objstyles"/>
-
-                                    <TextBlock Grid.Row="9" Grid.Column="0" Text="Nested links:"
-                                               Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
-                                    <ComboBox  Grid.Row="9" Grid.Column="1" x:Name="cmb_lnk_nested"/>
-                                </Grid>
-
-                                <CheckBox x:Name="chk_lnk_halftone" Content="Halftone the entire link"
-                                          Margin="0,12,0,0"/>
-                            </StackPanel>
-                        </Border>
+                        <TextBlock Text="Visibility mode" Style="{StaticResource SectionHeader}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <RadioButton x:Name="rb_link_byhost"  GroupName="LinkMode" IsChecked="True"
+                                         Content="By host view" Margin="0,0,24,0"/>
+                            <RadioButton x:Name="rb_link_bylinked" GroupName="LinkMode"
+                                         Content="By linked view" Margin="0,0,24,0"/>
+                            <RadioButton x:Name="rb_link_custom"  GroupName="LinkMode"
+                                         Content="Custom (read-only — set in Revit)"/>
+                        </StackPanel>
+                        <TextBlock Style="{StaticResource HelperText}" Margin="0,10,0,0">
+                            <Run FontWeight="SemiBold" Text="By host view —"/>
+                            <Run Text="link inherits everything from this template (including any V/G Overrides Model edits you make)."/>
+                            <LineBreak/>
+                            <Run FontWeight="SemiBold" Text="By linked view —"/>
+                            <Run Text="link uses a specific view from inside the linked file, so the host's V/G stops bleeding into the link."/>
+                            <LineBreak/>
+                            <Run FontWeight="SemiBold" Text="Custom —"/>
+                            <Run Text="per-category overrides; configure via Revit's native dialog (see banner above)."/>
+                        </TextBlock>
                     </StackPanel>
-                </ScrollViewer>
-            </TabItem>
+                </Border>
 
-            <!-- ============= MODEL CATEGORIES TAB ============= -->
-            <TabItem Header="Model Categories">
-                <Border Padding="14">
+                <!-- Per-aspect overrides card -->
+                <Border Style="{StaticResource CardBorder}">
                     <StackPanel>
-                        <TextBlock Text="Model Categories (Custom mode only)" Style="{StaticResource SectionHeader}"/>
-                        <Border Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
-                                CornerRadius="3" Padding="10" Margin="0,0,0,10">
+                        <TextBlock Text="Per-aspect overrides" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}" TextWrapping="Wrap"
+                                   Text="Each aspect can independently follow the host view, follow the linked view, or take a specific value. Phase / Phase filter / Linked view options come from the linked file."/>
+                        <Border x:Name="bnr_aspects_custom" Background="#FFFBEA"
+                                BorderBrush="#D69E2E" BorderThickness="1" CornerRadius="3"
+                                Padding="10,8" Margin="0,8,0,0" Visibility="Collapsed">
                             <TextBlock Foreground="#744210" FontSize="11" TextWrapping="Wrap">
-                                <Run Text="The Revit API doesn't expose per-category checklists for linked files. Use "/>
-                                <Run FontWeight="SemiBold" Text="Open in Revit's native dialog"/>
-                                <Run Text=" above to edit these directly."/>
+                                <Run FontWeight="SemiBold" Text="Per-aspect editing is unavailable for this link."/>
+                                <Run Text=" The link is in Custom mode and the Revit API doesn't allow writing to a Custom-mode link's settings. Switch to By host view or By linked view above (and OK) to enable these fields, or edit them in Revit's native V/G Overrides RVT Links dialog."/>
                             </TextBlock>
                         </Border>
-                        <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                CornerRadius="3" Padding="14">
-                            <TextBlock Style="{StaticResource HelperText}"
-                                       Text="When a link is in Custom mode, this tab will show a category checklist mirroring Revit's native UI &#x2014; for visual reference only."/>
-                        </Border>
-                    </StackPanel>
-                </Border>
-            </TabItem>
 
-            <!-- ============= ANNOTATION CATEGORIES TAB ============= -->
-            <TabItem Header="Annotation Categories">
-                <Border Padding="14">
-                    <StackPanel>
-                        <TextBlock Text="Annotation Categories (Custom mode only)" Style="{StaticResource SectionHeader}"/>
-                        <Border Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
-                                CornerRadius="3" Padding="10">
-                            <TextBlock Foreground="#744210" FontSize="11" TextWrapping="Wrap"
-                                       Text="API-only: per-category Annotation overrides for linked files require Revit's native dialog."/>
-                        </Border>
+                        <!-- Each row gets its own grid + bottom margin so the
+                             list breathes. Labels are right-aligned so the
+                             dropdowns line up cleanly. -->
+                        <StackPanel Margin="0,14,0,0">
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Linked view"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_linkedview"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="View filters"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_filters"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="View range"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_viewrange"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Phase"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_phase"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Phase filter"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_phasefilter"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Detail level"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_detail"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Discipline"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_discipline"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Color fill"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_colorfill"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Object styles"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_objstyles"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Nested links"
+                                           Style="{StaticResource FieldLabel}" VerticalAlignment="Center"
+                                           HorizontalAlignment="Right" Margin="0,0,12,0"/>
+                                <ComboBox  Grid.Column="1" x:Name="cmb_lnk_nested"/>
+                            </Grid>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
-            </TabItem>
-
-            <!-- ============= ANALYTICAL MODEL CATEGORIES TAB ============= -->
-            <TabItem Header="Analytical Model Categories">
-                <Border Padding="14">
-                    <StackPanel>
-                        <TextBlock Text="Analytical Model Categories (Custom mode only)" Style="{StaticResource SectionHeader}"/>
-                        <Border Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
-                                CornerRadius="3" Padding="10">
-                            <TextBlock Foreground="#744210" FontSize="11" TextWrapping="Wrap"
-                                       Text="API-only: per-category Analytical overrides for linked files require Revit's native dialog."/>
-                        </Border>
-                    </StackPanel>
-                </Border>
-            </TabItem>
-
-            <!-- ============= IMPORT CATEGORIES TAB ============= -->
-            <TabItem Header="Import Categories">
-                <Border Padding="14">
-                    <StackPanel>
-                        <TextBlock Text="Import Categories (Custom mode only)" Style="{StaticResource SectionHeader}"/>
-                        <Border Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="1"
-                                CornerRadius="3" Padding="10">
-                            <TextBlock Foreground="#744210" FontSize="11" TextWrapping="Wrap"
-                                       Text="API-only: per-category Import overrides for linked files require Revit's native dialog."/>
-                        </Border>
-                    </StackPanel>
-                </Border>
-            </TabItem>
-        </TabControl>
+            </StackPanel>
+        </ScrollViewer>
     </DockPanel>
 </Window>

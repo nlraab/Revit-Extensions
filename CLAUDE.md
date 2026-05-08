@@ -154,6 +154,17 @@ WPF's text engine handles baseline alignment correctly within a single `TextBloc
 - **Validation banner** (hidden by default, shown on error): `Background="#FFF5F5"`, `BorderBrush="#FC8181"`, `BorderThickness="1"`, `CornerRadius="3"`, `Padding="8"`, `Margin="0,10,0,0"`, with text `Foreground="#742A2A"`, `FontSize="11"`, `TextWrapping="Wrap"`.
 - **Lock/warn banner across the top of the form**: `Background="#FFFBEA"`, `BorderBrush="#D69E2E"`, `BorderThickness="0,0,0,1"`, `Padding="16,10"`, with `Foreground="#744210"` text and `WarnButton` actions on the right.
 
+### Multi-select in lists
+
+Any list of selectable rows (templates, categories, filters, links, layers, etc.) should support the same **click / shift-click / ctrl-click** pattern users expect from File Explorer and other software:
+
+- Plain click highlights one row.
+- Shift-click extends a range from the last clicked row.
+- Ctrl-click toggles a single row in/out of the highlight.
+- When a row carries a checkbox and the user toggles it on a row that's part of a multi-row highlight, the new check state propagates to the same checkbox on every other highlighted row (one-click bulk-check).
+
+The reference implementation is `RowMultiSelectHelper` in `View Templates Manager.pushbutton/script.py`. Each row is a small dict (`{"row": Border, "name": str, "chk_show": CheckBox, ...}`); the helper wires `MouseLeftButtonDown` and the named checkbox(es) and applies the highlight visuals (`#EBF8FF` background, `#3182CE` border). Reuse it (or the same pattern) for new lists; skip it only when a list is read-only/single-select by nature.
+
 ### Toolbar icons
 
 - File: `icon.png` at the pushbutton folder root.

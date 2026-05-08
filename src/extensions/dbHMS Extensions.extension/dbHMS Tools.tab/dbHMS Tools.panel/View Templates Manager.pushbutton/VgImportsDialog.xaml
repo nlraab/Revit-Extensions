@@ -103,7 +103,8 @@
                            Foreground="#4A5568" FontStyle="Italic"
                            Text="Iter 1: layout preview &#x2014; OK is disabled until iter 3."/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button x:Name="btn_imp_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_imp_cancel" Content="Close" Style="{StaticResource SecondaryButton}"
+                            ToolTip="Close the dialog. Each OK click ran its own Revit Transaction so anything you've already applied is saved."/>
                     <Button x:Name="btn_imp_ok" Content="OK" Style="{StaticResource PrimaryButton}"
                             IsEnabled="False" ToolTip="Wiring coming in iteration 3"/>
                 </StackPanel>
@@ -176,10 +177,11 @@
                 <ScrollViewer VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
-                        <TextBlock x:Name="txt_imp_selected" Text="Select a CAD link or layer"
-                                   Style="{StaticResource SectionHeader}"/>
+                        <TextBlock x:Name="txt_imp_selected" Text="No item selected"
+                                   Style="{StaticResource SectionHeader}" TextWrapping="Wrap"/>
+                        <StackPanel x:Name="pnl_imp_selected_names" Margin="0,2,0,0"/>
                         <TextBlock Style="{StaticResource HelperText}"
-                                   Text="Click a CAD link or layer on the left to edit graphic overrides."/>
+                                   Text="Click a CAD link or layer on the left to scope edits to that row. Shift- or ctrl-click to multi-select. With nothing selected, OK applies the override to ALL CAD links and layers in this dialog."/>
 
                         <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                 CornerRadius="3" Padding="10" Margin="0,10,0,12">

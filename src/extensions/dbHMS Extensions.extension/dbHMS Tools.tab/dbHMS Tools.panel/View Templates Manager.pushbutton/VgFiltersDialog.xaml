@@ -161,9 +161,10 @@
                               HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
                         <TextBlock x:Name="txt_flt_selected" Text="Select a filter"
-                                   Style="{StaticResource SectionHeader}"/>
+                                   Style="{StaticResource SectionHeader}" TextWrapping="Wrap"/>
+                        <StackPanel x:Name="pnl_flt_selected_names" Margin="0,2,0,0"/>
                         <TextBlock Style="{StaticResource HelperText}"
-                                   Text="Click a filter row to edit its graphic overrides on this template."/>
+                                   Text="Click a filter row to edit its graphic overrides on this template. Shift- or ctrl-click to multi-select."/>
 
                         <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                 CornerRadius="3" Padding="10" Margin="0,10,0,12">
