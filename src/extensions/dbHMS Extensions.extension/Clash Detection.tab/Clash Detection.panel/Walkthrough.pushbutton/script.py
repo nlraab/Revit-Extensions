@@ -66,7 +66,7 @@ from pyrevit import forms, revit
 from clash_core import persistence, project, users
 from clash_view import (
     walkthrough_view, walkthrough_motion, walkthrough_bookmarks,
-    walkthrough_render,
+    walkthrough_render, walkthrough_handoff,
 )
 
 
@@ -167,28 +167,43 @@ class _WalkthroughHandler(IExternalEventHandler):
     # -- Actions --------------------------------------------------------
 
     def _open_view(self, app):
-        """Find or create the Walkthrough view and switch to it. Returns
-        (success, message, current_camera) so the form can seed its
-        motion state from the view's existing orientation."""
+        """Find or create the Walkthrough view, (re-)apply the visual
+        quality settings, and switch to it.
+
+        Re-applies `configure_for_first_run` on EVERY open — not just
+        on first-create — so existing views from previous sessions
+        pick up new settings the next time the user launches. The
+        property setters in configure_for_first_run are all idempotent,
+        so re-applying is a safe no-op when nothing's changed.
+
+        Returns (success, message, current_camera) so the form can
+        seed its motion state from the view's orientation.
+        """
         from Autodesk.Revit.DB import Transaction
         uidoc = app.ActiveUIDocument
         if uidoc is None:
             return False, "No active document.", None
         doc = uidoc.Document
         view = walkthrough_view.find_walkthrough_view(doc)
-        if view is None:
-            txn = Transaction(doc, "dbHMS Create walkthrough view")
-            try:
-                txn.Start()
+
+        txn = Transaction(doc, "dbHMS Open walkthrough view")
+        try:
+            txn.Start()
+            if view is None:
                 view = walkthrough_view.get_or_create_walkthrough_view(doc)
                 if view is None:
                     txn.RollBack()
                     return False, "No 3D ViewFamilyType available.", None
-                txn.Commit()
-            except Exception as ex:
-                if txn.HasStarted() and not txn.HasEnded():
-                    txn.RollBack()
-                return False, "View create failed: {}".format(ex), None
+            else:
+                # Existing view from a previous session — re-apply the
+                # quality settings in case the firm-default tuning has
+                # been bumped since the view was created.
+                walkthrough_view.configure_for_first_run(view, doc)
+            txn.Commit()
+        except Exception as ex:
+            if txn.HasStarted() and not txn.HasEnded():
+                txn.RollBack()
+            return False, "View setup failed: {}".format(ex), None
         try:
             uidoc.ActiveView = view
         except Exception:
@@ -308,6 +323,12 @@ class WalkthroughForm(forms.WPFWindow):
         self._drag_origin = None  # (x, y) WPF-local point during active drag
         self._dragging = False    # True only while a mouse button is held
         self._last_tick_time = None
+        # Global mouselook mode (F-key toggle): cursor hidden + locked
+        # to an anchor screen point, mouse motion rotates camera, all
+        # clicks blocked from reaching Revit while active.
+        self._mouselook_mode = False
+        self._mouselook_anchor_screen = None  # (x, y) screen px to recenter to
+        self._mouselook_origin_cursor = None  # (x, y) where cursor was on enter
 
         # Revit-side ExternalEvent — same pattern as the previous tour
         # build but action set is different.
@@ -338,9 +359,11 @@ class WalkthroughForm(forms.WPFWindow):
             chk.Unchecked += (lambda s, a, d=disc:
                               self._on_visibility_changed(d, False))
 
-        # Speed slider
+        # Sliders — Move speed (ft/s) and Look speed (deg/pixel).
         self.sl_speed.ValueChanged += self._on_speed_changed
+        self.sl_look_sensitivity.ValueChanged += self._on_look_sensitivity_changed
         self._refresh_speed_label()
+        self._refresh_look_sensitivity_label()
 
         # Look pad — captures mouse + keyboard when clicked
         self.brd_lookpad.MouseLeftButtonDown += self._on_lookpad_mousedown
@@ -351,6 +374,9 @@ class WalkthroughForm(forms.WPFWindow):
         # Window-level keyboard so WASD works whenever the form has focus.
         self.PreviewKeyDown += self._on_preview_keydown
         self.PreviewKeyUp   += self._on_preview_keyup
+        # Window-level MouseMove: feeds the F-key mouselook mode (which
+        # captures the mouse so events come here from anywhere on screen).
+        self.MouseMove += self._on_window_mousemove
         # Drop pressed-keys + active drag when the user alt-tabs or
         # clicks into Revit — avoids the "still flying after I came
         # back" bug.
@@ -361,6 +387,15 @@ class WalkthroughForm(forms.WPFWindow):
         self._timer = DispatcherTimer()
         self._timer.Interval = TimeSpan.FromMilliseconds(_TICK_MS)
         self._timer.Tick += self._on_tick
+
+        # Slow polling timer (every ~2s) that checks for "fly to here"
+        # commands queued by the Browser's Walkthrough Here button.
+        # Separate from the motion tick because (a) we don't want to do
+        # disk I/O 30×/sec, (b) it has to keep ticking even when there's
+        # no movement input.
+        self._handoff_timer = DispatcherTimer()
+        self._handoff_timer.Interval = TimeSpan.FromMilliseconds(2000)
+        self._handoff_timer.Tick += self._on_handoff_poll
 
         # Bookmarks
         self._refresh_bookmarks()
@@ -443,6 +478,16 @@ class WalkthroughForm(forms.WPFWindow):
     def _on_speed_changed(self, sender, args):
         self._refresh_speed_label()
 
+    def _refresh_look_sensitivity_label(self):
+        self.txt_look_sensitivity_value.Text = "{:.2f}".format(
+            self.sl_look_sensitivity.Value)
+
+    def _on_look_sensitivity_changed(self, sender, args):
+        self._refresh_look_sensitivity_label()
+
+    def _current_look_sensitivity(self):
+        return float(self.sl_look_sensitivity.Value)
+
     def _current_speed_fps(self):
         base = float(self.sl_speed.Value)
         # Modifier keys read directly from Keyboard so they apply even
@@ -466,6 +511,12 @@ class WalkthroughForm(forms.WPFWindow):
             self.txt_status.Text = ("Open the Walkthrough view first "
                                     "(big blue button above).")
             return
+        # Refresh camera cache from the live view — the user may have
+        # rotated Revit manually between the last walkthrough action
+        # and this click. Without this, the first drag move starts from
+        # a stale position and the view "jumps back" to where the
+        # walkthrough last left it.
+        self._queue_action("read_camera")
         pt = args.GetPosition(self.brd_lookpad)
         self._drag_origin = (pt.X, pt.Y)
         self._dragging = True
@@ -537,6 +588,125 @@ class WalkthroughForm(forms.WPFWindow):
         except Exception as ex:
             walkthrough_view._log("recenter_cursor failed: {}".format(ex))
 
+    # --- Global mouselook (F-key toggle) ------------------------------
+    #
+    # Press F → cursor hidden, locked to anchor, mouse motion rotates
+    # the camera regardless of where on screen the cursor sits. All
+    # clicks captured by our window so they can't reach Revit. Press F
+    # or Esc to exit. Equivalent UX to Enscape's right-click look mode.
+    #
+    # Mechanism: Window.CaptureMouse() routes ALL mouse events to us
+    # while the cursor is anywhere on screen — even over Revit's
+    # viewport. We hide the cursor with System.Windows.Forms.Cursor.Hide()
+    # and recenter to an anchor screen-point on every MouseMove, so the
+    # cursor never visually "drifts" off-screen.
+
+    def _enter_mouselook(self):
+        if self._mouselook_mode:
+            return
+        # Refresh camera cache before starting (user may have rotated
+        # Revit manually).
+        self._queue_action("read_camera")
+        # Save current cursor position so we can put it back on exit.
+        self._mouselook_origin_cursor = self._cursor_position()
+        # Anchor at the center of our window in screen coordinates —
+        # always on the same monitor as our window, no multi-monitor
+        # weirdness.
+        try:
+            from System.Windows import Point as WPoint
+            local = WPoint(self.ActualWidth / 2.0, self.ActualHeight / 2.0)
+            screen_pt = self.PointToScreen(local)
+            self._mouselook_anchor_screen = (int(screen_pt.X), int(screen_pt.Y))
+        except Exception:
+            # Fallback: keep cursor where it is.
+            self._mouselook_anchor_screen = self._mouselook_origin_cursor
+        # Capture mouse on the window — events flow to us even when
+        # cursor is over Revit. Critical for "look anywhere on screen."
+        try:
+            self.CaptureMouse()
+        except Exception:
+            pass
+        # Hide the system cursor entirely (not just within our window).
+        try:
+            from System.Windows.Forms import Cursor as WFCursor
+            WFCursor.Hide()
+        except Exception:
+            pass
+        # Move cursor to anchor.
+        if self._mouselook_anchor_screen is not None:
+            self._set_cursor_position(self._mouselook_anchor_screen)
+        self._mouselook_mode = True
+        self.brd_active_indicator.Visibility = Visibility.Visible
+        self.txt_status.Text = (
+            "MOUSELOOK ON. Move mouse to look. WASD to move. "
+            "Press F or Esc to exit.")
+        walkthrough_view._log("mouselook: ENTERED")
+
+    def _exit_mouselook(self):
+        if not self._mouselook_mode:
+            return
+        self._mouselook_mode = False
+        try:
+            if self.IsMouseCaptured:
+                self.ReleaseMouseCapture()
+        except Exception:
+            pass
+        # Show cursor again.
+        try:
+            from System.Windows.Forms import Cursor as WFCursor
+            WFCursor.Show()
+        except Exception:
+            pass
+        # Restore cursor to where it was when we entered (so the user
+        # finds their cursor where they left it, not at the anchor).
+        if self._mouselook_origin_cursor is not None:
+            self._set_cursor_position(self._mouselook_origin_cursor)
+        self._mouselook_origin_cursor = None
+        self._mouselook_anchor_screen = None
+        self._mouse_dx = 0.0
+        self._mouse_dy = 0.0
+        self.brd_active_indicator.Visibility = Visibility.Collapsed
+        self.txt_status.Text = "Mouselook OFF. Press F to re-enter."
+        walkthrough_view._log("mouselook: EXITED")
+
+    def _on_window_mousemove(self, sender, args):
+        """Window-level mouse move. Only feeds the F-key mouselook
+        mode — the look-pad drag has its own MouseMove handler scoped
+        to the look pad."""
+        if not self._mouselook_mode or self._mouselook_anchor_screen is None:
+            return
+        cur = self._cursor_position()
+        if cur is None:
+            return
+        ax, ay = self._mouselook_anchor_screen
+        dx = cur[0] - ax
+        dy = cur[1] - ay
+        if dx == 0 and dy == 0:
+            return
+        self._mouse_dx += dx
+        self._mouse_dy += dy
+        # Yank the cursor back to anchor — combined with hidden cursor,
+        # this lets the user drag indefinitely in any direction.
+        self._set_cursor_position(self._mouselook_anchor_screen)
+
+    @staticmethod
+    def _cursor_position():
+        try:
+            from System.Windows.Forms import Cursor as WFCursor
+            p = WFCursor.Position
+            return (p.X, p.Y)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _set_cursor_position(xy):
+        try:
+            from System.Windows.Forms import Cursor as WFCursor
+            from System.Drawing import Point
+            WFCursor.Position = Point(int(xy[0]), int(xy[1]))
+        except Exception:
+            pass
+
     # --- Keyboard ------------------------------------------------------
     #
     # WASD works whenever the form has keyboard focus AND the view is
@@ -546,11 +716,37 @@ class WalkthroughForm(forms.WPFWindow):
     def _on_preview_keydown(self, sender, args):
         if self._camera is None:
             return
+
+        # F → toggle global mouselook mode. The mouse becomes a
+        # "look-around mouse"; all clicks are blocked from Revit.
+        # F again (or Esc) exits.
+        if args.Key == Key.F:
+            if self._mouselook_mode:
+                self._exit_mouselook()
+            else:
+                self._enter_mouselook()
+            args.Handled = True
+            return
+
+        # Esc exits mouselook only (not WASD or anything else).
+        if args.Key == Key.Escape and self._mouselook_mode:
+            self._exit_mouselook()
+            args.Handled = True
+            return
+
         movement_key = _KEY_MAP.get(args.Key)
         if movement_key is not None:
+            was_empty = not self._pressed_keys
             if movement_key not in self._pressed_keys:
                 walkthrough_view._log("keydown: {}".format(movement_key))
             self._pressed_keys.add(movement_key)
+            # First key of a new input session → refresh camera cache
+            # in case the user rotated Revit's view manually since the
+            # last input. Without this, the next tick uses a stale
+            # cached position and the camera "jumps back" to where it
+            # was before the manual rotation.
+            if was_empty:
+                self._queue_action("read_camera")
             args.Handled = True
 
     def _on_preview_keyup(self, sender, args):
@@ -561,24 +757,37 @@ class WalkthroughForm(forms.WPFWindow):
 
     def _on_window_deactivated(self, sender, args):
         # Window lost focus (alt-tab, click in Revit). Drop any pressed
-        # keys so the camera doesn't keep flying when we come back.
+        # keys + drop active drag + exit mouselook so we don't end up
+        # in a stuck state when we come back.
         self._pressed_keys.clear()
         self._stop_drag()
+        if self._mouselook_mode:
+            self._exit_mouselook()
 
     # --- Motion tick (DispatcherTimer) --------------------------------
 
     def _on_tick(self, sender, args):
         if self._camera is None:
             return
-        # No active input → don't burn cycles queueing identical states.
-        if not self._pressed_keys and self._mouse_dx == 0 and self._mouse_dy == 0:
-            return
         from datetime import datetime
         now = datetime.now()
+        # ALWAYS update last-tick-time, even when there's no input.
+        # Otherwise after a quiet period, the first input tick computes
+        # `dt = now - last_input_tick` which can be many seconds —
+        # multiplied by speed that's a huge teleport. Symptom Nathan
+        # reported: pressing E after idling jumps the camera way up
+        # before settling at the correct speed.
+        if not self._pressed_keys and self._mouse_dx == 0 and self._mouse_dy == 0:
+            self._last_tick_time = now
+            return
         if self._last_tick_time is None:
             dt = _TICK_MS / 1000.0
         else:
             dt = max(0.001, (now - self._last_tick_time).total_seconds())
+        # Cap dt at ~3 frames worth (100ms) — defends against frame
+        # stutter / alt-tab pauses creating sudden bursts of movement
+        # when input resumes.
+        dt = min(dt, _TICK_MS / 1000.0 * 3.0)
         self._last_tick_time = now
 
         new_camera = self._camera
@@ -588,11 +797,55 @@ class WalkthroughForm(forms.WPFWindow):
                 self._current_speed_fps(), dt)
         if self._mouse_dx != 0 or self._mouse_dy != 0:
             new_camera = walkthrough_motion.look(
-                new_camera, self._mouse_dx, self._mouse_dy)
+                new_camera, self._mouse_dx, self._mouse_dy,
+                sensitivity_deg_per_pixel=self._current_look_sensitivity())
             self._mouse_dx = 0.0
             self._mouse_dy = 0.0
         self._camera = new_camera
         self._queue_action("set_camera", camera=new_camera)
+
+    # --- Handoff: Walkthrough Here from Browser (Iter 13) -------------
+    #
+    # Browser writes a "fly to here" command file when the user clicks
+    # its Walkthrough Here button. We pick it up two ways:
+    #  1. On _open_view completion (covers the case where the form was
+    #     closed when the user clicked Walkthrough Here).
+    #  2. Via _handoff_timer (every ~2s while running) — covers the
+    #     case where the form was already open.
+    # Either way, the same _consume_pending_handoff() reads + clears the
+    # file and queues a set_camera to the target.
+
+    def _on_handoff_poll(self, sender, args):
+        if self._camera is None or not self._project_hash:
+            return
+        self._consume_pending_handoff()
+
+    def _consume_pending_handoff(self):
+        if not self._project_hash:
+            return
+        try:
+            cmd = walkthrough_handoff.read_pending(self._project_hash)
+        except Exception:
+            cmd = None
+        if cmd is None:
+            return
+        # Translate the saved viewpoint shape (position + target + up)
+        # to the motion module's shape (position + forward + up) and
+        # apply.
+        target_camera = walkthrough_handoff.viewpoint_to_camera_tuple(cmd)
+        try:
+            walkthrough_handoff.clear_pending(self._project_hash)
+        except Exception:
+            pass
+        if target_camera is None:
+            self.txt_status.Text = (
+                "Couldn't fly to queued clash — viewpoint is malformed.")
+            return
+        self._camera = target_camera
+        self._queue_action("set_camera", camera=target_camera)
+        seq = cmd.get("clash_seq")
+        seq_part = "Clash #{}".format(seq) if seq is not None else "queued clash"
+        self.txt_status.Text = "Flying to {}.".format(seq_part)
 
     # --- Bookmarks -----------------------------------------------------
 
@@ -679,9 +932,11 @@ class WalkthroughForm(forms.WPFWindow):
                 if success:
                     self._camera = payload  # seeded camera from view
                     self.txt_status.Text = (
-                        "Active. WASD to move. Click+drag the look pad "
-                        "to look around. Shift = faster, Ctrl = slower.")
+                        "Active. WASD to move. F = mouselook mode. "
+                        "Click+drag the look pad for quick rotates. "
+                        "Shift/Ctrl = faster/slower.")
                     self._timer.Start()
+                    self._handoff_timer.Start()
                     self._apply_initial_visibility()
                     # Window must have keyboard focus for WASD to fire.
                     # The Open View button stole it on click; grab it
@@ -692,8 +947,19 @@ class WalkthroughForm(forms.WPFWindow):
                         Keyboard.Focus(self)
                     except Exception:
                         pass
+                    # If the user hit "Walkthrough Here" in the Browser
+                    # before opening this form, there's a pending fly
+                    # command waiting for us. Consume it now.
+                    self._consume_pending_handoff()
                 else:
                     self.txt_status.Text = message
+                return
+            if action == "read_camera":
+                # Refresh the cached camera from the live view (user may
+                # have rotated Revit manually). This keeps WASD/look
+                # operating against current state instead of stale cache.
+                if success and payload is not None:
+                    self._camera = payload
                 return
             if action == "set_camera":
                 # Per-tick camera sets are too noisy to update status for.
@@ -721,6 +987,10 @@ class WalkthroughForm(forms.WPFWindow):
     def _on_close(self, sender, args):
         try:
             self._timer.Stop()
+        except Exception:
+            pass
+        try:
+            self._handoff_timer.Stop()
         except Exception:
             pass
         try:

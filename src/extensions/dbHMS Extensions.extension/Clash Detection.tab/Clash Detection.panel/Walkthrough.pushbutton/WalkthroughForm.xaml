@@ -147,38 +147,58 @@
                 </StackPanel>
             </ScrollViewer>
 
-            <!-- Right column: look pad + speed/movement -->
+            <!-- Right column: speed + look-sensitivity sliders, Open button,
+                 controls cheatsheet with small click-to-rotate look pad. -->
             <DockPanel Grid.Column="2">
 
-                <!-- Speed / settings -->
+                <!-- Movement + look sensitivity sliders -->
                 <Border DockPanel.Dock="Top" Style="{StaticResource CardBorder}" Margin="0,0,0,10">
                     <StackPanel>
                         <TextBlock Text="Movement" Style="{StaticResource SectionHeader}"/>
-                        <Grid>
+
+                        <Grid Margin="0,0,0,4">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="100"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="60"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="Speed" VerticalAlignment="Center"
-                                       Style="{StaticResource FieldLabel}"
-                                       Margin="0,0,8,0"/>
+                            <TextBlock Text="Move speed" VerticalAlignment="Center"
+                                       Style="{StaticResource FieldLabel}" Margin="0"/>
                             <Slider Grid.Column="1" x:Name="sl_speed"
-                                    Minimum="2" Maximum="60" Value="15"
+                                    Minimum="2" Maximum="60" Value="10"
                                     TickFrequency="2" IsSnapToTickEnabled="True"
                                     VerticalAlignment="Center"/>
                             <TextBlock Grid.Column="2" x:Name="txt_speed_value"
-                                       Text="15 ft/s" VerticalAlignment="Center"
-                                       Margin="8,0,0,0" MinWidth="60"
+                                       Text="10 ft/s" VerticalAlignment="Center"
+                                       Margin="8,0,0,0"
                                        Style="{StaticResource MonoText}"/>
                         </Grid>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="100"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="60"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Look speed" VerticalAlignment="Center"
+                                       Style="{StaticResource FieldLabel}" Margin="0"/>
+                            <Slider Grid.Column="1" x:Name="sl_look_sensitivity"
+                                    Minimum="0.02" Maximum="0.30" Value="0.06"
+                                    TickFrequency="0.01" IsSnapToTickEnabled="True"
+                                    VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" x:Name="txt_look_sensitivity_value"
+                                       Text="0.06" VerticalAlignment="Center"
+                                       Margin="8,0,0,0"
+                                       Style="{StaticResource MonoText}"/>
+                        </Grid>
+
                         <TextBlock Style="{StaticResource HelperText}" Margin="0,8,0,0">
                             <Run Text="Hold "/><Run Text="Shift" FontWeight="SemiBold"/><Run Text=" to fly faster, "/><Run Text="Ctrl" FontWeight="SemiBold"/><Run Text=" to slow down."/>
                         </TextBlock>
                     </StackPanel>
                 </Border>
 
-                <!-- Open Walkthrough View button (disabled once view is open) -->
+                <!-- Open Walkthrough View button -->
                 <Button DockPanel.Dock="Top" x:Name="btn_open_view"
                         Content="Open Walkthrough View"
                         Style="{StaticResource PrimaryButton}"
@@ -186,44 +206,90 @@
                         HorizontalContentAlignment="Center" MinWidth="0"
                         Padding="14,8"/>
 
-                <!-- Look pad — click and drag inside to look around. Captures
-                     mouse + keyboard. -->
-                <Border Style="{StaticResource CardBorder}" Padding="0">
+                <!-- Controls cheatsheet on the left, small click-to-rotate
+                     look pad on the right. -->
+                <Border Style="{StaticResource CardBorder}">
                     <Grid>
-                        <Border x:Name="brd_lookpad"
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="140"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Controls" Style="{StaticResource SectionHeader}"/>
+                            <Grid Margin="0,0,0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="F" Style="{StaticResource MonoText}" FontWeight="Bold" Foreground="#2B6CB0"/>
+                                <TextBlock Grid.Column="1" Text="Toggle mouselook (mouse only looks; can't click in Revit)" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="W A S D" Style="{StaticResource MonoText}" FontWeight="Bold"/>
+                                <TextBlock Grid.Column="1" Text="Walk where you're looking; A/D strafe horizontally" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Q / E" Style="{StaticResource MonoText}" FontWeight="Bold"/>
+                                <TextBlock Grid.Column="1" Text="Move down / up (always world-vertical)" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Shift / Ctrl" Style="{StaticResource MonoText}" FontWeight="Bold"/>
+                                <TextBlock Grid.Column="1" Text="Speed up (3×) / slow down (¼×)" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                            <Grid Margin="0,0,0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Esc" Style="{StaticResource MonoText}" FontWeight="Bold"/>
+                                <TextBlock Grid.Column="1" Text="Exit mouselook" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="100"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Click+drag →" Style="{StaticResource MonoText}" FontWeight="Bold"/>
+                                <TextBlock Grid.Column="1" Text="Quick rotate without entering mouselook" Style="{StaticResource HelperText}"/>
+                            </Grid>
+                        </StackPanel>
+
+                        <!-- Small look pad — click and drag inside for quick rotates. -->
+                        <Border Grid.Column="1" x:Name="brd_lookpad"
                                 Background="#1A202C" Cursor="Hand"
-                                Focusable="True">
+                                Focusable="True"
+                                Width="120" Height="100"
+                                VerticalAlignment="Top" Margin="8,0,0,0"
+                                CornerRadius="3">
                             <Grid>
                                 <StackPanel x:Name="sp_lookpad_hint"
                                             VerticalAlignment="Center"
                                             HorizontalAlignment="Center">
-                                    <TextBlock Text="◎ LOOK PAD"
-                                               Foreground="#A0AEC0" FontSize="22"
+                                    <TextBlock Text="◎" Foreground="#A0AEC0" FontSize="22"
                                                FontWeight="Bold" HorizontalAlignment="Center"/>
-                                    <TextBlock Text="WASD works any time the window has focus."
-                                               Foreground="#CBD5E0" FontSize="12"
-                                               HorizontalAlignment="Center" Margin="0,12,0,8"/>
-                                    <TextBlock Foreground="#E2E8F0" FontFamily="Consolas"
-                                               FontSize="13" HorizontalAlignment="Center">
-                                        <Run Text="WASD"/><Run Text=" — walk forward / strafe"  Foreground="#A0AEC0"/>
-                                    </TextBlock>
-                                    <TextBlock Foreground="#E2E8F0" FontFamily="Consolas"
-                                               FontSize="13" HorizontalAlignment="Center">
-                                        <Run Text="Q / E"/><Run Text=" — down / up"  Foreground="#A0AEC0"/>
-                                    </TextBlock>
-                                    <TextBlock Foreground="#E2E8F0" FontFamily="Consolas"
-                                               FontSize="13" HorizontalAlignment="Center">
-                                        <Run Text="Click+drag here"/><Run Text=" — look around"  Foreground="#A0AEC0"/>
-                                    </TextBlock>
-                                    <TextBlock Foreground="#E2E8F0" FontFamily="Consolas"
-                                               FontSize="13" HorizontalAlignment="Center">
-                                        <Run Text="Shift / Ctrl"/><Run Text=" — speed up / slow down"  Foreground="#A0AEC0"/>
-                                    </TextBlock>
+                                    <TextBlock Text="click+drag" Foreground="#A0AEC0"
+                                               FontSize="10" HorizontalAlignment="Center"
+                                               Margin="0,2,0,0"/>
+                                    <TextBlock Text="to rotate" Foreground="#A0AEC0"
+                                               FontSize="10" HorizontalAlignment="Center"/>
                                 </StackPanel>
-                                <TextBlock x:Name="txt_lookpad_active" Text="● LOOKING — drag to rotate, release to stop"
-                                           VerticalAlignment="Top" HorizontalAlignment="Center"
-                                           Margin="0,12,0,0"
-                                           Foreground="#48BB78" FontWeight="Bold" FontSize="12"
+                                <TextBlock x:Name="txt_lookpad_active"
+                                           Text="● LOOKING"
+                                           VerticalAlignment="Center" HorizontalAlignment="Center"
+                                           Foreground="#48BB78" FontWeight="Bold" FontSize="11"
                                            Visibility="Collapsed"/>
                             </Grid>
                         </Border>

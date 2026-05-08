@@ -217,9 +217,11 @@ class ClashBrowserForm(forms.WPFWindow):
         self.btn_bulk_status.Click   += self._on_bulk_status
         self.btn_bulk_reassign.Click += self._on_bulk_reassign
         self.btn_bulk_resolve.Click  += self._on_bulk_resolve
-        for btn_name in ('btn_walkthrough_here',
-                         'btn_bulk_group'):
+        for btn_name in ('btn_bulk_group',):
             getattr(self, btn_name).Click += self._on_coming_soon
+        # Walkthrough Here (Iter 13) — hands the selected clash off to
+        # the modeless Walkthrough form via a per-project command file.
+        self.btn_walkthrough_here.Click += self._on_walkthrough_here
         # Filter presets (Iteration 11). Built-ins always show; user
         # saves go under them. Right-click a user preset to delete it.
         self.btn_save_preset.Click += self._on_save_preset
@@ -1033,6 +1035,79 @@ class ClashBrowserForm(forms.WPFWindow):
         if self._save_clashes(action_label="Viewpoint saved"):
             self._render_viewpoint(clash_dict)
             self.txt_status.Text = message
+
+    def _on_walkthrough_here(self, sender, args):
+        """Hand the selected clash off to the modeless Walkthrough form.
+
+        Writes a tiny "fly to here" command file that the Walkthrough
+        consumes either on its next launch or via its slow polling
+        timer (if already running). The user has to click the
+        Walkthrough toolbar button if the form isn't open yet — we
+        can't launch another pyRevit script directly from here without
+        breaking pyRevit's own script-lifecycle invariants.
+
+        Pre-condition: the selected clash must have a saved viewpoint
+        (otherwise we don't know where to fly to). If missing, prompt
+        the user to Save Viewpoint first.
+        """
+        from clash_view import walkthrough_handoff
+        selected = list(self.dg_clashes.SelectedItems)
+        if not selected:
+            forms.alert("Select a clash from the list first.",
+                        title='Walkthrough Here')
+            return
+        if len(selected) > 1:
+            forms.alert(
+                "Walkthrough Here flies to one clash. Select just one "
+                "row, then try again.",
+                title='Walkthrough Here',
+            )
+            return
+        if not self._project_hash:
+            forms.alert("No active project — can't queue a walkthrough.",
+                        title='Walkthrough Here')
+            return
+        clash = selected[0].Source
+        viewpoints = clash.get('viewpoints') or []
+        viewpoint = viewpoints[0] if viewpoints else None
+        if not viewpoint:
+            forms.alert(
+                "This clash has no saved viewpoint yet. Click Save "
+                "Viewpoint first, then try again.",
+                title='Walkthrough Here',
+            )
+            return
+        cmd = walkthrough_handoff.make_pending_fly_to(clash, viewpoint)
+        if cmd is None:
+            forms.alert(
+                "The saved viewpoint for this clash is malformed. "
+                "Re-save it from the Browser and try again.",
+                title='Walkthrough Here',
+            )
+            return
+        try:
+            ok = walkthrough_handoff.write_pending(self._project_hash, cmd)
+        except Exception as ex:
+            forms.alert("Couldn't queue: {}".format(ex),
+                        title='Walkthrough Here')
+            return
+        if not ok:
+            forms.alert("Couldn't write the pending command file.",
+                        title='Walkthrough Here')
+            return
+        # Browser is itself modal — a popup alert here would block the
+        # user from clicking the Walkthrough toolbar button next, so
+        # the helpful "queued!" message turns into an extra-click
+        # annoyance. Skip the alert; close the Browser instead so the
+        # user is one click away from the Walkthrough button.
+        # (If the Walkthrough form is already open, its 2 Hz polling
+        # timer will pick the file up within ~2 seconds. The user can
+        # see the status update there.)
+        seq = clash.get('seq') or '?'
+        self.txt_status.Text = (
+            "Queued for Walkthrough: Clash #{}. Closing Browser — "
+            "click the Walkthrough button next.".format(seq))
+        self.Close()
 
     def _on_show_history(self, sender, args):
         """Pop a modal sub-window listing the selected clash's audit

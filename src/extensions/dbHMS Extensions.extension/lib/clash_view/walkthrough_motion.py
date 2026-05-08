@@ -141,26 +141,23 @@ def step(camera, keys, speed_fps, dt_seconds, world_up=True):
     move = [0.0, 0.0, 0.0]
 
     forward_xy = None  # cached forward projected onto XY plane (no pitch)
-    right_xy   = None
 
     if KEY_FORWARD in keys or KEY_BACKWARD in keys:
-        # Walk-forward typically wants HORIZONTAL motion — pressing W
-        # while looking at the ground shouldn't drive the camera into the
-        # floor. So forward-projected-onto-XY, not raw forward. If the
-        # user actually wants to fly toward where they're looking
-        # (including downward), they can use Q/E for vertical.
-        forward_xy = _flatten_xy(forward)
+        # W/S follows the FULL 3D forward direction — looking up + W
+        # flies up, looking down + W dives forward. Feels more natural
+        # for free-fly inspection; Q/E is still available for pure
+        # world-up/down motion when you don't want to tilt.
+        forward_unit = _normalize(forward)
         if KEY_FORWARD in keys:
-            move = _add(move, _scale(forward_xy, 1.0))
+            move = _add(move, _scale(forward_unit, 1.0))
         if KEY_BACKWARD in keys:
-            move = _add(move, _scale(forward_xy, -1.0))
+            move = _add(move, _scale(forward_unit, -1.0))
 
     if KEY_LEFT in keys or KEY_RIGHT in keys:
-        # Strafe along the right vector projected onto XY (consistent
-        # with horizontal forward — strafing shouldn't tilt vertically
-        # either).
-        if forward_xy is None:
-            forward_xy = _flatten_xy(forward)
+        # Strafe stays HORIZONTAL — A/D following pitch produces weird
+        # diagonal motion that's confusing in tight spaces. Standard FPS
+        # convention: strafe along the right vector projected onto XY.
+        forward_xy = _flatten_xy(forward)
         right_xy = _flatten_xy(_cross(forward_xy, [0.0, 0.0, 1.0]))
         if KEY_RIGHT in keys:
             move = _add(move, _scale(right_xy, 1.0))

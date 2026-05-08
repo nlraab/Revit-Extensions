@@ -87,25 +87,57 @@ def get_or_create_walkthrough_view(doc):
     return view
 
 
-def configure_for_first_run(view, doc):
-    """Apply the minimum viable settings to `view`. Caller MUST be inside
-    a Transaction.
+WALKTHROUGH_TEMPLATE_NAME = "dbHMS Walkthrough"
 
-    v1 ULTRA-CONSERVATIVE: just clear the view template and set the
-    quality preset + detail level. Everything else (sun, shadows,
-    ambient lighting, background, category hiding) was removed after
-    the first crash on Revit 2026. Re-add incrementally with logging
-    once the bare path is proven stable.
+
+def configure_for_first_run(view, doc):
+    """Apply the firm-standard `dbHMS Walkthrough` view template.
+    Caller MUST be inside a Transaction.
+
+    The template owns every visual decision — display style, edges,
+    shadows, ambient light, background, crop on/off, annotation
+    visibility. The firm sets it up once in the project template so
+    every new project inherits it; this code just looks it up and
+    assigns it to the view.
+
+    Why template-only (not hard-coded settings):
+      * Several Graphic Display Options controls (Show Edges, Show
+        Ambient Shadows, Cast Shadows, Ambient Light) are not exposed
+        through the public Revit API on any version — only via a view
+        template. Documented in AEC DevBlog and confirmed via Revit
+        2026 testing.
+      * Keeping all visual config in the template means firm taste
+        changes (e.g. switching the sky color, hiding furniture during
+        coord meetings) are made once in the template, no code change.
+      * The previous "set crop off / hide annotations" code in here
+        fought with the template — confusing and brittle.
+
+    Fallback when the template is missing (someone runs this on a
+    project that wasn't seeded from the firm's project template):
+    apply Realistic display style + Fine detail level so the view is
+    at least usable, and log a hint that the firm template should be
+    added.
     """
     if view is None:
         return
-    _log("configure: about to clear view template")
+
+    if _apply_walkthrough_template(view, doc):
+        # Template owns the visual stuff. Still need to turn the crop
+        # view off — that's a per-view property, not normally captured
+        # by view templates, so the template can't enforce it.
+        _disable_crop_view(view)
+        _log("configure: done (template applied)")
+        return
+
+    # Template missing — minimum-viable settings so the view is usable.
+    _log("configure: no '{}' template found — applying minimal "
+         "fallback. Add the template to this project for full fidelity."
+         .format(WALKTHROUGH_TEMPLATE_NAME))
     _clear_view_template(view)
-    _log("configure: cleared view template; about to apply quality")
     apply_quality(view, QUALITY_PRESENT)
-    _log("configure: applied quality; about to set detail level")
     _apply_detail_fine(view)
-    _log("configure: done")
+    _disable_crop_view(view)
+    _log("configure: done (fallback)")
 
 
 def apply_quality(view, quality):
@@ -267,6 +299,79 @@ def _apply_detail_fine(view):
         view.DetailLevel = ViewDetailLevel.Fine
     except Exception as ex:
         _log("_apply_detail_fine: failed ({})".format(ex))
+
+
+def _disable_crop_view(view):
+    """Turn off the view's crop region. Caller MUST be inside a Transaction.
+
+    Walkthrough views are full-model first-person navigation — there's
+    no reason to crop. This is a per-view property that view templates
+    don't normally control (the relevant template parameter is
+    "Crop Region Visible" and is unchecked-include by default), so we
+    enforce it from code.
+
+    `CropBoxActive = False` frees the view from any rectangular clipping;
+    `CropBoxVisible = False` hides the dashed crop outline so it doesn't
+    show up in renders. Section box (which IS clipping) is a separate
+    setting and we leave it alone.
+    """
+    if view is None:
+        return
+    _log("crop: disabling")
+    try:
+        view.CropBoxActive = False
+        _log("  CropBoxActive = False OK")
+    except Exception as ex:
+        _log("  CropBoxActive failed ({})".format(ex))
+    try:
+        view.CropBoxVisible = False
+        _log("  CropBoxVisible = False OK")
+    except Exception as ex:
+        _log("  CropBoxVisible failed ({})".format(ex))
+
+
+def _apply_walkthrough_template(view, doc):
+    """Find a view template named `dbHMS Walkthrough` and apply it to
+    `view`. Returns True if applied, False if no matching template
+    exists (or assignment failed).
+
+    The template is the firm's preferred way to set the Graphic Display
+    Options that AREN'T API-settable: Show Edges, Show Ambient Shadows,
+    Cast Shadows, Ambient Light. Once Nathan has created it once via
+    the Revit UI (Save as View Template → "dbHMS Walkthrough"), this
+    code finds it on every walkthrough open and applies it, so every
+    new walkthrough view inherits the same coordination-meeting look.
+
+    Caller MUST be inside a Transaction.
+    """
+    from Autodesk.Revit.DB import FilteredElementCollector, View
+    if view is None:
+        return False
+    _log("template: searching for '{}'".format(WALKTHROUGH_TEMPLATE_NAME))
+    template = None
+    try:
+        for v in FilteredElementCollector(doc).OfClass(View):
+            if not v.IsTemplate:
+                continue
+            try:
+                if v.Name == WALKTHROUGH_TEMPLATE_NAME:
+                    template = v
+                    break
+            except Exception:
+                continue
+    except Exception as ex:
+        _log("  template search failed ({})".format(ex))
+        return False
+    if template is None:
+        _log("  no template found — using manual settings instead")
+        return False
+    try:
+        view.ViewTemplateId = template.Id
+        _log("  template applied: '{}'".format(template.Name))
+        return True
+    except Exception as ex:
+        _log("  template apply failed ({})".format(ex))
+        return False
 
 
 # ---------------------------------------------------------------------------

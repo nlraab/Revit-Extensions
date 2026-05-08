@@ -67,14 +67,29 @@ class StepHorizontalTests(unittest.TestCase):
         new = wm.step(self.cam, {wm.KEY_LEFT}, 10.0, 1.0)
         self.assertAlmostEqual(new[0][1], 10.0)
 
-    def test_pitched_camera_still_moves_horizontally(self):
+    def test_pitched_camera_w_follows_full_3d_forward(self):
         # Camera pitched 45° down — forward is (cos45, 0, -sin45).
-        # Pressing W should still walk along world XY, NOT into the floor.
+        # Pressing W now follows the FULL 3D forward direction (the
+        # natural "fly where I'm looking" feel), so the camera dives
+        # forward-and-down instead of staying level.
         s = math.sqrt(0.5)
         cam = _camera([0, 0, 10], [s, 0, -s], [s, 0, s])
         new = wm.step(cam, {wm.KEY_FORWARD}, 10.0, 1.0)
-        self.assertAlmostEqual(new[0][0], 10.0)
-        self.assertAlmostEqual(new[0][2], 10.0)  # height unchanged
+        # forward unit · 10 ft = (s*10, 0, -s*10) ≈ (7.07, 0, -7.07)
+        self.assertAlmostEqual(new[0][0], 10.0 * s, places=5)
+        self.assertAlmostEqual(new[0][1], 0.0, places=5)
+        self.assertAlmostEqual(new[0][2], 10.0 - 10.0 * s, places=5)
+
+    def test_pitched_camera_strafe_stays_horizontal(self):
+        # A/D should NOT track pitch — standard FPS convention. Camera
+        # pitched 45° down, pressing D still strafes purely horizontal.
+        s = math.sqrt(0.5)
+        cam = _camera([0, 0, 10], [s, 0, -s], [s, 0, s])
+        new = wm.step(cam, {wm.KEY_RIGHT}, 10.0, 1.0)
+        # Forward XY = +X, so right_xy = (0,-1,0). Camera moves in -Y
+        # at 10 ft, height unchanged.
+        self.assertAlmostEqual(new[0][1], -10.0, places=5)
+        self.assertAlmostEqual(new[0][2], 10.0, places=5)
 
     def test_diagonal_does_not_double_speed(self):
         # W+D simultaneously should travel `distance` total, not √2 ×

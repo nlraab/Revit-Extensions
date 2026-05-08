@@ -329,6 +329,32 @@ Wired forms:
   rasterizer; without an external real-time renderer we can't hit
   PBR / GI / SSR) — the goal is "much better than default Revit on a
   projector," not photoreal.
+- **Walkthrough Here — Browser → Walkthrough handoff** (Iter 13) — the
+  Browser's **Walkthrough Here** button is now wired. Click a clash row
+  → click the button → the Walkthrough flies to that clash's saved
+  viewpoint. Bridges the two tools: Browser owns clash review, Walkthrough
+  owns spatial navigation.
+  Cross-script handoff is file-based — the Browser writes a small
+  `walkthrough_pending.json` at `<shared>/<project-hash>/` containing
+  the target's camera state; the Walkthrough form reads-and-clears it.
+  This works regardless of whether the Walkthrough form is currently
+  open: the form picks the file up either via its `_open_view`
+  completion path (cold-launch case) OR via a slow polling timer
+  (every ~2s while running) for the case where it was already open.
+  Last-write-wins — if the user clicks Walkthrough Here on multiple
+  clashes in quick succession, the most recent one is where the camera
+  lands.
+  Pure-data persistence layer is `clash_view.walkthrough_handoff`,
+  symmetric with `filter_presets` and `walkthrough_bookmarks`:
+  atomic-rename JSON write, defensive read (corrupt / missing →
+  None), no Revit imports. The Walkthrough form's polling timer is
+  separate from the 30 fps motion tick — it ticks at 0.5 Hz so we're
+  not hitting disk 30×/sec for a feature that triggers maybe a few
+  times per meeting.
+  Pre-condition the Browser enforces: the clash must have a saved
+  viewpoint already. If missing, the button alerts "Click Save
+  Viewpoint first" and refuses to queue. Walkthrough Here has no
+  meaning without a target camera state.
 
 Stubs / mockups still:
 
@@ -357,15 +383,12 @@ Stubs / mockups still:
   right. Read-only; data comes straight from `clash_dict['history']`,
   formatted via `clash_core.history_format`. Empty state shows a hint
   when a clash has no recorded history yet.
-- **Walkthrough Here** button in Browser — pops "coming soon"; this
-  was always meant to be a one-click "fly the walkthrough straight to
-  this clash" shortcut. v1 Walkthrough takes a filter card → tour list
-  approach; the per-clash shortcut is a future iteration.
-- **Walkthrough free-fly + XInput** — the previous Walkthrough mockup
-  also described WASD + mouse-look free navigation and Xbox controller
-  support. Both deferred — they're independently large pieces (Win32
-  hooks, P/Invoke against `xinput1_4.dll`) and v1 ships a guided tour
-  instead, which is what the team-meeting use case actually needs.
+- ~~**Walkthrough Here** button in Browser — pops "coming soon".~~ (Done
+  in Iter 13 — see Browser → Walkthrough handoff entry under Wired
+  forms.)
+- **Walkthrough Xbox controller (XInput)** — deferred. P/Invoke against
+  `xinput1_4.dll`, DispatcherTimer at 60 Hz; own iteration. WASD +
+  mouselook covers the use case for now.
 - **Clearance clashes** — not started; folders + stubs in place.
 
 ### Identity / merge model (the key new bit)
@@ -464,6 +487,7 @@ src/extensions/dbHMS Extensions.extension/
             snapshot.py                      <- thumbnail PNG export (~800 px)
             walkthrough_motion.py            <- WASD step + mouse-look math (pure data)
             walkthrough_bookmarks.py         <- per-project saved camera positions (pure data)
+            walkthrough_handoff.py           <- Browser→Walkthrough fly-here handoff (pure data)
             walkthrough_view.py              <- create/configure dbHMS Walkthrough view
             walkthrough_render.py            <- 1920px high-quality render export
         clash_report/
