@@ -901,13 +901,59 @@ class ViewRangeHelperForm(forms.WPFWindow):
         def _on_loaded(s, e):
             self._refresh_editor_from_state()
             self._refresh_lock_banner()
+            # Suppress hit-testing on the plan canvas until the Revit
+            # PNG has rendered and the bubbles have snapped to their
+            # FINAL positions. Reasoning: _draw_plan is called twice on
+            # startup — once now (with the canvas-stretched fallback
+            # layout because the image hasn't loaded yet), then again
+            # from _load_plan_image after the export completes (with
+            # the letterboxed-image layout). If the user clicks during
+            # that window, WPF queues the click and dispatches it
+            # AFTER the redraw — so a click on the provisional bubble
+            # position misses the final bubble position by several
+            # pixels and feels like the bubble silently broke. Turning
+            # off hit-testing means clicks during this window are
+            # simply ignored; the user has to wait for the image, then
+            # click cleanly.
+            try: self.cnv_plan.IsHitTestVisible = False
+            except Exception: pass
+            try: self.cnv_section.IsHitTestVisible = False
+            except Exception: pass
             self._draw_plan()
             self._draw_section()
             self._update_status()
+            # Activate the form and put keyboard focus on the plan
+            # canvas so the very first MouseLeftButtonDown is dispatched
+            # to our handler instead of being absorbed by Windows'
+            # click-to-activate handshake. Without this, on Revit's
+            # modal-dialog flow the first click on a bubble feels like
+            # a no-op — exactly the "the view needs to be clicked
+            # into" symptom users have reported.
+            try: self.Activate()
+            except Exception: pass
+            try:
+                self.cnv_plan.Focusable    = True
+                self.cnv_section.Focusable = True
+                self.cnv_plan.Focus()
+            except Exception: pass
+            # Force WPF to flush any pending measure / arrange passes
+            # so cnv_plan.ActualWidth / Height are stable before the
+            # first hit test runs. _plan_transform reads ActualWidth
+            # synchronously; a stale value would compute bubble hit
+            # coordinates relative to a different canvas size than
+            # what's actually painted.
+            try: self.UpdateLayout()
+            except Exception: pass
             # Kick off the first Revit-rendered plan + section images
             try:    self._refresh_revit_plan()
             except Exception: pass
             try:    self._refresh_revit_render()
+            except Exception: pass
+            # Plan + section PNGs have loaded and overlay elements are
+            # at their final positions; safe to accept clicks now.
+            try: self.cnv_plan.IsHitTestVisible = True
+            except Exception: pass
+            try: self.cnv_section.IsHitTestVisible = True
             except Exception: pass
         self.Loaded += _on_loaded
 
