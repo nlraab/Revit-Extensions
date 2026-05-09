@@ -1,0 +1,243 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Chatbot Settings"
+        Height="640" Width="560"
+        WindowStartupLocation="CenterOwner"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResize"
+        MinHeight="500" MinWidth="480">
+
+    <Window.Resources>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#1A202C"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#4A5568"/>
+            <Setter Property="Margin" Value="0,8,0,2"/>
+        </Style>
+
+        <Style x:Key="HelperText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#718096"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style x:Key="MonoText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+        </Style>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E2E8F0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="120"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="MinWidth" Value="120"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+
+        <Style x:Key="MiniButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,4,0"/>
+        </Style>
+
+        <!-- Firm-standard radio button (14 px ring + 7 px dot, blue when checked).
+             Mandatory per CLAUDE.md — without this template the dot is offset. -->
+        <Style TargetType="RadioButton">
+            <Setter Property="Margin" Value="0,4,0,4"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Grid Width="14" Height="14" VerticalAlignment="Center" Margin="0,0,6,0">
+                                <Ellipse x:Name="ring" Width="14" Height="14"
+                                         Stroke="#CBD5E0" StrokeThickness="1.5" Fill="White"/>
+                                <Ellipse x:Name="dot" Width="7" Height="7"
+                                         Fill="#2B6CB0" Visibility="Collapsed"/>
+                            </Grid>
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="dot" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="ring" Property="Stroke" Value="#2B6CB0"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ring" Property="Stroke" Value="#2B6CB0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="CheckBox">
+            <Setter Property="Margin" Value="0,3,0,3"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- ===================== HEADER (slate, no wordmark for sub-dialog) ===================== -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,12">
+            <TextBlock Text="Chatbot Settings" Foreground="White" FontSize="16" FontWeight="Bold"/>
+        </Border>
+
+        <!-- ===================== FOOTER ===================== -->
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
+            <Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                    <TextBlock x:Name="txt_status" Text="" Foreground="#4A5568"
+                               VerticalAlignment="Center" FontStyle="Italic"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_save"   Content="Save"   Style="{StaticResource PrimaryButton}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ===================== BODY ===================== -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16,20,16">
+            <StackPanel>
+                <!-- API key card -->
+                <Border Style="{StaticResource CardBorder}">
+                    <StackPanel>
+                        <TextBlock Text="Anthropic API Key" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}"
+                                   Text="Get a key at console.anthropic.com &#x2192; Settings &#x2192; API Keys. Keys are stored locally and encrypted with your Windows account (DPAPI)."/>
+
+                        <TextBlock Text="Key" Style="{StaticResource FieldLabel}"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <PasswordBox x:Name="pwd_api_key" Grid.Column="0"
+                                         Padding="6,3" Height="26"
+                                         VerticalContentAlignment="Center"/>
+                            <Button x:Name="btn_show_key" Grid.Column="1" Content="Show"
+                                    Style="{StaticResource MiniButton}" Margin="6,0,0,0"/>
+                        </Grid>
+                        <!-- Plain TextBox revealed when "Show" is clicked. -->
+                        <TextBox x:Name="txt_api_key_visible" Visibility="Collapsed" Margin="0,4,0,0"/>
+
+                        <TextBlock x:Name="txt_key_hint" Style="{StaticResource HelperText}" Margin="0,6,0,0"
+                                   Text="No key configured."/>
+
+                        <Border Background="#FFF5F5" BorderBrush="#FC8181" BorderThickness="1"
+                                CornerRadius="3" Padding="8" Margin="0,8,0,0"
+                                x:Name="bnr_key_error" Visibility="Collapsed">
+                            <TextBlock x:Name="txt_key_error" Foreground="#742A2A"
+                                       FontSize="11" TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- Model card -->
+                <Border Style="{StaticResource CardBorder}">
+                    <StackPanel>
+                        <TextBlock Text="Model" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}"
+                                   Text="Sonnet is fast and inexpensive; Opus is slower and more thorough on tricky reasoning."/>
+
+                        <RadioButton x:Name="rad_model_sonnet" GroupName="model" Margin="0,8,0,4">
+                            <StackPanel>
+                                <TextBlock Text="Claude Sonnet 4.6 &#x2014; default" FontWeight="SemiBold" Foreground="#2D3748"/>
+                                <TextBlock Style="{StaticResource HelperText}"
+                                           Text="$3 / million input tokens, $15 / million output. Plenty fast for most ASHRAE / HVAC questions."/>
+                            </StackPanel>
+                        </RadioButton>
+
+                        <RadioButton x:Name="rad_model_opus" GroupName="model" Margin="0,8,0,4">
+                            <StackPanel>
+                                <TextBlock Text="Claude Opus 4.7 &#x2014; premium" FontWeight="SemiBold" Foreground="#2D3748"/>
+                                <TextBlock Style="{StaticResource HelperText}"
+                                           Text="$15 / million input, $75 / million output. Use for harder calc reasoning, design tradeoffs, or long synthesis."/>
+                            </StackPanel>
+                        </RadioButton>
+                    </StackPanel>
+                </Border>
+
+                <!-- System prompt card -->
+                <Border Style="{StaticResource CardBorder}">
+                    <StackPanel>
+                        <TextBlock Text="System Prompt" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}"
+                                   Text="Sets the chatbot's persona and ground rules. Edit if you want to bias toward your own design preferences (e.g. firm-standard fan curves, code year)."/>
+                        <TextBox x:Name="txt_system_prompt"
+                                 Margin="0,6,0,0"
+                                 Height="120" MaxHeight="240"
+                                 AcceptsReturn="True" TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 VerticalContentAlignment="Top"
+                                 FontSize="11"/>
+                        <Button x:Name="btn_reset_prompt" Content="Reset to default"
+                                Style="{StaticResource MiniButton}" Margin="0,6,0,0"
+                                HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Storage card -->
+                <Border Style="{StaticResource CardBorder}">
+                    <StackPanel>
+                        <TextBlock Text="Storage" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,4"
+                                   Text="Config and chat history live in your roaming AppData folder. Nothing leaves your machine except API requests."/>
+                        <TextBlock Margin="0,4,0,0">
+                            <Run Text="Config: " FontSize="11" Foreground="#718096"/><Run x:Name="run_config_path" FontFamily="Consolas" FontSize="11" Foreground="#2D3748"/>
+                        </TextBlock>
+                        <TextBlock Margin="0,2,0,0">
+                            <Run Text="History: " FontSize="11" Foreground="#718096"/><Run x:Name="run_history_path" FontFamily="Consolas" FontSize="11" Foreground="#2D3748"/>
+                        </TextBlock>
+                        <Button x:Name="btn_open_folder" Content="Open folder in Explorer"
+                                Style="{StaticResource MiniButton}" Margin="0,8,0,0"
+                                HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>
