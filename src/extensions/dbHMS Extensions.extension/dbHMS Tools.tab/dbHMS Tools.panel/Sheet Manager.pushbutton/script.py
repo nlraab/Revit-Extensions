@@ -1814,7 +1814,25 @@ REVISION_XAML = """
       <StackPanel Orientation="Vertical">
         <TextBlock x:Name="lbl_rev_info"
                    Foreground="#718096" FontSize="11"
-                   TextWrapping="Wrap" Margin="0,0,0,10"/>
+                   TextWrapping="Wrap" Margin="0,0,0,4"/>
+        <!-- Legend uses real CheckBox controls (IsHitTestVisible=False) so
+             the visuals match the actual rows exactly — Unicode glyphs for
+             ☑/☐/▣ render at noticeably different sizes in Segoe UI. -->
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+          <TextBlock Text="Legend: " Foreground="#718096" FontSize="11" VerticalAlignment="Center"/>
+          <CheckBox IsChecked="True" IsHitTestVisible="False" Focusable="False"
+                    VerticalAlignment="Center" Margin="0,0,4,0"/>
+          <TextBlock Text="on every sheet" Foreground="#718096" FontSize="11"
+                     VerticalAlignment="Center" Margin="0,0,14,0"/>
+          <CheckBox IsChecked="False" IsHitTestVisible="False" Focusable="False"
+                    VerticalAlignment="Center" Margin="0,0,4,0"/>
+          <TextBlock Text="on none" Foreground="#718096" FontSize="11"
+                     VerticalAlignment="Center" Margin="0,0,14,0"/>
+          <CheckBox x:Name="chk_legend_mixed" IsThreeState="True" IsHitTestVisible="False"
+                    Focusable="False" VerticalAlignment="Center" Margin="0,0,4,0"/>
+          <TextBlock Text="mixed (some but not all)" Foreground="#718096" FontSize="11"
+                     VerticalAlignment="Center"/>
+        </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
           <Button x:Name="btn_apply"  Content="Apply"  Style="{StaticResource PrimaryButton}"/>
@@ -2596,9 +2614,16 @@ class RevisionDialog(object):
         btn_apply   = w.FindName("btn_apply")
         btn_cancel  = w.FindName("btn_cancel")
 
-        self._lbl.Text = (
-            "Applying to {0} sheet(s).  ☑ = on every sheet,  ☐ = on none,  "
-            "▣ = mixed.".format(len(selected_items)))
+        self._lbl.Text = "Applying to {0} sheet(s).".format(len(selected_items))
+        # The legend's "mixed" checkbox needs the indeterminate state — set
+        # programmatically since {x:Null} markup isn't always reliable
+        # through XamlReader.Parse.
+        try:
+            chk_mixed = w.FindName("chk_legend_mixed")
+            if chk_mixed is not None:
+                chk_mixed.IsChecked = None
+        except Exception:
+            pass
 
         self._rows = ObservableCollection[RevisionRow]()
         for rev in revisions:

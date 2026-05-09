@@ -83,6 +83,20 @@ VG_LNK_XAML = os.path.join(SCRIPT_DIR, 'VgLinksDialog.xaml')
 # Helpers
 # ===========================================================================
 
+def _set_legend_mixed(form):
+    """Set the legend's 'mixed' checkbox to the indeterminate state. Every
+    form that ships the tri-state legend (per CLAUDE.md UI conventions)
+    names that checkbox `chk_legend_mixed`. WPF's IsThreeState=True alone
+    starts at False; we have to push None in code to render the indeterminate
+    indicator."""
+    try:
+        chk = getattr(form, "chk_legend_mixed", None)
+        if chk is not None:
+            chk.IsChecked = None
+    except Exception:
+        pass
+
+
 def eid_int(eid):
     """Revit 2024+ safe ElementId int read."""
     try:
@@ -1533,6 +1547,7 @@ class ViewTemplatesManagerForm(forms.WPFWindow):
         self._hide_apply_column()
         self._hide_unresolved_includes()
         self._update_mode()
+        _set_legend_mixed(self)
 
     def _hide_unresolved_includes(self):
         """Hide Include checkboxes whose BIP didn't resolve on this Revit
@@ -2370,6 +2385,7 @@ class VgCategoriesDialog(forms.WPFWindow):
         self._populate_lookups()
         self._populate_categories()
         self._wire_events()
+        _set_legend_mixed(self)
 
     def _populate_title(self):
         if self._kind == "Annotation":
@@ -2387,18 +2403,14 @@ class VgCategoriesDialog(forms.WPFWindow):
             self.txt_dialog_sub.Text = (
                 "Toggle model category visibility per template; tick a Show "
                 "box in a highlighted row to bulk-toggle.")
-        # Footer status
+        # Footer status — concise. The footer Grid trims long text with
+        # ellipsis if it ever gets longer than the available column.
         if len(self._names) > 1:
             self.txt_dialog_status.Text = (
-                "Iter 3a: visibility wired. OK applies show/hide changes to "
-                "{0} templates: {1}".format(
-                    len(self._names),
-                    ", ".join(self._names[:3]) +
-                    (", ..." if len(self._names) > 3 else "")))
+                "OK applies changes to {0} templates.".format(len(self._names)))
         elif self._names:
             self.txt_dialog_status.Text = (
-                "Iter 3a: visibility wired. OK applies show/hide changes to "
-                "template: {0}".format(self._names[0]))
+                "OK applies changes to template: {0}".format(self._names[0]))
         # OK button is now live for iter-3a (visibility writes)
         try:
             self.btn_dlg_ok.IsEnabled = True
@@ -2909,11 +2921,9 @@ class VgCategoriesDialog(forms.WPFWindow):
 
     def _default_status_text(self):
         if len(self._names) > 1:
-            return ("Iter 3b: visibility / halftone / transparency wired. "
-                    "Editing {0} templates.".format(len(self._names)))
+            return "Editing {0} templates.".format(len(self._names))
         if self._names:
-            return ("Iter 3b: visibility / halftone / transparency wired. "
-                    "Editing template: {0}".format(self._names[0]))
+            return "Editing template: {0}".format(self._names[0])
         return ""
 
     def _refresh_after_apply(self):
@@ -3000,15 +3010,14 @@ class VgImportsDialog(forms.WPFWindow):
         self._populate_lookups()
         self._populate_imports()
         self._wire_events()
+        _set_legend_mixed(self)
         # Footer status + enable OK
         if len(self._names) > 1:
             self.txt_imp_status.Text = (
-                "Iter 3a: visibility wired. OK applies show/hide changes to "
-                "{0} templates.".format(len(self._names)))
+                "OK applies changes to {0} templates.".format(len(self._names)))
         elif self._names:
             self.txt_imp_status.Text = (
-                "Iter 3a: visibility wired. OK applies show/hide changes "
-                "to template: {0}".format(self._names[0]))
+                "OK applies changes to template: {0}".format(self._names[0]))
         try:
             self.btn_imp_ok.IsEnabled = True
             self.btn_imp_ok.ToolTip = (
@@ -3462,11 +3471,9 @@ class VgImportsDialog(forms.WPFWindow):
 
     def _default_status_text(self):
         if len(self._names) > 1:
-            return ("Iter 3b: visibility / halftone / transparency wired. "
-                    "Editing {0} templates.".format(len(self._names)))
+            return "Editing {0} templates.".format(len(self._names))
         if self._names:
-            return ("Iter 3b: visibility / halftone / transparency wired. "
-                    "Editing template: {0}".format(self._names[0]))
+            return "Editing template: {0}".format(self._names[0])
         return ""
 
     def _refresh_after_apply(self):
@@ -3544,10 +3551,11 @@ class VgFiltersDialog(forms.WPFWindow):
         self._populate_lookups()
         self._populate_filters()
         self._wire_events()
+        _set_legend_mixed(self)
         if len(self._names) > 1:
             self.txt_flt_status.Text = (
-                "Iter 1 preview - filter changes will apply to {0} templates "
-                "once iter 3 wires it.".format(len(self._names)))
+                "Preview only — filter wiring is deferred. {0} templates would be affected on Apply."
+                .format(len(self._names)))
 
     def _populate_lookups(self):
         def fill(combo, items, default=0):
@@ -3621,7 +3629,6 @@ class VgLinksDialog(forms.WPFWindow):
         # Footer status / OK button enable
         if self._templates:
             self.txt_lnk_status.Text = (
-                "Iter 4a: link visibility mode wired. "
                 "Editing {0} template{1}.".format(
                     len(self._names), "" if len(self._names) == 1 else "s"))
         try:

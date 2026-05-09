@@ -99,10 +99,16 @@
         <Border DockPanel.Dock="Bottom" Background="White"
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,10">
             <Grid>
-                <TextBlock x:Name="txt_flt_status" HorizontalAlignment="Left" VerticalAlignment="Center"
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" x:Name="txt_flt_status"
+                           HorizontalAlignment="Left" VerticalAlignment="Center"
                            Foreground="#4A5568" FontStyle="Italic"
-                           Text="Iter 1: layout preview &#x2014; OK is disabled until iter 3."/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                           Margin="0,0,12,0" TextTrimming="CharacterEllipsis"
+                           Text=""/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_flt_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
                     <Button x:Name="btn_flt_ok" Content="OK" Style="{StaticResource PrimaryButton}"
                             IsEnabled="False" ToolTip="Wiring coming in iteration 3"/>
@@ -132,6 +138,26 @@
                                     ToolTip="Move filter down"/>
                         </StackPanel>
                     </Grid>
+                    <Border DockPanel.Dock="Top" Background="#F7FAFC" BorderBrush="#E2E8F0"
+                            BorderThickness="1" CornerRadius="3" Padding="8" Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Legend: " Style="{StaticResource HelperText}"
+                                       VerticalAlignment="Center"/>
+                            <CheckBox IsChecked="True" IsHitTestVisible="False" Focusable="False"
+                                      VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBlock Text="on every selected template" Style="{StaticResource HelperText}"
+                                       VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <CheckBox IsChecked="False" IsHitTestVisible="False" Focusable="False"
+                                      VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBlock Text="on none" Style="{StaticResource HelperText}"
+                                       VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <CheckBox x:Name="chk_legend_mixed" IsThreeState="True"
+                                      IsHitTestVisible="False" Focusable="False"
+                                      VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBlock Text="mixed (some but not all)" Style="{StaticResource HelperText}"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
                     <Grid DockPanel.Dock="Top" Background="#EDF2F7" Margin="0,0,0,4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>

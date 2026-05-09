@@ -123,10 +123,16 @@
         <Border DockPanel.Dock="Bottom" Background="White"
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,10">
             <Grid>
-                <TextBlock x:Name="txt_lnk_status" HorizontalAlignment="Left" VerticalAlignment="Center"
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" x:Name="txt_lnk_status"
+                           HorizontalAlignment="Left" VerticalAlignment="Center"
                            Foreground="#4A5568" FontStyle="Italic"
-                           Text="Iter 4a: link visibility mode wired."/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                           Margin="0,0,12,0" TextTrimming="CharacterEllipsis"
+                           Text=""/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_lnk_cancel" Content="Close" Style="{StaticResource SecondaryButton}"
                             ToolTip="Close the dialog. Each OK click ran its own Revit Transaction so anything you've already applied is saved."/>
                     <Button x:Name="btn_lnk_ok" Content="OK" Style="{StaticResource PrimaryButton}"

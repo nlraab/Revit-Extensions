@@ -247,12 +247,29 @@
              gets toggled in code; the slot height stays constant. -->
         <Border x:Name="bnr_bulk" DockPanel.Dock="Top" Visibility="Hidden"
                 Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="0,0,0,1"
-                Padding="20,10" Height="36">
-            <Grid>
+                Padding="20,8" Height="56">
+            <StackPanel VerticalAlignment="Center">
                 <TextBlock x:Name="txt_bulk_banner" Foreground="#744210" FontWeight="SemiBold"
-                           FontSize="12" VerticalAlignment="Center"
-                           Text="Bulk mode: editing 0 templates &#x2014; check the Apply column for each parameter you want to propagate."/>
-            </Grid>
+                           FontSize="12"
+                           Text="Bulk mode: editing 0 templates &#x2014; rows whose Value reads (varies) are skipped on Apply."/>
+                <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                    <TextBlock Text="Include checkbox: " Foreground="#744210" FontSize="11"
+                               VerticalAlignment="Center"/>
+                    <CheckBox IsChecked="True" IsHitTestVisible="False" Focusable="False"
+                              VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock Text="controlled on every selected template" Foreground="#744210"
+                               FontSize="11" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                    <CheckBox IsChecked="False" IsHitTestVisible="False" Focusable="False"
+                              VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock Text="not controlled" Foreground="#744210" FontSize="11"
+                               VerticalAlignment="Center" Margin="0,0,14,0"/>
+                    <CheckBox x:Name="chk_legend_mixed" IsThreeState="True"
+                              IsHitTestVisible="False" Focusable="False"
+                              VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock Text="mixed (some but not all)" Foreground="#744210" FontSize="11"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+            </StackPanel>
         </Border>
 
         <!-- ============= FOOTER ============= -->

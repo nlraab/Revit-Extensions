@@ -158,6 +158,33 @@ Define these in `<Window.Resources>`. Names are part of the convention — keep 
 - Default `CheckBox` — `Margin="0,3,0,3"`, `VerticalContentAlignment="Center"`
 - **`RadioButton`** — WPF's default radio button looks small and off-center next to text. Use the firm-standard custom template with a 14 px outer ellipse + 7 px inner dot, both centered, blue (`#2B6CB0`) when checked or hovered. Reference implementation lives in `Sheet Manager.pushbutton/script.py` (`<Style TargetType="RadioButton">` block); copy the whole `Style` (including `Setter Property="Template"`) into the new form's `<Window.Resources>`. Without this template, the radio dot is offset and undersized — every form with `RadioButton`s must include it.
 
+### Tri-state checkbox legend
+
+Any form that uses `IsThreeState="True"` checkboxes must include a small inline legend explaining what the three states mean — the filled middle state confuses users who haven't seen it before. Put the legend somewhere the user will read before interacting with the rows: the bulk-mode banner, a hint card under the search box, or a sub-line under the list's section header.
+
+**Use real `CheckBox` controls in the legend, not Unicode glyphs.** The Unicode ballot-box characters (☑/☐/▣) render at noticeably different sizes in Segoe UI — the user immediately reads "the empty box is smaller than the checked one" and gets confused. Embedding actual disabled `CheckBox`es makes the legend pixel-identical to the rows it explains. Pattern:
+
+```xml
+<StackPanel Orientation="Horizontal">
+    <TextBlock Text="Legend: " Style="{StaticResource HelperText}" VerticalAlignment="Center"/>
+    <CheckBox IsChecked="True" IsHitTestVisible="False" Focusable="False"
+              VerticalAlignment="Center" Margin="0,0,4,0"/>
+    <TextBlock Text="on every selected sheet" Style="{StaticResource HelperText}"
+               VerticalAlignment="Center" Margin="0,0,14,0"/>
+    <CheckBox IsChecked="False" IsHitTestVisible="False" Focusable="False"
+              VerticalAlignment="Center" Margin="0,0,4,0"/>
+    <TextBlock Text="on none" Style="{StaticResource HelperText}"
+               VerticalAlignment="Center" Margin="0,0,14,0"/>
+    <CheckBox x:Name="chk_legend_mixed" IsThreeState="True"
+              IsHitTestVisible="False" Focusable="False"
+              VerticalAlignment="Center" Margin="0,0,4,0"/>
+    <TextBlock Text="mixed (some but not all)" Style="{StaticResource HelperText}"
+               VerticalAlignment="Center"/>
+</StackPanel>
+```
+
+`IsThreeState="True"` alone starts a checkbox at False — push `IsChecked = None` from script after the form loads to make the indicator render in indeterminate state. Use the canonical name `chk_legend_mixed` so a single helper can find it. Reference: `_set_legend_mixed(form)` in `View Templates Manager.pushbutton/script.py` is called once at the end of every form's `__init__`. Swap the noun (`sheet`, `template`, `category`, etc.) for whatever the row represents.
+
 ### Mixed-font inline labels
 
 When a label and a code-like value need to render on the same line (e.g. `Storage: T:\path\to\file`), do **not** put two `TextBlock`s with different `FontFamily`s in a horizontal `StackPanel` — different fonts have different ascent metrics and a horizontal `StackPanel` aligns by top, so the value visibly floats above or below the label. Instead, use **one** `TextBlock` with `<Run>` elements:

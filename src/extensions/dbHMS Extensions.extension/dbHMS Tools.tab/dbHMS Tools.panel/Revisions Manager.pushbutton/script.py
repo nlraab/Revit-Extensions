@@ -5,7 +5,7 @@ Features:
   - Full parity with Revit's native Revisions dialog:
       * Seq, Rev #, Date, Description, Issued By, Issued To, Issued
       * Show  (Cloud and Tag / Tag / None)  — RevisionVisibility per revision
-      * Numbering (Per Project / Per Sheet) — RevisionNumberType per revision
+      * Numbering (Numeric / Alphanumeric / None) — sequence type per revision
   - Create new revisions / Delete revisions (with cloud / sheet check)
   - Reorder revisions (Move Up / Move Down)
   - Side-by-side sheet panel with multi-select:
@@ -42,6 +42,25 @@ try:
     _HAS_NUMBER_TYPE = True
 except ImportError:
     _HAS_NUMBER_TYPE = False
+
+# RevisionNumberingSequence is the modern (Revit 2022+) API: each revision points
+# to a sequence element via Revision.RevisionNumberingSequenceId. The sequence
+# element carries the actual settings (Numeric vs Alphanumeric, prefix, suffix,
+# etc.). Wrap the import so older Revit versions don't blow up at module load.
+try:
+    from Autodesk.Revit.DB import RevisionNumberingSequence
+    _HAS_NUMBERING_SEQUENCE = True
+except ImportError:
+    _HAS_NUMBERING_SEQUENCE = False
+
+# RevisionNumbering enum (PerProject / PerSheet) lives on the per-sequence
+# settings (NumericRevisionSettings / AlphanumericRevisionSettings) in modern
+# Revit. Wrap to stay safe across versions.
+try:
+    from Autodesk.Revit.DB import RevisionNumbering
+    _HAS_REVISION_NUMBERING = True
+except ImportError:
+    _HAS_REVISION_NUMBERING = False
 
 from Autodesk.Revit.UI import (
     TaskDialog, TaskDialogCommonButtons, TaskDialogResult
@@ -146,18 +165,219 @@ def revision_seq(rev):
 
 
 def revision_number(rev):
+    # Trust the Revit-managed parameter if it exists. When numbering is "None",
+    # Revit deliberately returns an empty string here — we must NOT fall back to
+    # SequenceNumber in that case (which would show a number that isn't real).
     try:
         p = rev.get_Parameter(BuiltInParameter.PROJECT_REVISION_REVISION_NUM)
         if p:
             v = p.AsString()
-            if v:
-                return v
+            return v if v is not None else ""
     except Exception:
         pass
+    # Parameter unavailable — last-resort fallback
     try:
         return str(rev.SequenceNumber)
     except Exception:
         return ""
+
+
+def _all_numbering_sequences(doc):
+    """Return list of every RevisionNumberingSequence element in the document.
+    Tries the documented static getter first, falls back to FilteredElementCollector."""
+    if not _HAS_NUMBERING_SEQUENCE:
+        return []
+    # Preferred: RevisionNumberingSequence.GetAllRevisionNumberingSequences(doc)
+    try:
+        ids = RevisionNumberingSequence.GetAllRevisionNumberingSequences(doc)
+        out = []
+        for eid in ids:
+            el = doc.GetElement(eid)
+            if el is not None:
+                out.append(el)
+        if out:
+            return out
+    except Exception:
+        pass
+    # Fallback: collector
+    try:
+        return list(FilteredElementCollector(doc).OfClass(RevisionNumberingSequence))
+    except Exception:
+        return []
+
+
+def _seq_choice_label(seq):
+    """Map a RevisionNumberingSequence element to "Numeric" / "Alphanumeric" / "None".
+    "None" is detected by name (Revit names the special non-numbering sequence "None")."""
+    try:
+        nm = (seq.Name or "").strip().lower()
+    except Exception:
+        nm = ""
+    if nm == "none":
+        return "None"
+    if _HAS_NUMBER_TYPE:
+        try:
+            if seq.NumberType == RevisionNumberType.Alphanumeric:
+                return "Alphanumeric"
+        except Exception:
+            pass
+    return "Numeric"
+
+
+def get_numbering_sequence_for_choice(doc, choice):
+    """Find the document's RevisionNumberingSequence element matching one of
+    "Numeric" / "Alphanumeric" / "None". Returns None if not found."""
+    for seq in _all_numbering_sequences(doc):
+        if _seq_choice_label(seq) == choice:
+            return seq
+    return None
+
+
+def get_revision_numbering_str(rev, doc):
+    """Return one of "Numeric" / "Alphanumeric" / "None" for a Revision element.
+    Tries the modern sequence-id API first, falls back to Revision.NumberType."""
+    # Modern API: RevisionNumberingSequenceId points to a sequence element.
+    try:
+        seq_id = rev.RevisionNumberingSequenceId
+        if seq_id is not None and seq_id != ElementId.InvalidElementId:
+            seq = doc.GetElement(seq_id)
+            if seq is not None:
+                return _seq_choice_label(seq)
+        # Invalid id — treat as None
+        return "None"
+    except AttributeError:
+        pass
+    except Exception:
+        pass
+    # Fallback: read Revision.NumberType directly. No real "None" support.
+    if _HAS_NUMBER_TYPE:
+        try:
+            if rev.NumberType == RevisionNumberType.Alphanumeric:
+                return "Alphanumeric"
+        except Exception:
+            pass
+    return "Numeric"
+
+
+def set_revision_numbering(rev, doc, choice):
+    """Set the numbering for a Revision to "Numeric", "Alphanumeric", or "None".
+    Caller is responsible for the surrounding Transaction. Raises Exception with
+    a clear message on failure (including the case where the API call appears to
+    succeed but the value doesn't actually change — silent no-op)."""
+
+    before = get_revision_numbering_str(rev, doc)
+
+    # Modern API: find the sequence element for the requested choice and assign it.
+    seq = get_numbering_sequence_for_choice(doc, choice)
+    if seq is not None:
+        try:
+            rev.RevisionNumberingSequenceId = seq.Id
+            after = get_revision_numbering_str(rev, doc)
+            if after == choice:
+                return
+            # Assignment didn't take — read-back doesn't match.
+            raise Exception(
+                "Set RevisionNumberingSequenceId to '{0}' (id={1}) but read-back "
+                "still reports '{2}'. Before: '{3}'.".format(
+                    choice, seq.Id, after, before))
+        except AttributeError:
+            # Property not settable — drop into legacy path below.
+            pass
+
+    # If "None" was requested but no "None" sequence exists, try clearing the id.
+    if choice == "None":
+        try:
+            rev.RevisionNumberingSequenceId = ElementId.InvalidElementId
+            after = get_revision_numbering_str(rev, doc)
+            if after == "None":
+                return
+            raise Exception(
+                "Cleared RevisionNumberingSequenceId but read-back reports '{0}' "
+                "(no 'None' sequence found in this project).".format(after))
+        except AttributeError:
+            pass
+
+    # Legacy fallback: Revision.NumberType (no None support).
+    if choice in ("Numeric", "Alphanumeric") and _HAS_NUMBER_TYPE:
+        target = (RevisionNumberType.Alphanumeric if choice == "Alphanumeric"
+                  else RevisionNumberType.Numeric)
+        try:
+            rev.NumberType = target
+            after = get_revision_numbering_str(rev, doc)
+            if after == choice:
+                return
+            raise Exception(
+                "Set Revision.NumberType to '{0}' but read-back reports '{1}'.".format(
+                    choice, after))
+        except AttributeError:
+            pass
+
+    # If we got here, no API path worked.
+    seqs_in_doc = _all_numbering_sequences(doc)
+    seq_summary = ", ".join(
+        "{0}({1})".format((s.Name or "?"), _seq_choice_label(s))
+        for s in seqs_in_doc) or "(none found)"
+    raise Exception(
+        "No working API to set numbering to '{0}'. Sequences in document: {1}. "
+        "Revit version may not support this operation.".format(choice, seq_summary))
+
+
+def get_numbering_scope(doc):
+    """Return "Per Project" or "Per Sheet" — the current scope used by the
+    numeric sequence. Alphanumeric is expected to match in normal use."""
+    if not _HAS_REVISION_NUMBERING:
+        return "Per Project"
+    seq = get_numbering_sequence_for_choice(doc, "Numeric")
+    if seq is None:
+        return "Per Project"
+    try:
+        s = seq.GetNumericRevisionSettings()
+        if s.Numbering == RevisionNumbering.PerSheet:
+            return "Per Sheet"
+        return "Per Project"
+    except Exception:
+        return "Per Project"
+
+
+def set_numbering_scope(doc, scope):
+    """Set the numbering scope (Per Project / Per Sheet) for both the Numeric
+    and Alphanumeric sequences so they stay in sync. Caller is responsible
+    for the surrounding Transaction. Raises Exception on failure."""
+    if not _HAS_REVISION_NUMBERING:
+        raise Exception("RevisionNumbering enum not available in this Revit version.")
+
+    target = (RevisionNumbering.PerSheet if scope == "Per Sheet"
+              else RevisionNumbering.PerProject)
+
+    applied_to = []
+    errors = []
+
+    # Numeric
+    num_seq = get_numbering_sequence_for_choice(doc, "Numeric")
+    if num_seq is not None:
+        try:
+            s = num_seq.GetNumericRevisionSettings()
+            s.Numbering = target
+            num_seq.SetNumericRevisionSettings(s)
+            applied_to.append("Numeric")
+        except Exception as ex:
+            errors.append("Numeric: {0}".format(str(ex)))
+
+    # Alphanumeric
+    alpha_seq = get_numbering_sequence_for_choice(doc, "Alphanumeric")
+    if alpha_seq is not None:
+        try:
+            s = alpha_seq.GetAlphanumericRevisionSettings()
+            s.Numbering = target
+            alpha_seq.SetAlphanumericRevisionSettings(s)
+            applied_to.append("Alphanumeric")
+        except Exception as ex:
+            errors.append("Alphanumeric: {0}".format(str(ex)))
+
+    if not applied_to:
+        raise Exception(
+            "Could not set scope on any sequence. Errors: {0}".format(
+                "; ".join(errors) if errors else "(no sequences found)"))
 
 
 def sheet_revision_summary(sheet):
@@ -229,15 +449,11 @@ class RevisionItem(INotifyPropertyChanged):
         except Exception:
             self._show_str = "Cloud and Tag"
 
-        # Numbering (RevisionNumberType)
-        if _HAS_NUMBER_TYPE:
-            try:
-                nt = rev.NumberType
-                self._numb_str = "Per Sheet" if nt == RevisionNumberType.PerSheet else "Per Project"
-            except Exception:
-                self._numb_str = "Per Project"
-        else:
-            self._numb_str = "Per Project"
+        # Numbering: Numeric / Alphanumeric / None (matches Revit native dialog)
+        try:
+            self._numb_str = get_revision_numbering_str(rev, self._doc)
+        except Exception:
+            self._numb_str = "Numeric"
 
         self._sheet_count = 0
         self._cloud_count = 0
@@ -382,26 +598,22 @@ class RevisionItem(INotifyPropertyChanged):
     def ShowOptions(self):
         return ["Cloud and Tag", "Tag", "None"]
 
-    # -- Numbering (RevisionNumberType) --
+    # -- Numbering: Numeric / Alphanumeric / None --
     def _g_numb(self): return self._numb_str
     def _s_numb(self, v):
-        if not _HAS_NUMBER_TYPE:
-            return
-        v = v or "Per Project"
+        v = v or "Numeric"
+        if v not in ("Numeric", "Alphanumeric", "None"):
+            v = "Numeric"
         if v == self._numb_str:
             return
-        numb_map = {
-            "Per Project": RevisionNumberType.PerProject,
-            "Per Sheet":   RevisionNumberType.PerSheet,
-        }
-        ntype = numb_map.get(v, RevisionNumberType.PerProject)
         try:
             with Transaction(self._doc, "Revisions: Set Numbering") as t:
                 t.Start()
-                self._rev.NumberType = ntype
+                set_revision_numbering(self._rev, self._doc, v)
                 t.Commit()
-            self._numb_str = v
-            self._notify("NumberingStr")
+            # Re-read everything from Revit — changing the sequence can also
+            # change Rev # (Revit auto-renumbers within each sequence).
+            self.refresh_from_revit()
         except Exception as ex:
             TaskDialog.Show("Edit Revision",
                 "Could not set Numbering:\n{0}".format(str(ex)))
@@ -410,7 +622,7 @@ class RevisionItem(INotifyPropertyChanged):
 
     @property
     def NumberingOptions(self):
-        return ["Per Project", "Per Sheet"]
+        return ["Numeric", "Alphanumeric", "None"]
 
     # -- Counts --
     def _g_sc(self): return self._sheet_count
@@ -863,15 +1075,32 @@ MAIN_XAML = """
     <Border Grid.Row="1" Background="White"
             BorderBrush="#E2E8F0" BorderThickness="0,0,0,1"
             Padding="16,10">
-      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <Button x:Name="btn_new"    Content="✚ New Revision" Style="{StaticResource PrimaryButton}"   Height="30" ToolTip="Create a new revision"/>
-        <Button x:Name="btn_delete" Content="🗑 Delete"      Style="{StaticResource DangerButton}"    Height="30" IsEnabled="False" ToolTip="Delete the selected revision"/>
-        <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
-        <Button x:Name="btn_up"     Content="⬆ Up"           Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision earlier in sequence"/>
-        <Button x:Name="btn_down"   Content="⬇ Down"         Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision later in sequence"/>
-        <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
-        <Button x:Name="btn_find"   Content="🔍 Find Clouds" Style="{StaticResource SecondaryButton}" Height="30" MinWidth="110" IsEnabled="False" ToolTip="Show every revision cloud assigned to the selected revision"/>
-      </StackPanel>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="btn_new"    Content="✚ New Revision" Style="{StaticResource PrimaryButton}"   Height="30" ToolTip="Create a new revision"/>
+          <Button x:Name="btn_delete" Content="🗑 Delete"      Style="{StaticResource DangerButton}"    Height="30" IsEnabled="False" ToolTip="Delete the selected revision"/>
+          <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
+          <Button x:Name="btn_up"     Content="⬆ Up"           Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision earlier in sequence"/>
+          <Button x:Name="btn_down"   Content="⬇ Down"         Style="{StaticResource SecondaryButton}" Height="30" MinWidth="60" IsEnabled="False" ToolTip="Move selected revision later in sequence"/>
+          <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
+          <Button x:Name="btn_find"   Content="🔍 Find Clouds" Style="{StaticResource SecondaryButton}" Height="30" MinWidth="110" IsEnabled="False" ToolTip="Show every revision cloud assigned to the selected revision"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="1" Background="#E2E8F0" Margin="12,4"/>
+          <TextBlock Text="Numbering scope:" Foreground="#4A5568" FontSize="11"
+                     VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <ComboBox x:Name="cb_scope" Width="120" Height="26"
+                    VerticalContentAlignment="Center" FontSize="12"
+                    ToolTip="Per Project: revision numbers are unique across the whole project.&#10;Per Sheet: numbers reset on each sheet.">
+            <ComboBoxItem Content="Per Project"/>
+            <ComboBoxItem Content="Per Sheet"/>
+          </ComboBox>
+        </StackPanel>
+      </Grid>
     </Border>
 
     <!-- SPLIT PANE -->
@@ -1029,14 +1258,14 @@ MAIN_XAML = """
                 </DataGridTemplateColumn.CellTemplate>
               </DataGridTemplateColumn>
 
-              <!-- Numbering (RevisionNumberType) — inline ComboBox -->
+              <!-- Numbering: Numeric / Alphanumeric / None — inline ComboBox -->
               <DataGridTemplateColumn Header="Numbering" Width="120" MinWidth="100" IsReadOnly="True">
                 <DataGridTemplateColumn.CellTemplate>
                   <DataTemplate>
                     <ComboBox SelectedItem="{Binding NumberingStr, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                               ItemsSource="{Binding NumberingOptions}"
                               Style="{StaticResource GridCombo}"
-                              ToolTip="Per Project  /  Per Sheet — how the revision number is assigned"/>
+                              ToolTip="Numeric / Alphanumeric / None — controls how this revision is numbered"/>
                   </DataTemplate>
                 </DataGridTemplateColumn.CellTemplate>
               </DataGridTemplateColumn>
@@ -1093,6 +1322,23 @@ MAIN_XAML = """
                        Text="No revision selected — click a revision on the left."
                        Foreground="#718096" FontSize="11" Margin="0,2,0,0"
                        TextWrapping="Wrap"/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+              <TextBlock Text="Legend: " Foreground="#718096" FontSize="11"
+                         VerticalAlignment="Center"/>
+              <CheckBox IsChecked="True" IsHitTestVisible="False" Focusable="False"
+                        VerticalAlignment="Center" Margin="0,0,4,0"/>
+              <TextBlock Text="on every sheet" Foreground="#718096" FontSize="11"
+                         VerticalAlignment="Center" Margin="0,0,14,0"/>
+              <CheckBox IsChecked="False" IsHitTestVisible="False" Focusable="False"
+                        VerticalAlignment="Center" Margin="0,0,4,0"/>
+              <TextBlock Text="on none" Foreground="#718096" FontSize="11"
+                         VerticalAlignment="Center" Margin="0,0,14,0"/>
+              <CheckBox x:Name="chk_legend_mixed" IsThreeState="True"
+                        IsHitTestVisible="False" Focusable="False"
+                        VerticalAlignment="Center" Margin="0,0,4,0"/>
+              <TextBlock Text="mixed (some but not all)" Foreground="#718096" FontSize="11"
+                         VerticalAlignment="Center"/>
+            </StackPanel>
           </StackPanel>
 
           <!-- Search + filter bar -->
@@ -1419,6 +1665,16 @@ class RevisionsManagerWindow(object):
         self._lbl_sheet_ct   = w.FindName("lbl_sheet_count")
         self._lbl_status     = w.FindName("lbl_status")
 
+        # The legend's "mixed" checkbox needs to render in the indeterminate
+        # state so the visual matches what a real tri-state row looks like.
+        # IsThreeState=True alone starts the box at False; push None here.
+        try:
+            chk_mixed = w.FindName("chk_legend_mixed")
+            if chk_mixed is not None:
+                chk_mixed.IsChecked = None
+        except Exception:
+            pass
+
         self._btn_new        = w.FindName("btn_new")
         self._btn_delete     = w.FindName("btn_delete")
         self._btn_up         = w.FindName("btn_up")
@@ -1428,6 +1684,7 @@ class RevisionsManagerWindow(object):
         self._btn_remove_sel = w.FindName("btn_remove_sel")
         self._btn_apply_all  = w.FindName("btn_apply_all")
         self._btn_remove_all = w.FindName("btn_remove_all")
+        self._cb_scope       = w.FindName("cb_scope")
 
         try:
             proj_info = doc.ProjectInformation
@@ -1447,6 +1704,7 @@ class RevisionsManagerWindow(object):
         self._apply_sheet_view()
         self._update_focus_caption()
         self._update_status()
+        self._sync_scope_combo()
 
         # Wire events
         self._txt_search.TextChanged    += self._on_search
@@ -1469,6 +1727,7 @@ class RevisionsManagerWindow(object):
         self._btn_remove_sel.Click += lambda s, e: self._bulk_apply_sel(False)
         self._btn_apply_all.Click  += lambda s, e: self._bulk_apply_all(True)
         self._btn_remove_all.Click += lambda s, e: self._bulk_apply_all(False)
+        self._cb_scope.SelectionChanged += self._on_scope_changed
 
         # Sheet checkbox click handler (per-row + group)
         self._sheet_grid.AddHandler(
@@ -1822,6 +2081,42 @@ class RevisionsManagerWindow(object):
         if self._focused is None:
             return
         FindCloudsDialog(self._w, self._focused, doc)
+
+    # ── Numbering scope (Per Project / Per Sheet) ────────────
+
+    def _sync_scope_combo(self):
+        """Set the scope ComboBox to match the project's current setting,
+        without firing a change event back at us."""
+        try:
+            current = get_numbering_scope(doc)
+        except Exception:
+            current = "Per Project"
+        idx = 1 if current == "Per Sheet" else 0
+        # Suppress the SelectionChanged side-effect during this initial sync.
+        self._scope_syncing = True
+        try:
+            self._cb_scope.SelectedIndex = idx
+        finally:
+            self._scope_syncing = False
+
+    def _on_scope_changed(self, sender, e):
+        if getattr(self, "_scope_syncing", False):
+            return
+        item = self._cb_scope.SelectedItem
+        if item is None:
+            return
+        new_scope = str(item.Content) if hasattr(item, "Content") else str(item)
+        try:
+            with Transaction(doc, "Revisions: Set Numbering Scope") as t:
+                t.Start()
+                set_numbering_scope(doc, new_scope)
+                t.Commit()
+            # Renumbering may have changed Rev # on every revision — reload.
+            self._reload_all()
+        except Exception as ex:
+            TaskDialog.Show("Numbering Scope",
+                "Could not set numbering scope:\n{0}".format(str(ex)))
+            self._sync_scope_combo()
 
     # ── Sheet checkbox / group selector ──────────────────────
 
