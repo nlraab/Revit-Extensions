@@ -76,6 +76,7 @@ from System.Windows.Input import Cursors, MouseButtonState, Key, MouseButton
 
 from pyrevit import revit, forms, script
 import dbhms_ui
+import dbhms_telemetry
 
 # Revit document / UI doc handles
 doc   = __revit__.ActiveUIDocument.Document
@@ -3431,4 +3432,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with dbhms_telemetry.session(__title__, script_path=__file__):
+        main()

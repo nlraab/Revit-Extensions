@@ -38,6 +38,7 @@ from System.Windows.Media import SolidColorBrush, Color, FontFamily
 
 from pyrevit import forms
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import config, persistence, project
 from clash_detect import linked
@@ -349,4 +350,5 @@ class SettingsForm(forms.WPFWindow):
         self.Close()
 
 
-SettingsForm().ShowDialog()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    SettingsForm().ShowDialog()

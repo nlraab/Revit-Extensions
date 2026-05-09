@@ -65,6 +65,7 @@ from System import EventHandler
 
 from pyrevit import forms
 import dbhms_ui
+import dbhms_telemetry
 
 # Revit document handles
 doc   = __revit__.ActiveUIDocument.Document
@@ -4710,4 +4711,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with dbhms_telemetry.session(__title__, script_path=__file__):
+        main()

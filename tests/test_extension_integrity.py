@@ -242,6 +242,63 @@ class ExtensionIntegrityTests(unittest.TestCase):
                 # Just confirms it's parseable - syntax check is covered elsewhere.
                 ast.parse(sub_init.read_text(encoding="utf-8"))
 
+    def test_dbhms_telemetry_lib_exists_and_exports_public_api(self):
+        # The shared telemetry recorder used by every pushbutton.
+        pkg = LIB_ROOT / "dbhms_telemetry"
+        init_file = pkg / "__init__.py"
+        impl_file = pkg / "telemetry.py"
+        self.assertTrue(init_file.exists(), "Missing dbhms_telemetry/__init__.py")
+        self.assertTrue(impl_file.exists(), "Missing dbhms_telemetry/telemetry.py")
+
+        # The package must re-export the public surface that the scripts depend on.
+        init_src = init_file.read_text(encoding="utf-8")
+        for name in ("session", "start", "end"):
+            self.assertIn(
+                name,
+                init_src,
+                "dbhms_telemetry/__init__.py is missing public name %r" % name,
+            )
+
+        # And the implementation must define them (under their real names).
+        impl_tree = ast.parse(impl_file.read_text(encoding="utf-8"))
+        defined = {
+            node.name
+            for node in ast.walk(impl_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+        for name in ("session", "start", "end", "Session"):
+            self.assertIn(
+                name,
+                defined,
+                "dbhms_telemetry/telemetry.py does not define %r" % name,
+            )
+
+    def test_every_pushbutton_records_telemetry(self):
+        # Every pushbutton script.py must wire dbhms_telemetry. The CLAUDE.md
+        # rule is: import the module and call either session() (modal tools)
+        # or start() (modeless tools, e.g. Walkthrough). This test fails the
+        # build if a new pushbutton ships without telemetry.
+        panels = (DBHMS_PANEL, CLASH_PANEL)
+        for panel in panels:
+            for pushbutton_dir in panel.glob("*.pushbutton"):
+                script = pushbutton_dir / "script.py"
+                if not script.exists():
+                    continue  # icon-only buttons (none today, but safe)
+                with self.subTest(pushbutton=pushbutton_dir.name):
+                    src = script.read_text(encoding="utf-8")
+                    self.assertIn(
+                        "import dbhms_telemetry",
+                        src,
+                        "%s does not import dbhms_telemetry" % pushbutton_dir.name,
+                    )
+                    has_session = "dbhms_telemetry.session(" in src
+                    has_start = "dbhms_telemetry.start(" in src
+                    self.assertTrue(
+                        has_session or has_start,
+                        "%s imports dbhms_telemetry but never calls session() or start()"
+                        % pushbutton_dir.name,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
