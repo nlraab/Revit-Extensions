@@ -40,6 +40,7 @@ from System.Windows.Media import SolidColorBrush, Color
 
 from pyrevit import forms
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import config, persistence, project
 from clash_core import categories as cat_module
@@ -881,4 +882,5 @@ class TestLibraryForm(forms.WPFWindow):
         self.Close()
 
 
-TestLibraryForm().ShowDialog()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    TestLibraryForm().ShowDialog()

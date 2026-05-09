@@ -97,6 +97,8 @@ from System.Windows.Interop import WindowInteropHelper
 import System.Diagnostics
 import System.Windows.Markup as Markup
 
+import dbhms_telemetry
+
 doc   = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
 
@@ -2291,4 +2293,5 @@ class RevisionsManagerWindow(object):
 # ═══════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════
-RevisionsManagerWindow()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    RevisionsManagerWindow()

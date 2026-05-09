@@ -71,6 +71,8 @@ import System.Windows.Markup as Markup
 from System.Windows.Interop import WindowInteropHelper
 import System.Diagnostics
 
+import dbhms_telemetry
+
 doc   = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
 
@@ -3296,4 +3298,5 @@ class SheetManagerWindow(object):
 # ═══════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════
-SheetManagerWindow()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    SheetManagerWindow()

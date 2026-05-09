@@ -63,6 +63,7 @@ from Autodesk.Revit.UI import IExternalEventHandler, ExternalEvent
 
 from pyrevit import forms, revit
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import persistence, project, users
 from clash_view import (
@@ -1114,13 +1115,42 @@ class WalkthroughForm(forms.WPFWindow):
 # ---------------------------------------------------------------------------
 # Entry — modeless Show, NOT ShowDialog
 # ---------------------------------------------------------------------------
+# Telemetry note: this is the only modeless tool. Show() returns
+# immediately, so we can't use the dbhms_telemetry.session() context
+# manager (it would close the session before the user actually finishes
+# walking through). Instead, we open the session manually, attach its
+# end() to the form's Closed event, and fail-fast on construction
+# errors. See lib/dbhms_telemetry/__init__.py for the rule.
+
+def _on_walkthrough_closed(sender, args):
+    try:
+        dbhms_telemetry.end(_TELEMETRY_SESSION, status='completed')
+    except Exception:
+        pass
+
 
 def _start():
     win = WalkthroughForm()
     global _ACTIVE_WINDOW
     _ACTIVE_WINDOW = win
+    win.Closed += _on_walkthrough_closed
     win.Show()
 
 
 _ACTIVE_WINDOW = None
-_start()
+_TELEMETRY_SESSION = dbhms_telemetry.start(__title__, script_path=__file__)
+try:
+    _start()
+except Exception:
+    import sys as _sys
+    _et, _ev, _ = _sys.exc_info()
+    dbhms_telemetry.end(
+        _TELEMETRY_SESSION,
+        status='failed',
+        error=(
+            getattr(_et, '__name__', None),
+            str(_ev) if _ev is not None else '',
+            traceback.format_exc(),
+        ),
+    )
+    raise

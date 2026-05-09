@@ -22,6 +22,7 @@ import traceback
 
 from pyrevit import revit, DB, forms, script
 import dbhms_ui
+import dbhms_telemetry
 
 # WPF / .NET imports for the dynamic form controls
 import clr  # noqa: F401
@@ -698,4 +699,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with dbhms_telemetry.session(__title__, script_path=__file__):
+        main()

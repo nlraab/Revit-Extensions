@@ -37,6 +37,7 @@ from System.Collections.Generic import List as NetList
 
 from pyrevit import forms
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import config, persistence, project, users, models, browser_filters, bulk_edit, history_format, filter_presets
 from clash_core.models import _now_iso
@@ -1524,4 +1525,5 @@ class _HistoryDialog(forms.WPFWindow):
         self.Close()
 
 
-ClashBrowserForm().ShowDialog()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    ClashBrowserForm().ShowDialog()

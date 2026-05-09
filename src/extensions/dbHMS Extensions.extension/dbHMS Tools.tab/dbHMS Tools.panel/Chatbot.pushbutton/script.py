@@ -76,6 +76,7 @@ from System.Windows.Input import Key, ModifierKeys, Keyboard, Cursors
 from pyrevit import revit, forms, script
 
 import dbhms_ui
+import dbhms_telemetry
 
 
 # ---------------------------------------------------------------------------
@@ -1495,4 +1496,5 @@ def main():
     ChatbotForm().ShowDialog()
 
 
-main()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    main()

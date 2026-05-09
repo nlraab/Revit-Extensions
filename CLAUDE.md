@@ -57,8 +57,64 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
    and duplicating the dialog markup would make any change a 10+ file
    edit.
 
+3. **`lib/dbhms_telemetry/`** — usage tracking. Every pushbutton
+   `script.py` records one `session_started` + one `session_ended`
+   JSON-Lines event per invocation (start/stop time, duration, user,
+   host, Revit version, doc title, error+traceback on failure) so
+   firm usage can be analyzed. Storage is
+   `H:\TOOLS\REVIT\dbHMS Custom Extensions\Data Traceback\<YYYY>\<MM>\<YYYY-MM-DD>_<USER>.jsonl`
+   with a local fallback at `%LOCALAPPDATA%\dbhms_telemetry\...` so
+   events are never lost when H: is unmapped. Telemetry I/O is fully
+   try/excepted — a failing write never breaks a tool. Exists because
+   EVERY tool needs identical recording + path logic; duplicating
+   would make a "change the storage path" tweak a 12-file edit. See
+   the Wiring section below for how each `script.py` plugs in.
+
 If a future tool wants the same treatment, document the exception here
 first.
+
+### Wiring telemetry into a new tool
+
+Every pushbutton's `script.py` must record its invocation. The shape
+depends on the entry point:
+
+**Modal tools** (the common case — `if __name__ == '__main__': main()`
+or module-level `XForm().ShowDialog()`): wrap the entry point in the
+`session()` context manager. It writes `session_started` on enter and
+`session_ended` (status `completed` or `failed` + traceback) on exit,
+then re-raises so pyRevit's normal error display still kicks in.
+
+```python
+import dbhms_telemetry
+
+# ...rest of the script...
+
+if __name__ == '__main__':
+    with dbhms_telemetry.session(__title__, script_path=__file__):
+        main()
+```
+
+or for module-level forms:
+
+```python
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    SettingsForm().ShowDialog()
+```
+
+**Modeless tools** (e.g. `Walkthrough.pushbutton`, where `Show()`
+returns immediately): the context manager would close the session
+before the user is done. Instead use the lower-level pair: open the
+session before constructing the form, attach `dbhms_telemetry.end()`
+to the form's `Closed` event, and wrap construction in a try/except
+that flips status to `failed` on error. Reference implementation
+lives in
+`Clash Detection.tab/Clash Detection.panel/Walkthrough.pushbutton/script.py`
+— copy that block, don't reinvent it.
+
+The `test_every_pushbutton_records_telemetry` integrity test enforces
+this: every `script.py` under both panels must `import dbhms_telemetry`
+and reference `dbhms_telemetry.session(` or `dbhms_telemetry.start(`.
+A new pushbutton without telemetry will fail the suite.
 
 **Tool-level READMEs:** some larger tools have their own `README.md` next to `script.py`. Read these before making serious changes inside that tool's folder; do not auto-load them outside that scope. Currently:
 - `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — Clash Detection architecture (see paragraph above).

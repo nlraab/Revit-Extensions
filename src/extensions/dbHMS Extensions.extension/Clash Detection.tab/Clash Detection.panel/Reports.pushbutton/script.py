@@ -32,6 +32,7 @@ from System.Diagnostics import Process
 
 from pyrevit import forms
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import config, persistence, project
 from clash_report import bcf, excel_summary
@@ -460,4 +461,5 @@ def _date_filter_cutoff(date_filter_text):
     return cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-ReportsForm().ShowDialog()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    ReportsForm().ShowDialog()

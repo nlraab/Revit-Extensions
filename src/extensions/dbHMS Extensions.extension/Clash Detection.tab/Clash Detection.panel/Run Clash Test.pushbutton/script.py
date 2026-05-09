@@ -43,6 +43,7 @@ from System.Windows.Threading import (
 
 from pyrevit import forms, script
 import dbhms_ui
+import dbhms_telemetry
 
 from clash_core import config, persistence, project, users, merge, dedupe
 from clash_core.models import _now_iso
@@ -800,4 +801,5 @@ class RunClashTestForm(forms.WPFWindow):
         self.Close()
 
 
-RunClashTestForm().ShowDialog()
+with dbhms_telemetry.session(__title__, script_path=__file__):
+    RunClashTestForm().ShowDialog()
