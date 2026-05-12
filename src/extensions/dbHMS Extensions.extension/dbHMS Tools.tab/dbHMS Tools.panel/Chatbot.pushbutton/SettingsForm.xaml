@@ -201,6 +201,21 @@
                     </StackPanel>
                 </Border>
 
+                <!-- Cost / safety card -->
+                <Border Style="{StaticResource CardBorder}">
+                    <StackPanel>
+                        <TextBlock Text="Cost / safety" Style="{StaticResource SectionHeader}"/>
+                        <TextBlock Style="{StaticResource HelperText}"
+                                   Text="Pre-send soft cap. If a single request's estimated cost exceeds this amount, the chatbot shows a one-click confirm before sending. Set to 0 to disable."/>
+                        <TextBlock Text="Soft cap (USD per request)" Style="{StaticResource FieldLabel}"/>
+                        <TextBox x:Name="txt_spend_threshold" Width="120"
+                                 HorizontalAlignment="Left"/>
+                        <TextBlock x:Name="txt_spend_threshold_hint"
+                                   Style="{StaticResource HelperText}" Margin="0,4,0,0"
+                                   Text="Default: $0.10. A Sonnet 4.6 turn typically costs $0.01-$0.05; Opus 4.7 turns can hit $0.30+."/>
+                    </StackPanel>
+                </Border>
+
                 <!-- System prompt card -->
                 <Border Style="{StaticResource CardBorder}">
                     <StackPanel>

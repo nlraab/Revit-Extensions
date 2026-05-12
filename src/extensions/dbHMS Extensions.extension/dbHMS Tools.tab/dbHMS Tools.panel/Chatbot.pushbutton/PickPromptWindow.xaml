@@ -1,0 +1,70 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pick elements"
+        Height="180" Width="520"
+        WindowStartupLocation="CenterScreen"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12">
+
+    <Window.Resources>
+        <Style x:Key="HelperText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#4A5568"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="140"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="MinWidth" Value="100"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- Slate header -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="16,10">
+            <TextBlock Text="Pick element(s) to attach"
+                       Foreground="White" FontSize="14" FontWeight="Bold"/>
+        </Border>
+
+        <!-- Buttons -->
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="16,10">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btn_cancel" Content="Cancel"
+                        Style="{StaticResource SecondaryButton}"/>
+                <Button x:Name="btn_done" Content="Attach selection"
+                        Style="{StaticResource PrimaryButton}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Body -->
+        <Border Padding="16,12">
+            <StackPanel>
+                <TextBlock Style="{StaticResource HelperText}"
+                           Text="Select element(s) in Revit any way you like - click in the canvas, click sheets/views in the Project Browser, or Ctrl-click for multi-select."/>
+                <TextBlock Style="{StaticResource HelperText}" Margin="0,6,0,0"
+                           Text="Click 'Attach selection' below when you're ready."/>
+            </StackPanel>
+        </Border>
+    </DockPanel>
+</Window>
