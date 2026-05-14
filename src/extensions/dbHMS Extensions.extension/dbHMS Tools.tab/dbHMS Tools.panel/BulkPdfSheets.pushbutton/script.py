@@ -200,9 +200,14 @@ def make_image_type(pdf_path, page_number, resolution_dpi, link=False):
 
 
 def place_image_centered(sheet, image_type, center):
-    """Place an ImageInstance of `image_type` centered on `sheet`."""
+    """Place an ImageInstance of `image_type` centered on `sheet`.
+
+    ImageInstance.Create signature: (Document, View, ElementId typeId,
+    ImagePlacementOptions) - the second arg is the View object itself,
+    NOT the view's ElementId.
+    """
     place_opts = DB.ImagePlacementOptions(center, DB.BoxPlacement.Center)
-    return DB.ImageInstance.Create(doc, sheet.Id, image_type.Id, place_opts)
+    return DB.ImageInstance.Create(doc, sheet, image_type.Id, place_opts)
 
 
 # --------------------------------------------------------------------------
