@@ -19,45 +19,48 @@ Revit Extensions/
     extensions/
       dbHMS Extensions.extension/
         dbHMS Tools.tab/
-          dbHMS Tools.panel/
+          dbHMS Tools.panel/                <- general productivity tools
             AlignViews.pushbutton/
             Revisions Manager.pushbutton/
             Sheet Manager.pushbutton/
             SheetSetup.pushbutton/
             View Range Helper.pushbutton/
             View Templates Manager.pushbutton/
-        Clash Detection.tab/
-          Clash Detection.panel/
+          Clash Detection.panel/            <- MEP clash coordination toolkit
             Settings.pushbutton/
             Test Library.pushbutton/
             Run Clash Test.pushbutton/
             Clash Browser.pushbutton/
             Reports.pushbutton/
             Walkthrough.pushbutton/
+            README.md                       <- panel-specific architecture
         lib/
-          clash_core/                    <- shared data model + persistence
-          clash_detect/                  <- detection algorithms
-          clash_report/                  <- BCF / XLSX / HTML builders
-          clash_view/                    <- 3D view + walkthrough helpers
-          dbhms_ui/                      <- shared friendly popup dialog
+          clash_core/                       <- shared data model + persistence
+          clash_detect/                     <- detection algorithms
+          clash_report/                     <- BCF / XLSX / HTML builders
+          clash_view/                       <- 3D view + walkthrough helpers
+          dbhms_ui/                         <- shared friendly popup dialog
   tests/
     test_extension_integrity.py
-    test_clash_*.py                       <- pure-data unit tests for clash modules
-    test_walkthrough_*.py                 <- pure-data unit tests for walkthrough modules
+    test_clash_*.py                         <- pure-data unit tests for clash modules
+    test_walkthrough_*.py                   <- pure-data unit tests for walkthrough modules
   scripts/
     test.ps1
     build.ps1
     deploy.ps1
   run_tests.ps1
-  CLAUDE.md                                <- instructions for AI-assisted development
+  CLAUDE.md                                  <- instructions for AI-assisted development
   README.md
 ```
 
 ## Components
 
-Current extension package: `dbHMS Extensions.extension`
+The extension ships a single Revit ribbon tab — **dbHMS Tools** — with
+two panels.
 
-### dbHMS Tools tab
+### dbHMS Tools panel
+
+General productivity tools:
 
 - **Align Views**: align viewport/title positions to a master viewport
 - **Sheet Setup**: generate sheets/views in bulk from discipline/level matrices
@@ -66,7 +69,7 @@ Current extension package: `dbHMS Extensions.extension`
 - **Revisions Manager**: create/reorder/edit revisions and assign across sheets
 - **View Range Helper**: visual editor for plan view range planes
 
-### Clash Detection tab
+### Clash Detection panel
 
 A complete clash-coordination toolkit. Six pushbuttons working against a
 shared per-project JSON database under a configurable shared root:
@@ -91,9 +94,9 @@ shared per-project JSON database under a configurable shared root:
   PNG render export.
 
 Architecture, data model, and full tool documentation are in
-[Clash Detection.tab/README.md](src/extensions/dbHMS%20Extensions.extension/Clash%20Detection.tab/README.md).
-Read that before making serious changes anywhere under `Clash Detection.tab/`
-or `lib/clash_*/`.
+[Clash Detection.panel/README.md](src/extensions/dbHMS%20Extensions.extension/dbHMS%20Tools.tab/Clash%20Detection.panel/README.md).
+Read that before making serious changes anywhere under
+`Clash Detection.panel/` or `lib/clash_*/`.
 
 ### Shared UI helper
 

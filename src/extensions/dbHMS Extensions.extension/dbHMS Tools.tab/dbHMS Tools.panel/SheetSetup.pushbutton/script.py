@@ -473,6 +473,8 @@ class ModelSetupForm(forms.WPFWindow):
         """One row per level: [checkbox] [Revit name (read-only)] [label override]."""
         self.pnl_levels.Children.Clear()
         self._level_rows = []
+        cached_labels  = self._cfg.get('level_labels', {})  or {}
+        cached_checked = self._cfg.get('level_checked', {}) or {}
         for idx, level in enumerate(self._proj['levels'], start=1):
             row = Grid()
             row.Margin = Thickness(0, 2, 0, 2)
@@ -484,8 +486,15 @@ class ModelSetupForm(forms.WPFWindow):
 
             cb = CheckBox()
             cb.VerticalAlignment = VerticalAlignment.Center
-            p = level.get_Parameter(DB.BuiltInParameter.LEVEL_IS_BUILDING_STORY)
-            cb.IsChecked = bool(p.AsInteger()) if p else True
+            uid = level.UniqueId
+            # Restore the user's last checked/unchecked state for this level
+            # if we have one cached. Otherwise fall back to the Revit default
+            # (building-story levels start checked, others unchecked).
+            if uid in cached_checked:
+                cb.IsChecked = bool(cached_checked[uid])
+            else:
+                p = level.get_Parameter(DB.BuiltInParameter.LEVEL_IS_BUILDING_STORY)
+                cb.IsChecked = bool(p.AsInteger()) if p else True
             Grid.SetColumn(cb, 0)
             row.Children.Add(cb)
 
@@ -501,8 +510,7 @@ class ModelSetupForm(forms.WPFWindow):
             label_box = TextBox()
             # Default to the actual Revit level name. If we have a cached
             # label override for this level (from this Revit session), use it.
-            cached_labels = self._cfg.get('level_labels', {}) or {}
-            cached = cached_labels.get(level.UniqueId)
+            cached = cached_labels.get(uid)
             label_box.Text = cached if cached else (level.Name or '')
             label_box.ToolTip = (
                 'How this level reads on sheets and views. '
@@ -959,7 +967,14 @@ class ModelSetupForm(forms.WPFWindow):
             plan, active_levels, defaults, discipline_context)
         popup.Owner = self
         popup.ShowDialog()
-        # popup mutates plan dict directly on Apply
+        # popup mutates the plan dict directly on Apply - persist immediately
+        # so popup-edited overrides survive even if the parent form is later
+        # killed without a clean close (Revit crash, etc.).
+        try:
+            self._read_form_into_cfg()
+            _save_project_state(self._cfg)
+        except Exception:
+            pass
 
     # ---- WPF helpers ------------------------------------------------------
 
@@ -997,15 +1012,22 @@ class ModelSetupForm(forms.WPFWindow):
             None if sel is None or sel.Tag is None
             else _room_tag_label(sel.Tag))
 
-        # Level label overrides (uniqueid -> label_text), so we can restore
-        # what the user typed when the form is reopened in the same session.
+        # Per-level state: which levels the user has checked, and any
+        # custom label text they typed. Both are keyed by Revit UniqueId so
+        # they survive form close/reopen and Revit restarts.
         level_labels = self._cfg.get('level_labels')
         if not isinstance(level_labels, dict):
             level_labels = {}
             self._cfg['level_labels'] = level_labels
+        level_checked = self._cfg.get('level_checked')
+        if not isinstance(level_checked, dict):
+            level_checked = {}
+            self._cfg['level_checked'] = level_checked
         for r in self._level_rows:
             try:
-                level_labels[r['level'].UniqueId] = (r['label_box'].Text or '')
+                uid = r['level'].UniqueId
+                level_labels[uid]  = (r['label_box'].Text or '')
+                level_checked[uid] = bool(r['cb'].IsChecked)
             except Exception:
                 pass
 

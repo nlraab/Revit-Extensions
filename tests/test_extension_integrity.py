@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_ROOT = ROOT / "src" / "extensions" / "dbHMS Extensions.extension"
 
 DBHMS_PANEL = EXTENSION_ROOT / "dbHMS Tools.tab" / "dbHMS Tools.panel"
-CLASH_PANEL = EXTENSION_ROOT / "Clash Detection.tab" / "Clash Detection.panel"
+# Clash Detection used to be its own tab; it now lives as a panel
+# inside dbHMS Tools.tab (Iter 16 restructure — single-tab layout).
+CLASH_PANEL = EXTENSION_ROOT / "dbHMS Tools.tab" / "Clash Detection.panel"
 LIB_ROOT = EXTENSION_ROOT / "lib"
 
 

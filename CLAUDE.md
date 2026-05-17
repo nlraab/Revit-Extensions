@@ -36,17 +36,18 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
 
 **Documented exceptions to "no shared modules":**
 
-1. **`lib/clash_*/`** — the `Clash Detection.tab/` tool uses an
-   extension-level `lib/` folder (`dbHMS Extensions.extension/lib/clash_*/`)
-   shared across its six pushbuttons. Clash detection is a single coherent
-   system — six buttons read and write the same JSON database, share the
-   same data model, and use the same detection algorithms; duplicating
-   thousands of lines across them would be unworkable. pyRevit auto-adds
-   extension-level `lib/` to `sys.path`. Architecture, data model, and
-   storage layout are documented in
-   `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md`
+1. **`lib/clash_*/`** — the **`Clash Detection.panel/`** (inside
+   `dbHMS Tools.tab/`) uses an extension-level `lib/` folder
+   (`dbHMS Extensions.extension/lib/clash_*/`) shared across its six
+   pushbuttons. Clash detection is a single coherent system — six
+   buttons read and write the same JSON database, share the same
+   data model, and use the same detection algorithms; duplicating
+   thousands of lines across them would be unworkable. pyRevit
+   auto-adds extension-level `lib/` to `sys.path`. Architecture, data
+   model, and storage layout are documented in
+   `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/Clash Detection.panel/README.md`
    — read that before making serious changes anywhere under
-   `Clash Detection.tab/` or `lib/clash_*/`.
+   `Clash Detection.panel/` or `lib/clash_*/`.
 
 2. **`lib/dbhms_ui/`** — shared UI helpers used by every tool in the
    repo. Currently exports `dbhms_ui.info(message, title=...)`, the
@@ -108,7 +109,7 @@ session before constructing the form, attach `dbhms_telemetry.end()`
 to the form's `Closed` event, and wrap construction in a try/except
 that flips status to `failed` on error. Reference implementation
 lives in
-`Clash Detection.tab/Clash Detection.panel/Walkthrough.pushbutton/script.py`
+`dbHMS Tools.tab/Clash Detection.panel/Walkthrough.pushbutton/script.py`
 — copy that block, don't reinvent it.
 
 The `test_every_pushbutton_records_telemetry` integrity test enforces
@@ -117,7 +118,7 @@ and reference `dbhms_telemetry.session(` or `dbhms_telemetry.start(`.
 A new pushbutton without telemetry will fail the suite.
 
 **Tool-level READMEs:** some larger tools have their own `README.md` next to `script.py`. Read these before making serious changes inside that tool's folder; do not auto-load them outside that scope. Currently:
-- `src/extensions/dbHMS Extensions.extension/Clash Detection.tab/README.md` — Clash Detection architecture (see paragraph above).
+- `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/Clash Detection.panel/README.md` — Clash Detection architecture (see paragraph above).
 - `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/dbHMS Tools.panel/View Templates Manager.pushbutton/README.md` — multi-XAML structure, iteration plan, Revit API mapping, documented `LinkVisibility.Custom` API limitation. The tool ships 5 XAML files (main + 4 sub-dialogs) and is being built iteration-by-iteration; iter-1 is a UI shell with mock sub-dialog data and disabled Apply.
 
 ### Build / deploy model

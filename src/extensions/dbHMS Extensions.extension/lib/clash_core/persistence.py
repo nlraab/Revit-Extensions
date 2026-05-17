@@ -50,7 +50,7 @@ def _require_shared_root():
     if not root:
         raise SharedFolderNotConfigured(
             "Shared clash-data folder is not configured. "
-            "Open Settings (Clash Detection tab) and pick a folder."
+            "Open Settings (Clash Detection panel on the dbHMS Tools tab) and pick a folder."
         )
     return root
 

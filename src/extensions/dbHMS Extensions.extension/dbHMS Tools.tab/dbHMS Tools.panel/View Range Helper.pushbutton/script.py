@@ -851,7 +851,24 @@ class ViewRangeHelperForm(forms.WPFWindow):
         # Section vertical EXTENT — what the user wants to SEE. The
         # section is rendered with this extent, and the dashed extent
         # lines sit at the literal top/bottom of the rendered image.
-        if self.all_levels:
+        #
+        # Default to a TIGHT window around the plan's associated level
+        # (+15' above, -10' below), not the whole project. On tall
+        # buildings the full level stack reads as a cluttered mess
+        # where the plane lines for THIS view's range get lost among
+        # 30+ other levels; framing to just this floor's neighborhood
+        # keeps the cut / top / bottom / view-depth lines big and
+        # readable. The user can still drag the dashed extent handles
+        # at the section's right edge up or down to see more of the
+        # building when they need to.
+        if self.assoc_level is not None:
+            lvl_z = float(self.assoc_level.Elevation)
+            self.section_z_top = lvl_z + 15.0
+            self.section_z_bot = lvl_z - 10.0
+        elif self.all_levels:
+            # No associated level on this view (rare, e.g. some
+            # template-only contexts) — fall back to bracketing the
+            # full project so something sensible shows.
             self.section_z_top = proj_z_max + 15.0
             self.section_z_bot = proj_z_min - 4.0
         else:
