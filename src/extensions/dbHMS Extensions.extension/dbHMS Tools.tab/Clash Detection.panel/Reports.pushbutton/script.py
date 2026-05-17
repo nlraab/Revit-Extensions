@@ -7,7 +7,7 @@ per clash (markup.bcf + viewpoint.bcfv + snapshot.png), and writes it
 to the chosen output folder. The clash_report module handles the actual
 file-format work; this script is the form glue.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Reports'

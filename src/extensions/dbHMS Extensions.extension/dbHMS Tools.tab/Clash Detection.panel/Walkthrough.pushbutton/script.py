@@ -25,7 +25,7 @@ Architecture:
     measured as deltas, cursor is recentered every frame so the user
     can drag indefinitely without hitting screen edges.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Walk-\nthrough'

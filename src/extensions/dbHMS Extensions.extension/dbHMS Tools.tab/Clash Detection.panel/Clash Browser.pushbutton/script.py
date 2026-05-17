@@ -14,7 +14,7 @@ clash_view modules that haven't landed yet.
 If no clashes have been detected yet, the form shows an empty state with
 a hint to open Run Clash Test.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Clash\nBrowser'
@@ -1137,20 +1137,23 @@ class ClashBrowserForm(forms.WPFWindow):
         try:
             for tab in ribbon.Tabs:
                 try:
-                    tab_title = str(getattr(tab, "Title", "") or "")
-                except Exception:
-                    tab_title = ""
-                # Scope to the Clash Detection tab — defends against
-                # any other tab eventually adding a "Walkthrough"
-                # button (e.g. third-party add-ins).
-                if "Clash Detection" not in tab_title:
-                    continue
-                try:
                     for panel in tab.Panels:
+                        # Scope to the Clash Detection PANEL by name
+                        # (it lives inside dbHMS Tools tab now —
+                        # post-Iter-16 restructure — so a tab-title
+                        # filter would miss it). Matching at the panel
+                        # level also defends against any other panel
+                        # eventually adding a "Walkthrough" button.
                         try:
                             source = panel.Source
                             if source is None:
                                 continue
+                            panel_title = str(getattr(source, "Title", "") or "")
+                        except Exception:
+                            continue
+                        if "Clash Detection" not in panel_title:
+                            continue
+                        try:
                             for item in source.Items:
                                 text = self._ribbon_item_text(item)
                                 if not text:

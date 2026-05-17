@@ -7,8 +7,8 @@ a linked structural model), so engineers don't have to leave Revit to find,
 discuss, assign, and resolve interferences.
 
 > **Read this file before making serious changes** to anything under
-> `Clash Detection.tab/` or `lib/clash_*/`. It describes the architecture
-> the rest of the code is shaped around.
+> `dbHMS Tools.tab/Clash Detection.panel/` or `lib/clash_*/`. It
+> describes the architecture the rest of the code is shaped around.
 
 ---
 
@@ -452,12 +452,14 @@ pushbuttons in this order (controlled by the `layout:` key in
 
 ```
 src/extensions/dbHMS Extensions.extension/
-    Clash Detection.tab/
-        README.md                            <- this file
+    dbHMS Tools.tab/
+        dbHMS Tools.panel/                   <- general productivity tools
+            (AlignViews, Sheet Manager, etc. — not part of this README)
         Clash Detection.panel/
+            README.md                        <- this file
             bundle.yaml                      <- controls toolbar button order via `layout:` key
             Run Clash Test.pushbutton/
-                script.py                    <- entry point (currently "coming soon")
+                script.py                    <- entry point
                 icon.png                     <- 96x96 toolbar icon
             Clash Browser.pushbutton/
                 script.py
@@ -594,8 +596,9 @@ Hand this section to your engineers verbatim:
    * a OneDrive / SharePoint synced folder, as long as everyone syncs it
 2. **Make sure that folder exists.** It needs to be writable by everyone
    who'll run clash tests; read-only is fine for view-only roles.
-3. **Open Revit and click any button on the Clash Detection tab.** The
-   first time, you'll be asked to point at the shared folder.
+3. **Open Revit and click any button on the Clash Detection panel
+   (under the dbHMS Tools tab).** The first time, you'll be asked to
+   point at the shared folder.
 4. **Done.** Every project you open will get its own subfolder under that
    shared root automatically; you never have to set anything per project.
 

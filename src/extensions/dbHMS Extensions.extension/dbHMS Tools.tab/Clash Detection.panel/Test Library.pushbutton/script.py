@@ -17,7 +17,7 @@ Disabled overrides (a global test_id added to disabled_test_ids for one
 project) are still display-only - the broad firm defaults don't lend
 themselves to per-project disabling so wiring that flow is deferred.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Test\nLibrary'
@@ -259,7 +259,7 @@ class TestLibraryForm(forms.WPFWindow):
         self.Loaded -= self._show_first_run_alert
         dbhms_ui.info(
             "The Test Library can't load:\n\n{}\n\n"
-            "Open Settings (Clash Detection tab) and pick a shared "
+            "Open Settings (Clash Detection panel on the dbHMS Tools tab) and pick a shared "
             "clash-data folder, then come back.".format(self._setup_message),
             title='Setup needed',
         )

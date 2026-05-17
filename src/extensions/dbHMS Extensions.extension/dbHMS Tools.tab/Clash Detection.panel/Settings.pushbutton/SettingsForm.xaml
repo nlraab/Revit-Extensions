@@ -196,7 +196,7 @@
                             <TextBlock Text="dbHMS Clash Detection " Foreground="#2D3748" FontWeight="SemiBold"/>
                             <TextBlock Text="v0.1 (UI mockup)" Foreground="#718096"/>
                         </StackPanel>
-                        <TextBlock Text="Architecture and feature roadmap: see Clash Detection.tab/README.md in the deployed extension folder."
+                        <TextBlock Text="Architecture and feature roadmap: see dbHMS Tools.tab/Clash Detection.panel/README.md in the deployed extension folder."
                                    Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
                         <Button x:Name="btn_open_readme" Content="Open README"
                                 Style="{StaticResource SecondaryButton}"

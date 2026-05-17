@@ -11,7 +11,7 @@ new clashes.json.
 Detection currently blocks the UI while it runs. Typical projects (under
 a few thousand elements per side) finish in seconds.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Run\nClash Test'
@@ -449,7 +449,7 @@ class RunClashTestForm(forms.WPFWindow):
         if not self._real_data:
             dbhms_ui.info(
                 "Can't run - no saved test library yet.\n\n"
-                "Open Test Library (Clash Detection tab) once. It will auto-seed "
+                "Open Test Library (Clash Detection panel on the dbHMS Tools tab) once. It will auto-seed "
                 "the firm-default tests from the shipped defaults file.",
                 title='Setup needed',
             )
@@ -744,20 +744,23 @@ class RunClashTestForm(forms.WPFWindow):
         try:
             for tab in ribbon.Tabs:
                 try:
-                    tab_title = str(getattr(tab, "Title", "") or "")
-                except Exception:
-                    tab_title = ""
-                # Only walk the Clash Detection tab — keeps us out of
-                # pyRevit's own "Settings" button, which would
-                # otherwise match first.
-                if "Clash Detection" not in tab_title:
-                    continue
-                try:
                     for panel in tab.Panels:
+                        # Scope to the Clash Detection PANEL by name
+                        # (Iter 16 — the panel lives inside dbHMS
+                        # Tools tab now, so a tab-title filter would
+                        # miss it). Panel-level scoping ALSO keeps
+                        # us out of pyRevit's own "Settings" button,
+                        # which lives in a different panel.
                         try:
                             source = panel.Source
                             if source is None:
                                 continue
+                            panel_title = str(getattr(source, "Title", "") or "")
+                        except Exception:
+                            continue
+                        if "Clash Detection" not in panel_title:
+                            continue
+                        try:
                             for item in source.Items:
                                 text = None
                                 for attr in ("Text", "AutomationName",

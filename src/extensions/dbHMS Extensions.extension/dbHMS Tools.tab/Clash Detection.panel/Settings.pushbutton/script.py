@@ -9,7 +9,7 @@ role mapping) save to <shared>/<project-hash>/project.json. The link-mapping
 rows are built dynamically from the live RevitLinkInstance enumeration so
 they always reflect what's loaded right now.
 
-See Clash Detection.tab/README.md for the architecture.
+See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
 """
 
 __title__  = 'Settings'
