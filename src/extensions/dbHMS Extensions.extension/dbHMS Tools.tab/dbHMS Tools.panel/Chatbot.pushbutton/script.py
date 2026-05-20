@@ -108,10 +108,18 @@ from Autodesk.Revit.DB import (
     FilteredElementCollector, ElementId, Element,
     ViewSheet, ViewSchedule, View, Viewport, Category, StorageType,
     Transaction, FamilySymbol, ViewDuplicateOption,
-    ViewPlan, View3D, ViewFamilyType, ViewFamily, Level, XYZ,
+    ViewPlan, View3D, ViewFamilyType, ViewFamily, Level, XYZ, UV,
+    Phase,
     ScheduleFilter, ScheduleFilterType,
     ImageExportOptions, ImageFileType, ImageResolution,
     ZoomFitType, ExportRange,
+    PDFExportOptions, DWGExportOptions, DWFExportOptions,
+    IFCExportOptions, IFCVersion,
+    NavisworksExportOptions,
+    FBXExportOptions,
+    GBXMLExportOptions,
+    ViewScheduleExportOptions, ExportTextQualifier,
+    ACADVersion,
     RevitLinkInstance, RevitLinkType, OverrideGraphicSettings,
     IndependentTag, TagMode, TagOrientation, Reference,
     TextNote, TextNoteType,
@@ -119,8 +127,31 @@ from Autodesk.Revit.DB import (
     ElementParameterFilter, FilterRule,
     Color as RevitColor,
     ElementTransformUtils, Plane, Line, Group,
+    Dimension, DimensionType, ReferenceArray,
+    Grid as RevitGrid,
+    Revision, RevisionCloud, RevisionVisibility, RevisionNumberType,
+    SpotDimensionType,
+    DetailCurve, FilledRegion, FilledRegionType, CurveLoop,
+    UnitUtils,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
+from Autodesk.Revit.DB.Mechanical import (
+    Space, Zone as MechZone, SpaceType as SpaceTypeEnum, SpaceSet,
+    MechanicalSystem, MechanicalSystemType,
+    DuctInsulation, DuctInsulationType,
+    DuctLining, DuctLiningType,
+    Duct,
+)
+from Autodesk.Revit.DB.Plumbing import (
+    PipingSystem, PipingSystemType,
+    PipeInsulation, PipeInsulationType,
+    Pipe,
+)
+from Autodesk.Revit.DB.Electrical import (
+    ElectricalSystem,
+    ElectricalSystemType,
+)
+from Autodesk.Revit.DB.Architecture import Room
 from Autodesk.Revit.UI import IExternalEventHandler, ExternalEvent
 from Autodesk.Revit.UI.Selection import ObjectType
 from Autodesk.Revit.Exceptions import OperationCanceledException
@@ -207,6 +238,12 @@ DEFAULT_SYSTEM_PROMPT = (
     "guess what's in the model when a tool can tell you.\n"
     "\n"
     "Tool-use guidelines:\n"
+    "  - When a tool result includes a `diagnostic_attempts` / "
+    "`diagnostic_log_path` / `remediation_hint` field, paste those "
+    "values VERBATIM into your reply as a bulleted code block. The "
+    "user is debugging a low-level Revit API issue and the exact "
+    "exception text + the log file path are required to fix it. "
+    "Do NOT paraphrase or summarize the attempts.\n"
     "  - For 'what's selected?' use get_selection. Don't ask the user "
     "for the element id when they likely just want to know about what "
     "they've already clicked.\n"
@@ -247,6 +284,32 @@ DEFAULT_SYSTEM_PROMPT = (
     "  - group_elements / ungroup_elements : bundle / release element groups\n"
     "  - array_elements_linear : N copies in a line, each offset by translation\n"
     "  - array_elements_radial : N copies spaced around an axis\n"
+    "  - place_grid / place_level : create grid lines + levels\n"
+    "  - place_dimension : linear/aligned dimension across 2+ elements in a view\n"
+    "  - place_spot_elevation : spot elevation tag on an element\n"
+    "  - place_detail_line / place_filled_region : view-only annotation lines + filled areas\n"
+    "  - list_revisions / create_revision / update_revision : manage the revision list\n"
+    "  - place_revision_cloud / assign_revisions_to_clouds : draw revision clouds + reassign them\n"
+    "  - add_revisions_to_sheets / remove_revisions_from_sheets : associate revisions with sheets WITHOUT drawing clouds\n"
+    "  - list_spaces / list_rooms : enumerate MEP Spaces and host arch Rooms\n"
+    "  - create_spaces_from_link_rooms : bulk-create MEP Spaces from the arch link's rooms (the MEP setup move)\n"
+    "  - create_room : place a single Room manually at explicit XY (single-point)\n"
+    "  - place_rooms_on_level : auto-place rooms in every enclosed boundary on a level (the right tool for 'add rooms based on the layout')\n"
+    "  - get_space_loads / get_zone_loads : read computed heating + cooling loads\n"
+    "  - get_room_finishes_from_arch_link : pull Floor / Ceiling / Wall / Base finishes from arch link\n"
+    "  - set_space_type : set energy occupancy category on Spaces\n"
+    "  - list_hvac_zones / create_hvac_zone / add_spaces_to_zone : manage HVAC zones\n"
+    "  - export_to_pdf / export_to_dwg / export_to_dwfx : sheet + view export\n"
+    "  - export_to_ifc / export_to_nwc : whole-document coordination handoff\n"
+    "  - export_to_fbx / export_to_gbxml : visualization handoff + energy analysis input\n"
+    "  - export_view_image_to_file : PNG/JPG/BMP/TIFF to disk\n"
+    "  - export_schedule_to_csv : schedule to CSV for Excel takeoff\n"
+    "  - list_systems / get_system_info : enumerate MEP systems + inspect details\n"
+    "  - list_connectors_for_element / get_unconnected_terminals : diagnose system membership\n"
+    "  - get_pipe_duct_sizes : read sizes + flow on duct/pipe/cable tray elements\n"
+    "  - create_mech_system / create_pipe_system / create_electrical_circuit : build new systems\n"
+    "  - add_element_to_system / remove_element_from_system : edit system membership\n"
+    "  - add_insulation / add_lining : duct + pipe insulation, duct lining (inches input)\n"
     "\n"
     "Linked models (v4.1 - arch + structural awareness):\n"
     "  dbHMS works MEP in a host .rvt with a linked architectural "
@@ -363,6 +426,122 @@ DEFAULT_SYSTEM_PROMPT = (
     "axis_direction={x:0,y:0,z:1} for a horizontal spin. To rotate "
     "MANY elements each around their own center, loop: one "
     "rotate_elements call per element with a different axis_point.\n"
+    "  - For revision clouds and filled regions, the boundary is a "
+    "polygon: a list of XYZ points where the LAST segment auto-closes "
+    "back to the first. For a rectangle, pass 4 corners (no need to "
+    "repeat the first point at the end).\n"
+    "  - place_dimension dimensions BETWEEN elements (grids, "
+    "columns, walls, ducts) along a dimension line you specify. The "
+    "elements supply their natural reference (centerline); the line "
+    "you pass just decides where the dimension drawing sits. Common "
+    "use: \"dimension between grid A and grid B\" -> element_ids = "
+    "[grid_A_id, grid_B_id], line_start/line_end = where the dim "
+    "string should be placed (a few feet offset from the grids).\n"
+    "  - place_revision_cloud auto-assigns to the latest revision "
+    "if you don't pass revision_id. If there are NO revisions yet, "
+    "call create_revision first and pass its id.\n"
+    "  - CRITICAL distinction - applying a revision to a sheet vs. "
+    "drawing a revision cloud are TWO DIFFERENT THINGS. Engineers say "
+    "both casually and you have to pick the right one:\n"
+    "      \"apply this revision to all M-1xx sheets\" -> "
+    "add_revisions_to_sheets (the revision shows up on each sheet's "
+    "revision schedule, NO cloud drawn anywhere).\n"
+    "      \"add this revision to these sheets\" -> "
+    "add_revisions_to_sheets.\n"
+    "      \"flag these sheets with this revision\" -> "
+    "add_revisions_to_sheets.\n"
+    "      \"draw a cloud around this area on sheet M-101\" -> "
+    "place_revision_cloud (with explicit boundary the user gave).\n"
+    "      \"cloud this section\" / \"mark up with a cloud\" -> "
+    "place_revision_cloud.\n"
+    "    The default for any \"apply / add / attach / flag revision "
+    "X on these sheets\" request is the SHEET ASSOCIATION tool. NEVER "
+    "draw revision clouds yourself unless the user explicitly asks "
+    "for a cloud at a specific location with specific bounds. Cloud "
+    "placement is an engineering decision tied to specific drawing "
+    "areas that need callout - it's not something to do "
+    "automatically.\n"
+    "  - update_revision is field-by-field: only the keys you pass "
+    "are changed. Empty string clears the field. visibility accepts "
+    "'CloudAndTag', 'Hidden', 'TagOnly'.\n"
+    "\n"
+    "Spaces / rooms / loads (v4.5):\n"
+    "  - MEP projects have SPACES, not rooms. The arch link has ROOMS. "
+    "When the user asks 'set up spaces for this project' or 'make "
+    "MEP spaces match the architecture', the standard play is: "
+    "list_links -> create_spaces_from_link_rooms(link_id=arch_link_id). "
+    "It auto-creates one Space per Room, matched to the host's "
+    "matching Level by name, with the room number+name copied over. "
+    "Skips unbounded rooms and rooms whose level doesn't exist in "
+    "the host doc.\n"
+    "  - 'Create rooms on level X based on the layout' / 'place "
+    "rooms in every enclosed area' / 'add rooms to this floor' -> "
+    "place_rooms_on_level. NEVER loop create_room across many "
+    "guessed coordinates: you can't see the layout, you don't know "
+    "where the enclosed boundaries are, and you'll produce "
+    "unbounded rooms (no area) and redundant rooms (X marks for "
+    "two rooms in the same boundary). place_rooms_on_level uses "
+    "Revit's PlanTopology to enumerate every enclosed boundary on "
+    "the level and places exactly one room per boundary. Pass "
+    "name_prefix='Room' to get 'Room 1', 'Room 2', etc.\n"
+    "  - create_room is ONLY for the one-off case where the user "
+    "gives explicit XY coordinates for a single room (e.g. 'add a "
+    "room at coordinates 25, 40 on Level 2').\n"
+    "\n"
+    "Export & print (v4.6):\n"
+    "  - 'Export M-1xx sheets to PDF' -> list_sheets with "
+    "number_contains -> export_to_pdf(view_ids=[...], combine=true) "
+    "for a single multi-page PDF, or combine=false for one PDF per "
+    "sheet.\n"
+    "  - All export tools default to "
+    "%USERPROFILE%\\Documents\\dbHMS Revit Exports\\<format>\\ if "
+    "the user doesn't give an explicit folder. Always include the "
+    "FOLDER and FILE NAMES (or file count) in your reply so the user "
+    "knows where the export landed.\n"
+    "  - export_to_ifc / export_to_nwc / export_to_gbxml are "
+    "WHOLE-DOCUMENT exports - they take no view_ids; the whole "
+    "Revit doc gets exported as one file.\n"
+    "  - export_to_fbx accepts a SINGLE 3D view only (it raises on "
+    "2D views).\n"
+    "  - export_to_nwc requires the Navisworks exporter plugin. If "
+    "the tool returns 'Navisworks exporter plugin must be installed', "
+    "tell the user to install Autodesk Navisworks (or its free "
+    "exporter add-on) and retry.\n"
+    "  - export_schedule_to_csv only handles ViewSchedule (the kind "
+    "in list_schedules) - it won't work on sheets or graphical views.\n"
+    "\n"
+    "MEP systems & engineering math (v4.7):\n"
+    "  - 'Show me the supply system serving VAV-12' -> get_element_details "
+    "on VAV-12, read its system_name + system_id from the parameters, "
+    "then get_system_info(system_id) for the member list + flow.\n"
+    "  - To find equipment that isn't on a system yet: "
+    "get_unconnected_terminals(category='OST_DuctTerminal') for unwired "
+    "diffusers, 'OST_PlumbingFixtures' for plumbing fixtures, "
+    "'OST_LightingFixtures' for unlit electrical fixtures, etc.\n"
+    "  - System creation needs a system_type_id (a MechanicalSystemType "
+    "/ PipingSystemType / ElectricalSystemType). Use "
+    "list_filtered_types or find an existing system's type via "
+    "list_systems + get_element_details.\n"
+    "  - Sizes from get_pipe_duct_sizes are in FEET (Revit internal). "
+    "12 inch duct width = 1.0 ft. Engineers typically want inches in "
+    "their answer - multiply by 12 when describing sizes to the user.\n"
+    "  - add_insulation works on BOTH ducts and pipes - it picks the "
+    "right API based on the element's class. The insulation_type_id "
+    "must match the element type (DuctInsulationType for ducts, "
+    "PipeInsulationType for pipes).\n"
+    "  - Routing engine (auto-fitting between elements, auto-sizing "
+    "of ducts based on flow) is NOT YET in this toolkit. If the user "
+    "asks for it, tell them they need to use Revit's UI for now.\n"
+    "  - For 'tell me the loads on these spaces', use get_space_loads. "
+    "Loads are populated only after Revit runs Heating + Cooling "
+    "Loads (Analyze tab); if values are 0 / null, tell the user to "
+    "run that first.\n"
+    "  - HVAC zone workflow: list_hvac_zones to inspect; "
+    "create_hvac_zone then add_spaces_to_zone to build a new zone. "
+    "Spaces must be on the same Level + Phase as the zone.\n"
+    "  - 'What rooms are in the arch link' uses get_rooms_in_link "
+    "(v4.1). 'What finishes are in the arch link' uses "
+    "get_room_finishes_from_arch_link (v4.5).\n"
     "  - DON'T refuse a task by claiming a 'routing engine' or "
     "specialized tool is needed when copy_elements + rotate_elements "
     "would accomplish it. copy_elements works on ducts, pipes, "
@@ -5061,6 +5240,3718 @@ def _tool_get_element_geometry(doc, input_dict):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Annotation finishing (v4.4)
+# ---------------------------------------------------------------------------
+#
+# Builds on v4.2 (tags, text notes, filters) and v4.3 (element placement)
+# to close out the documentation layer: dimensions, grids, levels,
+# revisions + clouds, spot elevations, detail lines, filled regions.
+
+
+def _line_from_pts(p1, p2):
+    """Build a Revit Line from two XYZ-shaped dicts."""
+    a = _xyz_from_dict(p1)
+    b = _xyz_from_dict(p2)
+    if a is None or b is None:
+        return None
+    try:
+        if a.DistanceTo(b) < 1e-6:
+            return None
+        return Line.CreateBound(a, b)
+    except Exception:
+        return None
+
+
+def _tool_place_grid(doc, input_dict):
+    """Place a new architectural grid line. Endpoints are world XYZ
+    in feet; Z is typically 0 for grids (they're vertical planes
+    drawn in plan)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name  = (inp.get("name") or "").strip()
+    start = inp.get("start")
+    end   = inp.get("end")
+    line = _line_from_pts(start, end)
+    if line is None:
+        return {"error": "start and end {x,y,z} are required (and must differ)."}
+
+    try:
+        t = Transaction(doc, "Place grid '{}'".format(name or "?"))
+        t.Start()
+        try:
+            grid = RevitGrid.Create(doc, line)
+            if name:
+                try:
+                    grid.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Grid.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "placed_id":   _eid_int(grid.Id),
+        "grid_name":   _safe_name(grid),
+        "start":       _xyz_to_dict(_xyz_from_dict(start)),
+        "end":         _xyz_to_dict(_xyz_from_dict(end)),
+    }
+
+
+def _tool_place_level(doc, input_dict):
+    """Place a new Level at a given elevation (feet from project base
+    point). Optional name."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    elev = inp.get("elevation_ft")
+    name = (inp.get("name") or "").strip()
+    if elev is None:
+        return {"error": "elevation_ft is required."}
+    try:
+        elev = float(elev)
+    except Exception:
+        return {"error": "elevation_ft must be numeric."}
+
+    try:
+        t = Transaction(doc, "Place level{}".format(
+            " '{}'".format(name) if name else ""))
+        t.Start()
+        try:
+            lvl = Level.Create(doc, elev)
+            if name:
+                try:
+                    lvl.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Level.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "placed_id":     _eid_int(lvl.Id),
+        "level_name":    _safe_name(lvl),
+        "elevation_ft":  elev,
+    }
+
+
+def _tool_place_dimension(doc, input_dict):
+    """Place a linear/aligned dimension in a view between two or more
+    elements along a dimension line. The dimension is anchored to
+    each element's natural reference (centerline / location). For
+    face-level precision, call this multiple times or use Revit
+    directly.
+
+    Common use: dimension between grids ('A' to 'B'), columns,
+    walls, etc."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id     = inp.get("view_id")
+    element_ids = inp.get("element_ids") or []
+    line_start  = inp.get("line_start")
+    line_end    = inp.get("line_end")
+
+    if view_id is None:
+        return {"error": "view_id is required."}
+    if not element_ids or len(element_ids) < 2:
+        return {"error": "element_ids must have at least 2 ids."}
+    line = _line_from_pts(line_start, line_end)
+    if line is None:
+        return {"error": "line_start and line_end {x,y,z} are required."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+    if view.IsTemplate:
+        return {"error": "Cannot place dimensions in a view template."}
+
+    refs = ReferenceArray()
+    bad = []
+    for eid in element_ids:
+        el, err = _resolve_element(doc, eid)
+        if err:
+            bad.append({"element_id": eid, "error": err})
+            continue
+        try:
+            refs.Append(Reference(el))
+        except Exception as e:
+            bad.append({
+                "element_id": _eid_int(el.Id),
+                "error":      "could not build Reference: {}".format(e),
+            })
+    if refs.Size < 2:
+        return {"error": "Need at least 2 valid element references.",
+                "errors": bad}
+
+    try:
+        t = Transaction(doc, "Place dimension in '{}'".format(
+            _safe_name(view) or "view"))
+        t.Start()
+        try:
+            dim = doc.Create.NewDimension(view, line, refs)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "NewDimension failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "dimension_id": _eid_int(dim.Id),
+        "view_id":      _eid_int(view.Id),
+        "view_name":    _safe_name(view),
+        "ref_count":    refs.Size,
+    }
+    if bad:
+        result["errors"] = bad
+    return result
+
+
+def _tool_place_spot_elevation(doc, input_dict):
+    """Place a spot elevation in a view, anchored to an element's
+    reference at a specific origin point. The bend + end points
+    control the leader path (set has_leader=true)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id    = inp.get("view_id")
+    element_id = inp.get("element_id")
+    origin     = _xyz_from_dict(inp.get("origin"))
+    bend       = _xyz_from_dict(inp.get("bend_point"))
+    end        = _xyz_from_dict(inp.get("end_point"))
+    has_leader = bool(inp.get("has_leader", True))
+
+    if view_id is None or element_id is None:
+        return {"error": "view_id and element_id are required."}
+    if origin is None or bend is None or end is None:
+        return {"error": "origin, bend_point, end_point {x,y,z} are required."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    el, err = _resolve_element(doc, element_id)
+    if err:
+        return {"error": "element_id: " + err}
+    try:
+        ref = Reference(el)
+    except Exception as e:
+        return {"error": "Could not build Reference: {}".format(e)}
+
+    try:
+        t = Transaction(doc, "Place spot elevation")
+        t.Start()
+        try:
+            spot = doc.Create.NewSpotElevation(
+                view, ref, origin, bend, end, origin, has_leader)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "NewSpotElevation failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "spot_id":   _eid_int(spot.Id),
+        "view_id":   _eid_int(view.Id),
+        "view_name": _safe_name(view),
+    }
+
+
+def _tool_place_detail_line(doc, input_dict):
+    """Place a detail line (view-specific line, not a model element)
+    in a view. Detail lines are commonly used in drafting views and
+    on plans for annotation overlays."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id    = inp.get("view_id")
+    line_start = inp.get("start")
+    line_end   = inp.get("end")
+
+    if view_id is None:
+        return {"error": "view_id is required."}
+    line = _line_from_pts(line_start, line_end)
+    if line is None:
+        return {"error": "start and end {x,y,z} are required."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+    if view.IsTemplate:
+        return {"error": "Cannot place detail lines in a view template."}
+
+    try:
+        t = Transaction(doc, "Place detail line")
+        t.Start()
+        try:
+            curve = doc.Create.NewDetailCurve(view, line)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "NewDetailCurve failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "detail_line_id": _eid_int(curve.Id),
+        "view_id":        _eid_int(view.Id),
+    }
+
+
+def _tool_list_filled_region_types(doc, input_dict):
+    """List FilledRegionTypes (so the agent can pick a type id for
+    place_filled_region)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub = (inp.get("name_contains") or "").lower()
+    try:
+        col = FilteredElementCollector(doc).OfClass(FilledRegionType)
+        out = []
+        for t in col:
+            nm = _safe_name(t)
+            if name_sub and name_sub not in (nm or "").lower():
+                continue
+            out.append({
+                "id":   _eid_int(t.Id),
+                "name": nm,
+            })
+        out.sort(key=lambda r: r.get("name") or "")
+        return {"count": len(out), "filled_region_types": out}
+    except Exception as e:
+        return {"error": "list_filled_region_types failed: {}".format(e)}
+
+
+def _tool_place_filled_region(doc, input_dict):
+    """Place a FilledRegion (2D filled area) in a view. The boundary
+    is given as a list of XYZ points forming a CLOSED polygon (the
+    last segment auto-closes). Use list_filled_region_types to find
+    a type id."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id   = inp.get("view_id")
+    type_id   = inp.get("type_id")
+    pts_input = inp.get("boundary") or []
+
+    if view_id is None or type_id is None:
+        return {"error": "view_id and type_id are required."}
+    if not pts_input or len(pts_input) < 3:
+        return {"error": "boundary needs at least 3 points (XYZ dicts)."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    type_el, err = _resolve_element(doc, type_id)
+    if err:
+        return {"error": "type_id: " + err}
+    if not isinstance(type_el, FilledRegionType):
+        return {"error": "type_id is not a FilledRegionType."}
+
+    # Build the CurveLoop from successive line segments.
+    pts = []
+    for p in pts_input:
+        pt = _xyz_from_dict(p)
+        if pt is None:
+            return {"error": "Invalid point in boundary: {}".format(p)}
+        pts.append(pt)
+    loop = CurveLoop()
+    try:
+        for i in range(len(pts)):
+            a = pts[i]
+            b = pts[(i + 1) % len(pts)]
+            if a.DistanceTo(b) < 1e-6:
+                return {"error": "Coincident successive boundary points."}
+            loop.Append(Line.CreateBound(a, b))
+    except Exception as e:
+        return {"error": "Could not build boundary CurveLoop: {}".format(e)}
+
+    loops = NetList[CurveLoop]()
+    loops.Add(loop)
+
+    try:
+        t = Transaction(doc, "Place filled region")
+        t.Start()
+        try:
+            fr = FilledRegion.Create(doc, type_el.Id, view.Id, loops)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "FilledRegion.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "filled_region_id": _eid_int(fr.Id),
+        "view_id":          _eid_int(view.Id),
+        "type_id":          _eid_int(type_el.Id),
+        "point_count":      len(pts),
+    }
+
+
+def _tool_list_revisions(doc, input_dict):
+    """List every Revision in the document with its sequence, date,
+    description, issued state, and visibility."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    try:
+        col = FilteredElementCollector(doc).OfClass(Revision)
+        out = []
+        for r in col:
+            row = {
+                "id":          _eid_int(r.Id),
+                "description": "",
+                "date":        "",
+                "issued_to":   "",
+                "issued_by":   "",
+                "issued":      False,
+                "visibility":  "",
+                "sequence":    None,
+            }
+            try:
+                row["description"] = r.Description or ""
+            except Exception:
+                pass
+            try:
+                row["date"] = r.RevisionDate or ""
+            except Exception:
+                pass
+            try:
+                row["issued_to"] = r.IssuedTo or ""
+            except Exception:
+                pass
+            try:
+                row["issued_by"] = r.IssuedBy or ""
+            except Exception:
+                pass
+            try:
+                row["issued"] = bool(r.Issued)
+            except Exception:
+                pass
+            try:
+                row["visibility"] = str(r.Visibility)
+            except Exception:
+                pass
+            try:
+                row["sequence"] = int(r.SequenceNumber)
+            except Exception:
+                pass
+            out.append(row)
+        out.sort(key=lambda r: (r.get("sequence") or 0))
+        return {"count": len(out), "revisions": out}
+    except Exception as e:
+        return {"error": "list_revisions failed: {}".format(e)}
+
+
+def _tool_create_revision(doc, input_dict):
+    """Create a new Revision and (optionally) populate description /
+    date / issued_to / issued_by / issued."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    description = (inp.get("description") or "").strip()
+    date        = (inp.get("date") or "").strip()
+    issued_to   = (inp.get("issued_to") or "").strip()
+    issued_by   = (inp.get("issued_by") or "").strip()
+    issued      = inp.get("issued")
+    visibility  = (inp.get("visibility") or "").strip()  # CloudAndTag / Hidden / TagOnly
+
+    try:
+        t = Transaction(doc, "Create revision")
+        t.Start()
+        try:
+            rev = Revision.Create(doc)
+            if description:
+                try:
+                    rev.Description = description
+                except Exception:
+                    pass
+            if date:
+                try:
+                    rev.RevisionDate = date
+                except Exception:
+                    pass
+            if issued_to:
+                try:
+                    rev.IssuedTo = issued_to
+                except Exception:
+                    pass
+            if issued_by:
+                try:
+                    rev.IssuedBy = issued_by
+                except Exception:
+                    pass
+            if visibility:
+                try:
+                    vmap = {
+                        "cloudandtag": RevisionVisibility.CloudAndTagVisible,
+                        "hidden":      RevisionVisibility.Hidden,
+                        "tagonly":     RevisionVisibility.TagVisible,
+                    }
+                    rv = vmap.get(visibility.lower().replace(" ", ""))
+                    if rv is not None:
+                        rev.Visibility = rv
+                except Exception:
+                    pass
+            if issued is not None:
+                try:
+                    rev.Issued = bool(issued)
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Revision.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "revision_id": _eid_int(rev.Id),
+        "description": description,
+        "date":        date,
+    }
+
+
+def _tool_update_revision(doc, input_dict):
+    """Edit an existing Revision's description / date / issued
+    info / visibility / issued state."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    revision_id = inp.get("revision_id")
+    if revision_id is None:
+        return {"error": "revision_id is required."}
+    rev, err = _resolve_element(doc, revision_id)
+    if err:
+        return {"error": "revision_id: " + err}
+    if not isinstance(rev, Revision):
+        return {"error": "revision_id is not a Revision."}
+
+    changes = []
+    try:
+        t = Transaction(doc, "Update revision")
+        t.Start()
+        try:
+            if "description" in inp:
+                try:
+                    rev.Description = inp["description"] or ""
+                    changes.append("description")
+                except Exception:
+                    pass
+            if "date" in inp:
+                try:
+                    rev.RevisionDate = inp["date"] or ""
+                    changes.append("date")
+                except Exception:
+                    pass
+            if "issued_to" in inp:
+                try:
+                    rev.IssuedTo = inp["issued_to"] or ""
+                    changes.append("issued_to")
+                except Exception:
+                    pass
+            if "issued_by" in inp:
+                try:
+                    rev.IssuedBy = inp["issued_by"] or ""
+                    changes.append("issued_by")
+                except Exception:
+                    pass
+            if "visibility" in inp and inp["visibility"]:
+                try:
+                    vmap = {
+                        "cloudandtag": RevisionVisibility.CloudAndTagVisible,
+                        "hidden":      RevisionVisibility.Hidden,
+                        "tagonly":     RevisionVisibility.TagVisible,
+                    }
+                    rv = vmap.get(str(inp["visibility"]).lower().replace(" ", ""))
+                    if rv is not None:
+                        rev.Visibility = rv
+                        changes.append("visibility")
+                except Exception:
+                    pass
+            if "issued" in inp and inp["issued"] is not None:
+                try:
+                    rev.Issued = bool(inp["issued"])
+                    changes.append("issued")
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Update revision failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "revision_id": _eid_int(rev.Id),
+        "changes":     changes,
+    }
+
+
+def _tool_place_revision_cloud(doc, input_dict):
+    """Place a revision cloud in a view as a polygon boundary
+    (rectangle is the common case - pass 4 corners). Optional
+    revision_id assigns the cloud to a specific Revision; otherwise
+    Revit picks the latest."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id     = inp.get("view_id")
+    revision_id = inp.get("revision_id")
+    pts_input   = inp.get("boundary") or []
+
+    if view_id is None:
+        return {"error": "view_id is required."}
+    if not pts_input or len(pts_input) < 3:
+        return {"error": ("boundary needs at least 3 points (XYZ dicts). "
+                          "For a rectangle, pass 4 corners.")}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    # Resolve the revision (or pick the latest).
+    rev_id_to_use = None
+    if revision_id is not None:
+        rev_el, err = _resolve_element(doc, revision_id)
+        if err:
+            return {"error": "revision_id: " + err}
+        if not isinstance(rev_el, Revision):
+            return {"error": "revision_id is not a Revision."}
+        rev_id_to_use = rev_el.Id
+    else:
+        # Pick the highest-sequence revision.
+        all_revs = list(FilteredElementCollector(doc).OfClass(Revision))
+        if not all_revs:
+            return {"error": ("No revisions in this document. Call "
+                              "create_revision first, then pass its id.")}
+        all_revs.sort(key=lambda r: getattr(r, "SequenceNumber", 0))
+        rev_id_to_use = all_revs[-1].Id
+
+    # Build the boundary as a list of Line curves.
+    pts = []
+    for p in pts_input:
+        pt = _xyz_from_dict(p)
+        if pt is None:
+            return {"error": "Invalid point in boundary: {}".format(p)}
+        pts.append(pt)
+    curves = NetList[System.Object]()
+    try:
+        for i in range(len(pts)):
+            a = pts[i]
+            b = pts[(i + 1) % len(pts)]
+            if a.DistanceTo(b) < 1e-6:
+                return {"error": "Coincident successive boundary points."}
+            curves.Add(Line.CreateBound(a, b))
+    except Exception as e:
+        return {"error": "Could not build cloud curves: {}".format(e)}
+
+    try:
+        t = Transaction(doc, "Place revision cloud")
+        t.Start()
+        try:
+            cloud = RevisionCloud.Create(doc, view, rev_id_to_use, curves)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "RevisionCloud.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "cloud_id":    _eid_int(cloud.Id),
+        "view_id":     _eid_int(view.Id),
+        "view_name":   _safe_name(view),
+        "revision_id": _eid_int(rev_id_to_use),
+    }
+
+
+def _tool_add_revisions_to_sheets(doc, input_dict):
+    """Apply revisions to sheets WITHOUT drawing any clouds.
+
+    This is the right tool when an engineer says \"apply revision X
+    to all M-1xx sheets\" - it adds the revision ids to each sheet's
+    `additional revisions on sheet` list, which makes the revision
+    show up in the sheet's revision schedule / title-block revision
+    block on its own, no cloud drawn anywhere.
+
+    Cloud-derived revisions are NOT touched - if a revision already
+    appears on a sheet because a cloud was drawn in one of its
+    views, this tool doesn't add it twice; it's a no-op for those
+    sheets (added_count == 0). All updates wrap in one transaction.
+    """
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    sheet_ids    = inp.get("sheet_ids") or []
+    revision_ids = inp.get("revision_ids") or []
+
+    if not sheet_ids:
+        return {"error": "sheet_ids is required."}
+    if not revision_ids:
+        return {"error": "revision_ids is required."}
+
+    # Resolve revisions up front.
+    rev_eids = []
+    errors   = []
+    for rid in revision_ids:
+        el, err = _resolve_element(doc, rid)
+        if err:
+            errors.append({"revision_id": rid, "error": err})
+            continue
+        if not isinstance(el, Revision):
+            errors.append({"revision_id": _eid_int(el.Id),
+                           "error": "not a Revision"})
+            continue
+        rev_eids.append(el.Id)
+    if not rev_eids:
+        return {"error": "No valid revision ids.", "errors": errors}
+
+    updated = []
+    try:
+        t = Transaction(doc, "Apply {} revision(s) to {} sheet(s)".format(
+            len(rev_eids), len(sheet_ids)))
+        t.Start()
+        try:
+            for sid in sheet_ids:
+                el, err = _resolve_element(doc, sid)
+                if err:
+                    errors.append({"sheet_id": sid, "error": err})
+                    continue
+                if not isinstance(el, ViewSheet):
+                    errors.append({
+                        "sheet_id": _eid_int(el.Id),
+                        "error":    "not a ViewSheet",
+                    })
+                    continue
+
+                try:
+                    existing = list(el.GetAdditionalRevisionIds())
+                except Exception:
+                    existing = []
+                seen_ints = set()
+                merged = NetList[ElementId]()
+                for eid in existing:
+                    try:
+                        seen_ints.add(_eid_int(eid))
+                        merged.Add(eid)
+                    except Exception:
+                        pass
+                added_here = 0
+                for eid in rev_eids:
+                    try:
+                        if _eid_int(eid) in seen_ints:
+                            continue
+                        merged.Add(eid)
+                        seen_ints.add(_eid_int(eid))
+                        added_here += 1
+                    except Exception:
+                        pass
+
+                try:
+                    el.SetAdditionalRevisionIds(merged)
+                    updated.append({
+                        "sheet_id":     _eid_int(el.Id),
+                        "sheet_number": el.SheetNumber or "",
+                        "sheet_name":   _safe_name(el),
+                        "added_count":  added_here,
+                    })
+                except Exception as e:
+                    errors.append({
+                        "sheet_id": _eid_int(el.Id),
+                        "error":    "SetAdditionalRevisionIds failed: {}".format(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "applied_revision_ids": [_eid_int(r) for r in rev_eids],
+        "updated_count":        len(updated),
+        "updated":              updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_remove_revisions_from_sheets(doc, input_dict):
+    """Remove revisions from sheets' additional-revisions list. Note:
+    revisions that show up on a sheet via a revision CLOUD drawn in
+    one of its views can't be cleared this way - the cloud has to be
+    deleted or reassigned to a different revision instead."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    sheet_ids    = inp.get("sheet_ids") or []
+    revision_ids = inp.get("revision_ids") or []
+
+    if not sheet_ids:
+        return {"error": "sheet_ids is required."}
+    if not revision_ids:
+        return {"error": "revision_ids is required."}
+
+    drop_ints = set()
+    errors   = []
+    for rid in revision_ids:
+        el, err = _resolve_element(doc, rid)
+        if err:
+            errors.append({"revision_id": rid, "error": err})
+            continue
+        if not isinstance(el, Revision):
+            errors.append({"revision_id": _eid_int(el.Id),
+                           "error": "not a Revision"})
+            continue
+        drop_ints.add(_eid_int(el.Id))
+    if not drop_ints:
+        return {"error": "No valid revision ids.", "errors": errors}
+
+    updated = []
+    try:
+        t = Transaction(doc, "Remove revisions from {} sheet(s)".format(
+            len(sheet_ids)))
+        t.Start()
+        try:
+            for sid in sheet_ids:
+                el, err = _resolve_element(doc, sid)
+                if err:
+                    errors.append({"sheet_id": sid, "error": err})
+                    continue
+                if not isinstance(el, ViewSheet):
+                    errors.append({
+                        "sheet_id": _eid_int(el.Id),
+                        "error":    "not a ViewSheet",
+                    })
+                    continue
+                try:
+                    existing = list(el.GetAdditionalRevisionIds())
+                except Exception:
+                    existing = []
+                kept = NetList[ElementId]()
+                removed_here = 0
+                for eid in existing:
+                    try:
+                        if _eid_int(eid) in drop_ints:
+                            removed_here += 1
+                            continue
+                        kept.Add(eid)
+                    except Exception:
+                        pass
+                try:
+                    el.SetAdditionalRevisionIds(kept)
+                    updated.append({
+                        "sheet_id":      _eid_int(el.Id),
+                        "sheet_number":  el.SheetNumber or "",
+                        "sheet_name":    _safe_name(el),
+                        "removed_count": removed_here,
+                    })
+                except Exception as e:
+                    errors.append({
+                        "sheet_id": _eid_int(el.Id),
+                        "error":    "SetAdditionalRevisionIds failed: {}".format(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "removed_revision_ids": list(drop_ints),
+        "updated_count":        len(updated),
+        "updated":              updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_assign_revisions_to_clouds(doc, input_dict):
+    """Re-assign one or more RevisionClouds to a different Revision.
+    Useful for shifting clouds between revision sets after numbering
+    changes."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    cloud_ids   = inp.get("cloud_ids") or []
+    revision_id = inp.get("revision_id")
+    if not cloud_ids:
+        return {"error": "cloud_ids is required."}
+    if revision_id is None:
+        return {"error": "revision_id is required."}
+
+    rev_el, err = _resolve_element(doc, revision_id)
+    if err:
+        return {"error": "revision_id: " + err}
+    if not isinstance(rev_el, Revision):
+        return {"error": "revision_id is not a Revision."}
+
+    updated = []
+    errors = []
+    try:
+        t = Transaction(doc, "Reassign {} revision cloud(s)".format(len(cloud_ids)))
+        t.Start()
+        try:
+            for cid in cloud_ids:
+                el, err = _resolve_element(doc, cid)
+                if err:
+                    errors.append({"cloud_id": cid, "error": err})
+                    continue
+                if not isinstance(el, RevisionCloud):
+                    errors.append({
+                        "cloud_id": _eid_int(el.Id),
+                        "error":    "not a RevisionCloud",
+                    })
+                    continue
+                try:
+                    el.RevisionId = rev_el.Id
+                    updated.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({
+                        "cloud_id": _eid_int(el.Id),
+                        "error":    str(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Reassign failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "revision_id":   _eid_int(rev_el.Id),
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Spaces / rooms / loads (v4.5) - MEP core
+# ---------------------------------------------------------------------------
+#
+# An MEP firm spends a lot of time keeping its space list aligned with
+# the linked architectural model's rooms. The marquee tool here is
+# `create_spaces_from_link_rooms`, which auto-generates an MEP Space
+# for each Room in the arch link so the engineer can run loads + book
+# diffuser CFM against them.
+
+
+def _convert_load_btuh(internal_value):
+    """Try to convert a Revit internal HVAC load value to BTU/hr.
+    Falls back to the raw value when UnitTypeId / older
+    DisplayUnitType isn't available."""
+    if internal_value is None:
+        return None
+    # Revit 2022+ uses ForgeTypeId / UnitTypeId.
+    try:
+        from Autodesk.Revit.DB import UnitTypeId
+        return UnitUtils.ConvertFromInternalUnits(
+            internal_value, UnitTypeId.BritishThermalUnitsPerHour)
+    except Exception:
+        pass
+    # Older API path.
+    try:
+        from Autodesk.Revit.DB import DisplayUnitType
+        return UnitUtils.ConvertFromInternalUnits(
+            internal_value, DisplayUnitType.DUT_BRITISH_THERMAL_UNITS_PER_HOUR)
+    except Exception:
+        pass
+    # Last resort: return raw.
+    try:
+        return float(internal_value)
+    except Exception:
+        return None
+
+
+def _diag_log_path():
+    """Path of the chatbot diagnostic log file."""
+    tmp = os.environ.get("TEMP") or os.path.expanduser("~")
+    return os.path.join(tmp, "dbhms_chatbot_diag.log")
+
+
+def _diag_log(message):
+    """Append a timestamped line to %TEMP%\\dbhms_chatbot_diag.log.
+    Used to capture verbose API trace info for hard-to-reproduce
+    Revit errors. Never raises; failures are silent."""
+    try:
+        path = _diag_log_path()
+        with codecs.open(path, "a", encoding="utf-8") as f:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                msg = message if isinstance(message, str) else str(message)
+            except Exception:
+                msg = "<unstringifiable message>"
+            f.write(u"[{}] {}\n".format(ts, msg))
+    except Exception:
+        pass
+
+
+def _first_phase(doc):
+    """Return the first Phase in doc - typically 'Existing' on projects
+    that have both. For NEW construction operations prefer
+    _default_construction_phase() instead."""
+    try:
+        for ph in FilteredElementCollector(doc).OfClass(Phase):
+            return ph
+    except Exception:
+        pass
+    return None
+
+
+def _default_construction_phase(doc):
+    """Pick the phase most likely to represent the active design
+    target: prefer one literally named 'New Construction', else fall
+    back to the LAST phase in the document (Revit orders phases by
+    time, so the last is the current design phase)."""
+    try:
+        phases = list(FilteredElementCollector(doc).OfClass(Phase))
+    except Exception:
+        phases = []
+    for ph in phases:
+        try:
+            if (ph.Name or "").strip().lower() == "new construction":
+                return ph
+        except Exception:
+            continue
+    return phases[-1] if phases else None
+
+
+def _place_room_in_circuit(doc, level, phase, circuit):
+    """Create a Room placed inside a PlanCircuit. Different Revit
+    versions accept different NewRoom overloads - we try each in turn
+    and return the first one that works. Logs every attempt to the
+    diag file. Returns the Room (or None on total failure).
+
+    Caller must already be inside an open Transaction (PlanCircuit
+    work is model-mutating)."""
+    # Variant 1: doc.Create.NewRoom(PlanCircuit) - legacy
+    try:
+        room = doc.Create.NewRoom(circuit)
+        if room is not None:
+            _diag_log(u"NewRoom(circuit) succeeded")
+            return room
+    except Exception as e:
+        _diag_log(u"NewRoom(circuit) raised {}: {}".format(
+            type(e).__name__, e))
+
+    # Variant 2: doc.Create.NewRoom(Phase, PlanCircuit) - some versions
+    if phase is not None:
+        try:
+            room = doc.Create.NewRoom(phase, circuit)
+            if room is not None:
+                _diag_log(u"NewRoom(phase, circuit) succeeded")
+                return room
+        except Exception as e:
+            _diag_log(u"NewRoom(phase, circuit) raised {}: {}".format(
+                type(e).__name__, e))
+
+    # Variant 3: doc.Create.NewRoom(Level, UV) at a point inside the
+    # circuit. Requires PlanCircuit to expose an interior point.
+    uv = None
+    try:
+        uv = circuit.GetPointInside()
+        if uv is not None:
+            _diag_log(u"circuit.GetPointInside() -> UV({}, {})".format(
+                uv.U, uv.V))
+    except Exception as e:
+        _diag_log(u"circuit.GetPointInside() raised {}: {}".format(
+            type(e).__name__, e))
+    if uv is not None:
+        try:
+            room = doc.Create.NewRoom(level, uv)
+            if room is not None:
+                _diag_log(u"NewRoom(level, uv) succeeded")
+                return room
+        except Exception as e:
+            _diag_log(u"NewRoom(level, uv) raised {}: {}".format(
+                type(e).__name__, e))
+
+    _diag_log(u"All NewRoom overloads failed for this circuit")
+    return None
+
+
+def _resolve_plan_topology(doc, level):
+    """Try every reasonable way to get a PlanTopology for `level`.
+    Returns (PlanTopology or None, used_phase or None, attempts:list).
+
+    Each attempt is also written to %TEMP%\\dbhms_chatbot_diag.log
+    for offline debugging. PlanTopology is phase-specific AND
+    view-driven, and different Revit versions expose different
+    overloads on `Document.PlanTopology` - so we try every
+    combination we can think of and report what succeeded.
+    """
+    attempts = []
+    def record(line):
+        attempts.append(line)
+        _diag_log(u"_resolve_plan_topology level='{}': {}".format(
+            _safe_name(level) or "?", line))
+
+    record(u"=== Begin resolution for level id={} name='{}' ===".format(
+        _eid_int(level.Id), _safe_name(level) or "?"))
+
+    # ----- Build the phase candidates -----
+    phases = []
+    try:
+        all_phases = list(FilteredElementCollector(doc).OfClass(Phase))
+        record(u"Found {} phase(s) in document: {}".format(
+            len(all_phases),
+            ", ".join((_safe_name(p) or "?") for p in all_phases)))
+    except Exception as e:
+        all_phases = []
+        record(u"list phases raised {}: {}".format(type(e).__name__, e))
+
+    new_constr = None
+    for ph in all_phases:
+        try:
+            if (ph.Name or "").strip().lower() == "new construction":
+                new_constr = ph
+                break
+        except Exception:
+            continue
+    if new_constr is not None:
+        phases.append(new_constr)
+    for ph in reversed(all_phases):
+        if ph != new_constr:
+            phases.append(ph)
+
+    # Also pull the phase off any plan view that lives on this level.
+    # Sometimes the view's phase is set to a phase the user has
+    # actually drawn into, while the doc has older empty phases too.
+    view_phase = None
+    try:
+        for v in FilteredElementCollector(doc).OfClass(ViewPlan):
+            try:
+                gl = v.GenLevel
+                if gl is None or _eid_int(gl.Id) != _eid_int(level.Id):
+                    continue
+                if v.IsTemplate:
+                    continue
+                ph_param = v.LookupParameter("Phase")
+                if ph_param is None:
+                    continue
+                ph_id = ph_param.AsElementId()
+                if ph_id is None or _eid_int(ph_id) == -1:
+                    continue
+                view_phase = doc.GetElement(ph_id)
+                if view_phase is not None:
+                    record(u"Found view-phase '{}' from plan view '{}'".format(
+                        _safe_name(view_phase) or "?",
+                        _safe_name(v) or "?"))
+                    break
+            except Exception:
+                continue
+    except Exception as e:
+        record(u"Searching for plan view raised {}: {}".format(
+            type(e).__name__, e))
+    if view_phase is not None and view_phase not in phases:
+        phases.insert(0, view_phase)
+
+    # ----- Variant A: get_PlanTopology(level, phase) per-phase -----
+    for ph in phases:
+        try:
+            pt = doc.get_PlanTopology(level, ph)
+            phase_name = _safe_name(ph) or "?"
+            if pt is None:
+                record(u"get_PlanTopology(level, '{}') -> None".format(phase_name))
+                continue
+            try:
+                n = len(list(pt.Circuits))
+            except Exception as e2:
+                n = -1
+                record(u"  ... Circuits iteration raised {}: {}".format(
+                    type(e2).__name__, e2))
+            record(u"get_PlanTopology(level, '{}') -> {} circuits".format(
+                phase_name, n))
+            return pt, ph, attempts
+        except Exception as e:
+            record(u"get_PlanTopology(level, '{}') raised {}: {}".format(
+                _safe_name(ph) or "?", type(e).__name__, e))
+
+    # ----- Variant B: get_PlanTopology(level) - no phase -----
+    try:
+        pt = doc.get_PlanTopology(level)
+        if pt is not None:
+            record(u"get_PlanTopology(level) -> got topology")
+            return pt, None, attempts
+        record(u"get_PlanTopology(level) -> None")
+    except Exception as e:
+        record(u"get_PlanTopology(level) raised {}: {}".format(
+            type(e).__name__, e))
+
+    # (Subscript variant doc.PlanTopology[level] is an indexed
+    # property requiring TWO args (Level, Phase) in this Revit
+    # version - already covered by Variant A.)
+
+    # ----- Variant D: enumerate doc.PlanTopologies by level id -----
+    try:
+        for pt in doc.PlanTopologies:
+            try:
+                lvl_obj = pt.Level
+                if lvl_obj is not None and _eid_int(lvl_obj.Id) == _eid_int(level.Id):
+                    record(u"PlanTopologies match found")
+                    return pt, None, attempts
+            except Exception:
+                continue
+        record(u"PlanTopologies has no match for this level")
+    except Exception as e:
+        record(u"PlanTopologies enumeration raised {}: {}".format(
+            type(e).__name__, e))
+
+    record(u"=== All resolution paths failed ===")
+    return None, None, attempts
+
+
+def _spatial_element_row(el, doc, kind):
+    """Build a result row for a Room or Space element."""
+    row = {
+        "id":          _eid_int(el.Id),
+        "kind":        kind,
+        "number":      "",
+        "name":        _safe_name(el) or "",
+        "area_sqft":   0.0,
+        "volume_cuft": 0.0,
+        "level":       None,
+        "unbounded":   False,
+    }
+    try:
+        row["number"] = el.Number or ""
+    except Exception:
+        pass
+    try:
+        row["area_sqft"] = round(float(el.Area), 2)
+    except Exception:
+        pass
+    try:
+        row["volume_cuft"] = round(float(el.Volume), 2)
+    except Exception:
+        pass
+    if row["area_sqft"] <= 0.0:
+        row["unbounded"] = True
+    try:
+        lvl = doc.GetElement(el.LevelId)
+        if lvl is not None:
+            row["level"] = _safe_name(lvl)
+    except Exception:
+        pass
+    return row
+
+
+def _tool_list_spaces(doc, input_dict):
+    """List every MEP Space in the active document with number,
+    name, level, area, volume, and unbounded flag."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub = (inp.get("name_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+    try:
+        col = FilteredElementCollector(doc).OfClass(Space)
+        out = []
+        truncated = False
+        for s in col:
+            row = _spatial_element_row(s, doc, "space")
+            if name_sub and name_sub not in row["name"].lower():
+                continue
+            out.append(row)
+            if len(out) >= max_results:
+                truncated = True
+                break
+        out.sort(key=lambda r: (r.get("level") or "",
+                                r.get("number") or "",
+                                r.get("name") or ""))
+        result = {"count": len(out), "spaces": out}
+        if truncated:
+            result["truncated"] = True
+        return result
+    except Exception as e:
+        return {"error": "list_spaces failed: {}".format(e)}
+
+
+def _tool_list_rooms(doc, input_dict):
+    """List every architectural Room in the active document. (MEP
+    projects don't usually have host-doc rooms - they have spaces.
+    Rooms live in the linked arch model and are read via
+    get_rooms_in_link.)"""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub = (inp.get("name_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+    try:
+        col = FilteredElementCollector(doc).OfCategory(
+            BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
+        out = []
+        truncated = False
+        for r in col:
+            row = _spatial_element_row(r, doc, "room")
+            if name_sub and name_sub not in row["name"].lower():
+                continue
+            out.append(row)
+            if len(out) >= max_results:
+                truncated = True
+                break
+        out.sort(key=lambda r: (r.get("level") or "",
+                                r.get("number") or "",
+                                r.get("name") or ""))
+        result = {"count": len(out), "rooms": out}
+        if truncated:
+            result["truncated"] = True
+        return result
+    except Exception as e:
+        return {"error": "list_rooms failed: {}".format(e)}
+
+
+def _tool_create_room(doc, input_dict):
+    """Manually create one Room at a given XY point on a level.
+    Mostly used in arch models; MEP projects more often use Spaces
+    or create_spaces_from_link_rooms."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    level_id = inp.get("level_id")
+    x_ft     = inp.get("x_ft")
+    y_ft     = inp.get("y_ft")
+    number   = (inp.get("number") or "").strip()
+    name     = (inp.get("name") or "").strip()
+
+    if level_id is None or x_ft is None or y_ft is None:
+        return {"error": "level_id, x_ft, y_ft are required."}
+
+    lvl, err = _resolve_element(doc, level_id)
+    if err:
+        return {"error": "level_id: " + err}
+    if not isinstance(lvl, Level):
+        return {"error": "level_id is not a Level."}
+
+    try:
+        uv = UV(float(x_ft), float(y_ft))
+    except Exception:
+        return {"error": "x_ft / y_ft must be numeric."}
+
+    phase = _first_phase(doc)
+
+    try:
+        t = Transaction(doc, "Create room")
+        t.Start()
+        try:
+            # NewRoom(Level, UV) places a room at the UV point on the
+            # level. The phase comes from the Level's owning phase
+            # (Revit picks it implicitly).
+            room = doc.Create.NewRoom(lvl, uv)
+            if number:
+                try:
+                    room.Number = number
+                except Exception:
+                    pass
+            if name:
+                try:
+                    room.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "NewRoom failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "room_id":  _eid_int(room.Id),
+        "number":   number or (room.Number or ""),
+        "name":     name or _safe_name(room),
+        "level_id": _eid_int(lvl.Id),
+    }
+
+
+def _tool_place_rooms_on_level(doc, input_dict):
+    """THE right tool for 'create rooms on level X based on the
+    layout'. Uses Revit's PlanTopology to find every enclosed
+    boundary on the level and places exactly ONE room per boundary,
+    at the location Revit picks for that boundary's geometry.
+
+    Why this instead of create_room: Revit needs each room placement
+    point to fall INSIDE a closed boundary. Without the layout
+    geometry, picking coordinates blind produces unbounded rooms
+    (no area) or redundant rooms (multiple in the same boundary,
+    marked X). PlanTopology does the boundary analysis for us so
+    every room ends up cleanly bounded with no overlap.
+
+    Naming: `name_prefix` + counter (e.g. prefix='Room' -> 'Room 1',
+    'Room 2', ...). Counter starts at `start_number` (default 1).
+    `only_empty_circuits=true` skips boundaries that already have a
+    room placed.
+    """
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    level_id     = inp.get("level_id")
+    name_prefix  = (inp.get("name_prefix") or "").strip()
+    only_empty   = bool(inp.get("only_empty_circuits", True))
+    try:
+        start_number = int(inp.get("start_number") or 1)
+    except Exception:
+        start_number = 1
+
+    if level_id is None:
+        return {"error": "level_id is required."}
+
+    lvl, err = _resolve_element(doc, level_id)
+    if err:
+        return {"error": "level_id: " + err}
+    if not isinstance(lvl, Level):
+        return {"error": "level_id is not a Level."}
+
+    # IMPORTANT: get_PlanTopology internally regenerates analytical
+    # state, which Revit treats as a model modification. So it MUST
+    # be called inside an open Transaction - calling it outside
+    # raises "Attempt to modify the model outside of transaction".
+    # We open the transaction now, resolve the topology + place rooms
+    # all inside it, then commit (or rollback on any error).
+    placed     = []
+    skipped    = []
+    errors     = []
+    attempts   = []
+    used_phase = None
+
+    try:
+        t = Transaction(doc, "Auto-place rooms on '{}'".format(
+            _safe_name(lvl) or "level"))
+        t.Start()
+        try:
+            plan_topology, used_phase, attempts = _resolve_plan_topology(doc, lvl)
+
+            # If still None, regenerate inside this same transaction
+            # and try once more. (Regenerate also counts as a model
+            # modification - has to happen inside the txn.)
+            if plan_topology is None:
+                try:
+                    doc.Regenerate()
+                except Exception:
+                    pass
+                pt2, ph2, more_attempts = _resolve_plan_topology(doc, lvl)
+                if pt2 is not None:
+                    plan_topology = pt2
+                    used_phase    = ph2
+                attempts = (attempts + [u"--- after Regenerate ---"]
+                            + more_attempts)
+
+            if plan_topology is None:
+                # Bail out cleanly; no model changes to roll back yet
+                # but commit nothing.
+                try:
+                    if t.HasStarted() and not t.HasEnded():
+                        t.RollBack()
+                except Exception:
+                    pass
+                return {
+                    "error": ("Could not get plan topology for level "
+                              "'{}' even inside a transaction.").format(
+                                  _safe_name(lvl)),
+                    "diagnostic_attempts": attempts[:12],
+                    "diagnostic_log_path": _diag_log_path(),
+                    "level_id":   _eid_int(lvl.Id),
+                    "level_name": _safe_name(lvl),
+                    "remediation_hint": ("Surface diagnostic_attempts "
+                        "verbatim to the user; do not paraphrase."),
+                }
+
+            # Check for empty circuit set
+            try:
+                circuit_count = len(list(plan_topology.Circuits))
+            except Exception:
+                circuit_count = -1
+            if circuit_count == 0:
+                try:
+                    if t.HasStarted() and not t.HasEnded():
+                        t.RollBack()
+                except Exception:
+                    pass
+                return {
+                    "error": ("Level '{}' has no enclosed boundaries "
+                              "in phase '{}'. Make sure walls are "
+                              "Room Bounding and form fully closed "
+                              "loops on this level.").format(
+                                  _safe_name(lvl),
+                                  _safe_name(used_phase) if used_phase else "?"),
+                    "level_id":   _eid_int(lvl.Id),
+                    "level_name": _safe_name(lvl),
+                    "phase":      _safe_name(used_phase) if used_phase else None,
+                    "diagnostic_attempts": attempts[:12],
+                    "diagnostic_log_path": _diag_log_path(),
+                }
+
+            # Iterate circuits and place rooms.
+            counter = start_number
+            for circuit in plan_topology.Circuits:
+                try:
+                    has_room = bool(circuit.IsRoomLocated)
+                except Exception:
+                    has_room = False
+                if only_empty and has_room:
+                    skipped.append({"reason": "circuit already has a room"})
+                    continue
+
+                room = _place_room_in_circuit(doc, lvl, used_phase, circuit)
+                if room is None:
+                    errors.append({"error": "could not place room in circuit (all NewRoom overloads failed)"})
+                    continue
+
+                num_str  = str(counter)
+                name_str = ("{} {}".format(name_prefix, counter)
+                            if name_prefix else None)
+                try:
+                    room.Number = num_str
+                except Exception:
+                    pass
+                if name_str:
+                    try:
+                        room.Name = name_str
+                    except Exception:
+                        pass
+
+                placed.append({
+                    "room_id": _eid_int(room.Id),
+                    "number":  num_str,
+                    "name":    name_str or _safe_name(room) or "",
+                })
+                counter += 1
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {
+                "error": "Transaction failed (rolled back): {}".format(e),
+                "errors": errors,
+                "skipped": skipped,
+                "diagnostic_attempts": attempts[:12],
+            }
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "level_id":      _eid_int(lvl.Id),
+        "level_name":    _safe_name(lvl),
+        "phase":         _safe_name(used_phase) if used_phase else None,
+        "placed_count":  len(placed),
+        "placed":        placed,
+        "skipped_count": len(skipped),
+        "errors":        errors,
+    }
+
+
+def _tool_create_spaces_from_link_rooms(doc, input_dict):
+    """MARQUEE TOOL: For every Room in a linked architecture model,
+    create a corresponding MEP Space in the host document at the
+    same world XY location, on the matching host Level (by name).
+
+    Workflow:
+      1. Iterate the link's Rooms.
+      2. For each Room, transform its location to host coordinates
+         using the link's GetTotalTransform().
+      3. Match the room's level NAME to a Level in the host doc.
+      4. Call doc.Create.NewSpace(host_level, host_phase, uv).
+      5. Copy the room's Number + Name onto the new Space.
+
+    Skip rooms that are unbounded (area <= 0) or whose level can't
+    be matched. Returns counts + per-skip explanation."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    link_id   = inp.get("link_id")
+    name_sub  = (inp.get("name_contains") or "").lower()
+    min_area  = inp.get("min_area_sqft")
+    only_unmapped = bool(inp.get("only_unmapped", True))
+    copy_number = bool(inp.get("copy_number", True))
+    copy_name   = bool(inp.get("copy_name",   True))
+
+    if link_id is None:
+        return {"error": ("link_id is required. Call list_links first "
+                          "to find the arch link's id.")}
+
+    inst, err = _link_inst_or_error(doc, link_id)
+    if err:
+        return err
+    try:
+        link_doc = inst.GetLinkDocument()
+    except Exception:
+        link_doc = None
+    if link_doc is None:
+        return {"error": "Link is not loaded."}
+
+    # Build host-level lookup by name.
+    host_levels_by_name = {}
+    for lvl in FilteredElementCollector(doc).OfClass(Level):
+        try:
+            nm = (lvl.Name or "").strip()
+            if nm:
+                host_levels_by_name[nm.lower()] = lvl
+        except Exception:
+            continue
+
+    if not host_levels_by_name:
+        return {"error": "No levels in host doc. Add levels first."}
+
+    phase = _first_phase(doc)
+    if phase is None:
+        return {"error": "No phases in host doc."}
+
+    # If only_unmapped, build an index of host spaces by (level, number)
+    # so we can skip rooms that already have a matching space.
+    existing_keys = set()
+    if only_unmapped:
+        for sp in FilteredElementCollector(doc).OfClass(Space):
+            try:
+                lvl = doc.GetElement(sp.LevelId)
+                lvl_name = (_safe_name(lvl) or "").lower() if lvl else ""
+                key = (lvl_name, (sp.Number or "").strip())
+                existing_keys.add(key)
+            except Exception:
+                continue
+
+    link_transform = None
+    try:
+        link_transform = inst.GetTotalTransform()
+    except Exception:
+        pass
+
+    created = []
+    skipped = []
+    errors  = []
+
+    rooms = list(FilteredElementCollector(link_doc).OfCategory(
+        BuiltInCategory.OST_Rooms).WhereElementIsNotElementType())
+
+    if not rooms:
+        return {"count": 0, "created": [], "skipped": [],
+                "note": "No rooms found in the linked document."}
+
+    try:
+        t = Transaction(doc, "Create spaces from {} link room(s)".format(
+            len(rooms)))
+        t.Start()
+        try:
+            for room in rooms:
+                try:
+                    rnum = (room.Number or "").strip()
+                    rname = _safe_name(room) or ""
+                except Exception:
+                    rnum, rname = "", ""
+
+                # Filter by name substring
+                if name_sub and name_sub not in rname.lower():
+                    skipped.append({
+                        "room_number": rnum, "room_name": rname,
+                        "reason": "filtered by name_contains",
+                    })
+                    continue
+                # Skip unbounded rooms (area 0 = no boundary)
+                try:
+                    area = float(room.Area)
+                except Exception:
+                    area = 0.0
+                if area <= 0.0:
+                    skipped.append({
+                        "room_number": rnum, "room_name": rname,
+                        "reason": "unbounded room (no area)",
+                    })
+                    continue
+                if min_area is not None and area < float(min_area):
+                    skipped.append({
+                        "room_number": rnum, "room_name": rname,
+                        "reason": "area {:.1f} below min_area_sqft".format(area),
+                    })
+                    continue
+                # Match level by name
+                try:
+                    link_lvl = link_doc.GetElement(room.LevelId)
+                    link_lvl_name = (_safe_name(link_lvl) or "").strip() if link_lvl else ""
+                except Exception:
+                    link_lvl_name = ""
+                host_lvl = host_levels_by_name.get(link_lvl_name.lower())
+                if host_lvl is None:
+                    skipped.append({
+                        "room_number": rnum, "room_name": rname,
+                        "reason": "no host level matching '{}'".format(link_lvl_name),
+                    })
+                    continue
+                # Get room location in link coords -> host coords
+                try:
+                    loc = room.Location
+                    if loc is None or not hasattr(loc, "Point") or loc.Point is None:
+                        skipped.append({
+                            "room_number": rnum, "room_name": rname,
+                            "reason": "room has no location point",
+                        })
+                        continue
+                    pt_link = loc.Point
+                except Exception:
+                    skipped.append({
+                        "room_number": rnum, "room_name": rname,
+                        "reason": "could not read room location",
+                    })
+                    continue
+
+                pt_host = pt_link
+                if link_transform is not None:
+                    try:
+                        pt_host = link_transform.OfPoint(pt_link)
+                    except Exception:
+                        pass
+
+                uv = UV(pt_host.X, pt_host.Y)
+
+                # Skip if already mapped (number + level match)
+                if only_unmapped:
+                    key = ((_safe_name(host_lvl) or "").lower(), rnum)
+                    if key in existing_keys:
+                        skipped.append({
+                            "room_number": rnum, "room_name": rname,
+                            "reason": "host space already exists for this number+level",
+                        })
+                        continue
+
+                try:
+                    space = doc.Create.NewSpace(host_lvl, phase, uv)
+                except Exception as e:
+                    errors.append({
+                        "room_number": rnum, "room_name": rname,
+                        "error": "NewSpace failed: {}".format(e),
+                    })
+                    continue
+
+                if copy_number and rnum:
+                    try:
+                        space.Number = rnum
+                    except Exception:
+                        pass
+                if copy_name and rname:
+                    try:
+                        space.Name = rname
+                    except Exception:
+                        pass
+
+                created.append({
+                    "space_id":     _eid_int(space.Id),
+                    "number":       rnum,
+                    "name":         rname,
+                    "host_level":   _safe_name(host_lvl),
+                })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors, "skipped": skipped}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "link_id":       _eid_int(inst.Id),
+        "link_name":     _safe_name(inst),
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created":       created,
+        "skipped":       skipped,
+        "errors":        errors,
+    }
+
+
+def _tool_get_space_loads(doc, input_dict):
+    """Read computed design heating + cooling loads for one or more
+    Spaces. Loads are reported in BTU/hr when conversion succeeds;
+    raw internal values otherwise."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    space_ids = inp.get("space_ids") or []
+    if not space_ids:
+        return {"error": "space_ids is required."}
+
+    out = []
+    errors = []
+    for sid in space_ids:
+        el, err = _resolve_element(doc, sid)
+        if err:
+            errors.append({"space_id": sid, "error": err})
+            continue
+        if not isinstance(el, Space):
+            errors.append({"space_id": _eid_int(el.Id),
+                           "error": "not a Space"})
+            continue
+        row = {
+            "space_id":           _eid_int(el.Id),
+            "number":             "",
+            "name":               _safe_name(el),
+            "area_sqft":          0.0,
+            "design_heating_btuh": None,
+            "design_cooling_btuh": None,
+        }
+        try:
+            row["number"] = el.Number or ""
+        except Exception:
+            pass
+        try:
+            row["area_sqft"] = round(float(el.Area), 2)
+        except Exception:
+            pass
+        try:
+            row["design_heating_btuh"] = _convert_load_btuh(
+                float(el.DesignHeatingLoad))
+        except Exception:
+            pass
+        try:
+            row["design_cooling_btuh"] = _convert_load_btuh(
+                float(el.DesignCoolingLoad))
+        except Exception:
+            pass
+        out.append(row)
+
+    result = {"count": len(out), "loads": out}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_get_room_finishes_from_arch_link(doc, input_dict):
+    """For each Room in a linked arch model, read the four finish
+    parameters (Floor / Ceiling / Wall / Base). Useful for MEP
+    review or for building a project finish schedule."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    link_id = inp.get("link_id")
+    name_sub = (inp.get("name_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+
+    inst, err = _link_inst_or_error(doc, link_id)
+    if err:
+        return err
+    try:
+        link_doc = inst.GetLinkDocument()
+    except Exception:
+        link_doc = None
+    if link_doc is None:
+        return {"error": "Link is not loaded."}
+
+    rows = []
+    truncated = False
+    try:
+        col = FilteredElementCollector(link_doc).OfCategory(
+            BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
+        for r in col:
+            nm = _safe_name(r) or ""
+            if name_sub and name_sub not in nm.lower():
+                continue
+            row = {
+                "room_id":     _eid_int(r.Id),
+                "number":      "",
+                "name":        nm,
+                "level":       None,
+                "floor":       "",
+                "ceiling":     "",
+                "wall":        "",
+                "base":        "",
+            }
+            try:
+                row["number"] = r.Number or ""
+            except Exception:
+                pass
+            try:
+                lvl = link_doc.GetElement(r.LevelId)
+                if lvl is not None:
+                    row["level"] = _safe_name(lvl)
+            except Exception:
+                pass
+            for fld, bip in (
+                ("floor",   BuiltInParameter.ROOM_FINISH_FLOOR),
+                ("ceiling", BuiltInParameter.ROOM_FINISH_CEILING),
+                ("wall",    BuiltInParameter.ROOM_FINISH_WALL),
+                ("base",    BuiltInParameter.ROOM_FINISH_BASE),
+            ):
+                try:
+                    p = r.get_Parameter(bip)
+                    if p is not None and p.HasValue:
+                        row[fld] = p.AsString() or ""
+                except Exception:
+                    pass
+            rows.append(row)
+            if len(rows) >= max_results:
+                truncated = True
+                break
+    except Exception as e:
+        return {"error": "get_room_finishes_from_arch_link failed: {}".format(e)}
+
+    rows.sort(key=lambda r: (r.get("level") or "",
+                             r.get("number") or "",
+                             r.get("name") or ""))
+    result = {
+        "link_id":   _eid_int(inst.Id),
+        "link_name": _safe_name(inst),
+        "count":     len(rows),
+        "rooms":     rows,
+    }
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+def _tool_set_space_type(doc, input_dict):
+    """Set the SpaceType (energy occupancy category) on one or more
+    Spaces. Accepts the enum name like 'Office', 'ConferenceRoom',
+    'Classroom', 'Corridor', etc. Drives load calc assumptions."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    space_ids   = inp.get("space_ids") or []
+    space_type  = (inp.get("space_type") or "").strip()
+
+    if not space_ids:
+        return {"error": "space_ids is required."}
+    if not space_type:
+        return {"error": ("space_type is required (SpaceType enum name "
+                          "like 'Office', 'ConferenceRoom', 'Classroom').")}
+
+    enum_val = getattr(SpaceTypeEnum, space_type, None)
+    if enum_val is None:
+        return {"error": ("Unknown SpaceType '{}'. Use the .NET enum "
+                          "name (PascalCase, no spaces).").format(space_type)}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set space type to '{}' on {} space(s)".format(
+            space_type, len(space_ids)))
+        t.Start()
+        try:
+            for sid in space_ids:
+                el, err = _resolve_element(doc, sid)
+                if err:
+                    errors.append({"space_id": sid, "error": err})
+                    continue
+                if not isinstance(el, Space):
+                    errors.append({"space_id": _eid_int(el.Id),
+                                   "error": "not a Space"})
+                    continue
+                try:
+                    el.SpaceType = enum_val
+                    updated.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({"space_id": _eid_int(el.Id),
+                                   "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "space_type":    space_type,
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_list_hvac_zones(doc, input_dict):
+    """List every HVAC Zone in the document with the spaces it
+    contains and basic geometry."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    try:
+        col = FilteredElementCollector(doc).OfClass(MechZone)
+        out = []
+        for z in col:
+            row = {
+                "id":         _eid_int(z.Id),
+                "name":       _safe_name(z),
+                "space_count": 0,
+                "area_sqft":  0.0,
+                "level":      None,
+            }
+            try:
+                row["space_count"] = int(z.NumOfSpaces)
+            except Exception:
+                pass
+            try:
+                row["area_sqft"] = round(float(z.Area), 2)
+            except Exception:
+                pass
+            try:
+                lvl_id = z.LevelId
+                if lvl_id is not None:
+                    lvl = doc.GetElement(lvl_id)
+                    if lvl is not None:
+                        row["level"] = _safe_name(lvl)
+            except Exception:
+                pass
+            out.append(row)
+        out.sort(key=lambda r: (r.get("level") or "", r.get("name") or ""))
+        return {"count": len(out), "zones": out}
+    except Exception as e:
+        return {"error": "list_hvac_zones failed: {}".format(e)}
+
+
+def _tool_create_hvac_zone(doc, input_dict):
+    """Create an empty HVAC Zone on a level + phase. Add spaces to
+    it afterwards via add_spaces_to_zone."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    level_id = inp.get("level_id")
+    name     = (inp.get("name") or "").strip()
+    if level_id is None:
+        return {"error": "level_id is required."}
+
+    lvl, err = _resolve_element(doc, level_id)
+    if err:
+        return {"error": "level_id: " + err}
+    if not isinstance(lvl, Level):
+        return {"error": "level_id is not a Level."}
+
+    phase = _first_phase(doc)
+    if phase is None:
+        return {"error": "No phases in host doc."}
+
+    try:
+        t = Transaction(doc, "Create HVAC zone{}".format(
+            " '{}'".format(name) if name else ""))
+        t.Start()
+        try:
+            zone = doc.Create.NewZone(lvl, phase)
+            if name:
+                try:
+                    zone.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "NewZone failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "zone_id":   _eid_int(zone.Id),
+        "zone_name": _safe_name(zone),
+        "level_id":  _eid_int(lvl.Id),
+    }
+
+
+def _tool_add_spaces_to_zone(doc, input_dict):
+    """Add one or more Spaces to an existing HVAC Zone. Spaces must
+    be on the same Level + Phase as the zone."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    zone_id   = inp.get("zone_id")
+    space_ids = inp.get("space_ids") or []
+    if zone_id is None:
+        return {"error": "zone_id is required."}
+    if not space_ids:
+        return {"error": "space_ids is required."}
+
+    zone, err = _resolve_element(doc, zone_id)
+    if err:
+        return {"error": "zone_id: " + err}
+    if not isinstance(zone, MechZone):
+        return {"error": "zone_id is not a Zone."}
+
+    added = []
+    errors = []
+    try:
+        t = Transaction(doc, "Add {} space(s) to zone '{}'".format(
+            len(space_ids), _safe_name(zone) or "?"))
+        t.Start()
+        try:
+            space_set = SpaceSet()
+            for sid in space_ids:
+                el, err = _resolve_element(doc, sid)
+                if err:
+                    errors.append({"space_id": sid, "error": err})
+                    continue
+                if not isinstance(el, Space):
+                    errors.append({"space_id": _eid_int(el.Id),
+                                   "error": "not a Space"})
+                    continue
+                try:
+                    space_set.Insert(el)
+                    added.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({"space_id": _eid_int(el.Id),
+                                   "error": str(e)})
+            if space_set.Size > 0:
+                try:
+                    zone.AddSpaces(space_set)
+                except Exception as e:
+                    try:
+                        if t.HasStarted() and not t.HasEnded():
+                            t.RollBack()
+                    except Exception:
+                        pass
+                    return {"error": "AddSpaces failed: {}".format(e),
+                            "errors": errors}
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "zone_id":     _eid_int(zone.Id),
+        "zone_name":   _safe_name(zone),
+        "added_count": len(added),
+        "added_ids":   added,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_get_zone_loads(doc, input_dict):
+    """Read computed heating + cooling loads for one or more HVAC
+    Zones. Loads in BTU/hr when conversion succeeds."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    zone_ids = inp.get("zone_ids") or []
+    if not zone_ids:
+        return {"error": "zone_ids is required."}
+
+    out = []
+    errors = []
+    for zid in zone_ids:
+        el, err = _resolve_element(doc, zid)
+        if err:
+            errors.append({"zone_id": zid, "error": err})
+            continue
+        if not isinstance(el, MechZone):
+            errors.append({"zone_id": _eid_int(el.Id),
+                           "error": "not a Zone"})
+            continue
+        row = {
+            "zone_id":             _eid_int(el.Id),
+            "name":                _safe_name(el),
+            "space_count":         0,
+            "design_heating_btuh": None,
+            "design_cooling_btuh": None,
+        }
+        try:
+            row["space_count"] = int(el.NumOfSpaces)
+        except Exception:
+            pass
+        # Loads via parameters (Zone doesn't expose these as direct
+        # properties in all versions; LookupParameter is the fallback).
+        for fld, names in (
+            ("design_heating_btuh",
+             ["Design Heating Load", "Design Heat Load Per Area"]),
+            ("design_cooling_btuh",
+             ["Design Cooling Load", "Design Cool Load Per Area"]),
+        ):
+            for nm in names:
+                try:
+                    p = el.LookupParameter(nm)
+                    if p is not None and p.HasValue:
+                        row[fld] = _convert_load_btuh(p.AsDouble())
+                        break
+                except Exception:
+                    continue
+        out.append(row)
+
+    result = {"count": len(out), "zones": out}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Export & print (v4.6)
+# ---------------------------------------------------------------------------
+#
+# Wraps Revit's Export() for the formats engineers actually use:
+# PDF, DWG, DWFx, IFC, NWC (Navisworks), FBX, gbXML, image, schedule CSV.
+# Each tool returns the list of files Revit produced so the chatbot
+# can give the user a concrete answer about where exports landed.
+
+
+def _default_export_dir(subfolder=None):
+    """Default export folder: %USERPROFILE%\\Documents\\dbHMS Revit Exports\\.
+    Auto-created if missing. Optional subfolder under that."""
+    base = os.path.join(os.path.expanduser("~"), "Documents",
+                        "dbHMS Revit Exports")
+    if subfolder:
+        base = os.path.join(base, subfolder)
+    try:
+        if not os.path.isdir(base):
+            os.makedirs(base)
+    except Exception:
+        pass
+    return base
+
+
+def _resolve_export_folder(folder_input, default_sub=None):
+    """Coerce a user-supplied folder string to a real, existing
+    directory. Empty / None falls back to the default export dir."""
+    if folder_input and str(folder_input).strip():
+        folder = str(folder_input).strip()
+        try:
+            if not os.path.isdir(folder):
+                os.makedirs(folder)
+        except Exception:
+            pass
+        return folder
+    return _default_export_dir(default_sub)
+
+
+def _typed_view_id_list(doc, view_ids, allow_sheet=True):
+    """Convert a Python list of int view ids to ICollection[ElementId]
+    of valid View instances. Returns (typed_list, valid_views, errors)."""
+    typed = NetList[ElementId]()
+    valids = []
+    errors = []
+    for vid in view_ids:
+        el, err = _resolve_element(doc, vid)
+        if err:
+            errors.append({"view_id": vid, "error": err})
+            continue
+        if not isinstance(el, View):
+            errors.append({"view_id": _eid_int(el.Id), "error": "not a View"})
+            continue
+        if not allow_sheet and isinstance(el, ViewSheet):
+            errors.append({"view_id": _eid_int(el.Id),
+                           "error": "sheets not allowed for this export"})
+            continue
+        typed.Add(el.Id)
+        valids.append(el)
+    return typed, valids, errors
+
+
+def _files_in_folder_since(folder, since_time, extensions=None):
+    """List files in `folder` modified at or after `since_time`,
+    optionally filtered by extension list (lowercase, with dot)."""
+    out = []
+    try:
+        for fn in os.listdir(folder):
+            full = os.path.join(folder, fn)
+            try:
+                if not os.path.isfile(full):
+                    continue
+                mt = os.path.getmtime(full)
+                if mt < since_time - 1.0:  # 1s tolerance
+                    continue
+                if extensions:
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext not in extensions:
+                        continue
+                out.append({"path": full, "name": fn,
+                            "size_bytes": os.path.getsize(full)})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    out.sort(key=lambda f: f.get("name") or "")
+    return out
+
+
+_WIN_INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*]')
+
+
+def _clean_filename_revit_style(s):
+    """Strip ONLY Windows-illegal filename characters; preserve
+    spaces, dashes, and most punctuation exactly as the user sees
+    them in Revit. This matches Revit's own PDF-export naming
+    behaviour ('M-101 - MECHANICAL FIRST FLOOR PLAN.pdf' instead of
+    'M-101_-_MECHANICAL_FIRST_FLOOR_PLAN.pdf')."""
+    if not s:
+        return "untitled"
+    cleaned = _WIN_INVALID_FILENAME_RE.sub('', s)
+    # Collapse any newlines / tabs to spaces.
+    cleaned = re.sub(r'[\r\n\t]+', ' ', cleaned)
+    # Collapse runs of whitespace, but preserve single spaces.
+    cleaned = re.sub(r' {2,}', ' ', cleaned).strip()
+    # Strip trailing dots / spaces (Windows rejects those).
+    while cleaned and cleaned[-1] in '. ':
+        cleaned = cleaned[:-1]
+    return cleaned or "untitled"
+
+
+def _pdf_filename_for_view(view):
+    """Build a clean default PDF filename (no extension) for a view
+    or sheet, matching Revit's own default. Sheets get '<SheetNumber>
+    - <SheetName>'; other views get just their name. Spaces and the
+    project's own dash style are preserved."""
+    if isinstance(view, ViewSheet):
+        try:
+            num = view.SheetNumber or ""
+        except Exception:
+            num = ""
+        name = _safe_name(view) or ""
+        if num and name:
+            return _clean_filename_revit_style(u"{} - {}".format(num, name))
+        return _clean_filename_revit_style(num or name or "sheet")
+    return _clean_filename_revit_style(_safe_name(view) or "view")
+
+
+def _tool_export_to_pdf(doc, input_dict):
+    """Export one or more sheets / views to PDF (Revit 2022+ native
+    PDF export, no Adobe / PDF printer required).
+
+    Naming:
+      - combine=true: a single multi-page PDF named `file_name`
+        (or '<DocTitle>_export.pdf' if file_name is not given).
+      - combine=false: one PDF per view, named '<SheetNumber> -
+        <SheetName>.pdf' for sheets, or '<ViewName>.pdf' for other
+        views. Built as N separate Export calls so each file gets
+        the right name (Revit's default per-view naming is verbose
+        and includes view-type prefixes engineers don't want).
+    """
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids = inp.get("view_ids") or []
+    folder   = _resolve_export_folder(inp.get("folder"), "pdf")
+    combine  = bool(inp.get("combine", False))
+    name     = (inp.get("file_name") or "").strip()
+
+    if not view_ids:
+        return {"error": "view_ids is required."}
+
+    typed, valids, errors = _typed_view_id_list(doc, view_ids)
+    if typed.Count == 0:
+        return {"error": "No valid views to export.", "errors": errors}
+
+    started_at = time.time()
+
+    if combine:
+        opts = PDFExportOptions()
+        try:
+            opts.Combine = True
+        except Exception:
+            pass
+        out_name = name or "{}_export".format(
+            _safe_filename(doc.Title or "revit"))
+        try:
+            opts.FileName = out_name
+        except Exception:
+            pass
+        try:
+            doc.Export(folder, typed, opts)
+        except Exception as e:
+            return {"error": "PDF Export (combine) raised: {}".format(e),
+                    "errors": errors,
+                    "folder": folder}
+    else:
+        # One Export call per view so each file lands with the exact
+        # name we want (Combine=True is what makes Revit respect the
+        # FileName option - using it on a single-view list yields
+        # one file named exactly that).
+        per_view_errors = []
+        for view in valids:
+            single = NetList[ElementId]()
+            single.Add(view.Id)
+            opts = PDFExportOptions()
+            try:
+                opts.Combine = True
+            except Exception:
+                pass
+            try:
+                opts.FileName = _pdf_filename_for_view(view)
+            except Exception:
+                pass
+            try:
+                doc.Export(folder, single, opts)
+            except Exception as e:
+                per_view_errors.append({
+                    "view_id":   _eid_int(view.Id),
+                    "view_name": _safe_name(view),
+                    "error":     "PDF Export raised: {}".format(e),
+                })
+        errors.extend(per_view_errors)
+
+    files = _files_in_folder_since(folder, started_at, extensions=[".pdf"])
+    result = {
+        "folder":     folder,
+        "combined":   combine,
+        "view_count": typed.Count,
+        "file_count": len(files),
+        "files":      files,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_export_to_dwg(doc, input_dict):
+    """Export one or more views / sheets to DWG. dwg_version accepts
+    'R2018', 'R2013', 'R2010', 'R2007', 'R2004', 'R2000' (default
+    R2018)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids    = inp.get("view_ids") or []
+    folder      = _resolve_export_folder(inp.get("folder"), "dwg")
+    file_prefix = (inp.get("file_prefix") or "").strip()
+    dwg_version = (inp.get("dwg_version") or "R2018").strip().upper()
+
+    if not view_ids:
+        return {"error": "view_ids is required."}
+
+    typed, valids, errors = _typed_view_id_list(doc, view_ids)
+    if typed.Count == 0:
+        return {"error": "No valid views to export.", "errors": errors}
+
+    opts = DWGExportOptions()
+    ver_enum = getattr(ACADVersion, dwg_version, None)
+    if ver_enum is not None:
+        try:
+            opts.FileVersion = ver_enum
+        except Exception:
+            pass
+
+    if not file_prefix:
+        file_prefix = _safe_filename(doc.Title or "revit") + "_"
+
+    started_at = time.time()
+    try:
+        doc.Export(folder, file_prefix, typed, opts)
+    except Exception as e:
+        return {"error": "DWG Export raised: {}".format(e),
+                "errors": errors,
+                "folder": folder}
+
+    files = _files_in_folder_since(folder, started_at, extensions=[".dwg"])
+    result = {
+        "folder":      folder,
+        "dwg_version": dwg_version,
+        "view_count":  typed.Count,
+        "file_count":  len(files),
+        "files":       files,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_export_to_dwfx(doc, input_dict):
+    """Export views / sheets to DWFx (Autodesk Design Web Format).
+    Use combine=true for one multi-page DWFx; otherwise one per view."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids = inp.get("view_ids") or []
+    folder   = _resolve_export_folder(inp.get("folder"), "dwfx")
+    combine  = bool(inp.get("combine", False))
+    name     = (inp.get("file_name") or "").strip()
+
+    if not view_ids:
+        return {"error": "view_ids is required."}
+
+    typed, valids, errors = _typed_view_id_list(doc, view_ids)
+    if typed.Count == 0:
+        return {"error": "No valid views to export.", "errors": errors}
+
+    opts = DWFExportOptions()
+    # MergedViews controls whether all views go into one file.
+    try:
+        opts.MergedViews = combine
+    except Exception:
+        pass
+
+    if not name:
+        name = _safe_filename(doc.Title or "revit") + "_export"
+
+    started_at = time.time()
+    try:
+        # DWFx uses the same Export entry, but the FORMAT is driven
+        # by the .dwfx extension on the filename Revit emits. The
+        # DWFExportOptions has a DWFx-specific subclass in some
+        # versions; here we just use the generic options.
+        doc.Export(folder, name, typed, opts)
+    except Exception as e:
+        return {"error": "DWFx Export raised: {}".format(e),
+                "errors": errors,
+                "folder": folder}
+
+    files = _files_in_folder_since(
+        folder, started_at, extensions=[".dwfx", ".dwf"])
+    result = {
+        "folder":     folder,
+        "combined":   combine,
+        "view_count": typed.Count,
+        "file_count": len(files),
+        "files":      files,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_export_to_ifc(doc, input_dict):
+    """Export the whole document to IFC. ifc_version accepts
+    'IFC4', 'IFC2x3', 'IFC2x2'. Default IFC4."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    folder      = _resolve_export_folder(inp.get("folder"), "ifc")
+    file_name   = (inp.get("file_name") or "").strip()
+    ifc_version = (inp.get("ifc_version") or "IFC4").strip()
+
+    if not file_name:
+        file_name = _safe_filename(doc.Title or "revit") + ".ifc"
+    if not file_name.lower().endswith(".ifc"):
+        file_name = file_name + ".ifc"
+
+    opts = IFCExportOptions()
+    ver_map = {
+        "ifc4":   getattr(IFCVersion, "IFC4",   None),
+        "ifc2x3": getattr(IFCVersion, "IFC2x3", None),
+        "ifc2x2": getattr(IFCVersion, "IFC2x2", None),
+    }
+    ver_enum = ver_map.get(ifc_version.lower())
+    if ver_enum is not None:
+        try:
+            opts.FileVersion = ver_enum
+        except Exception:
+            pass
+
+    try:
+        doc.Export(folder, file_name, opts)
+    except Exception as e:
+        return {"error": "IFC Export raised: {}".format(e),
+                "folder": folder}
+
+    out_path = os.path.join(folder, file_name)
+    out = {
+        "folder":      folder,
+        "file_name":   file_name,
+        "ifc_version": ifc_version,
+    }
+    try:
+        if os.path.isfile(out_path):
+            out["path"]       = out_path
+            out["size_bytes"] = os.path.getsize(out_path)
+    except Exception:
+        pass
+    return out
+
+
+def _tool_export_to_nwc(doc, input_dict):
+    """Export the whole document to NWC (Navisworks Cache). Requires
+    the Autodesk Navisworks exporter plugin to be installed - the
+    call raises if it isn't."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    folder    = _resolve_export_folder(inp.get("folder"), "nwc")
+    file_name = (inp.get("file_name") or "").strip()
+    if not file_name:
+        file_name = _safe_filename(doc.Title or "revit") + ".nwc"
+    if not file_name.lower().endswith(".nwc"):
+        file_name = file_name + ".nwc"
+
+    opts = NavisworksExportOptions()
+    try:
+        doc.Export(folder, file_name, opts)
+    except Exception as e:
+        return {"error": ("NWC Export raised: {}. The Navisworks "
+                          "exporter plugin must be installed for "
+                          "this format.").format(e),
+                "folder": folder}
+
+    out_path = os.path.join(folder, file_name)
+    out = {"folder": folder, "file_name": file_name}
+    try:
+        if os.path.isfile(out_path):
+            out["path"]       = out_path
+            out["size_bytes"] = os.path.getsize(out_path)
+    except Exception:
+        pass
+    return out
+
+
+def _tool_export_to_fbx(doc, input_dict):
+    """Export a 3D view to FBX (visualization handoff). Only works on
+    3D views - 2D views are rejected by Revit. Pass a single
+    view_id of a 3D view."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id   = inp.get("view_id")
+    folder    = _resolve_export_folder(inp.get("folder"), "fbx")
+    file_name = (inp.get("file_name") or "").strip()
+
+    if view_id is None:
+        return {"error": "view_id is required (must be a 3D view)."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View3D):
+        return {"error": ("view_id is not a 3D View. FBX export "
+                          "requires a 3D view (ViewFamily.ThreeDimensional).")}
+
+    if not file_name:
+        file_name = _safe_filename(_safe_name(view) or "revit3d") + ".fbx"
+    if not file_name.lower().endswith(".fbx"):
+        file_name = file_name + ".fbx"
+
+    opts = FBXExportOptions()
+    typed = NetList[ElementId]()
+    typed.Add(view.Id)
+
+    try:
+        doc.Export(folder, file_name, typed, opts)
+    except Exception as e:
+        return {"error": "FBX Export raised: {}".format(e),
+                "folder": folder}
+
+    out_path = os.path.join(folder, file_name)
+    out = {
+        "folder":    folder,
+        "file_name": file_name,
+        "view_id":   _eid_int(view.Id),
+        "view_name": _safe_name(view),
+    }
+    try:
+        if os.path.isfile(out_path):
+            out["path"]       = out_path
+            out["size_bytes"] = os.path.getsize(out_path)
+    except Exception:
+        pass
+    return out
+
+
+def _tool_export_to_gbxml(doc, input_dict):
+    """Export the document's analytical model to gbXML (energy
+    analysis input for eQUEST / IES / OpenStudio)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    folder    = _resolve_export_folder(inp.get("folder"), "gbxml")
+    file_name = (inp.get("file_name") or "").strip()
+    if not file_name:
+        file_name = _safe_filename(doc.Title or "revit") + ".xml"
+    if not file_name.lower().endswith(".xml"):
+        file_name = file_name + ".xml"
+
+    opts = GBXMLExportOptions()
+    try:
+        doc.Export(folder, file_name, opts)
+    except Exception as e:
+        return {"error": "gbXML Export raised: {}".format(e),
+                "folder": folder}
+
+    out_path = os.path.join(folder, file_name)
+    out = {"folder": folder, "file_name": file_name}
+    try:
+        if os.path.isfile(out_path):
+            out["path"]       = out_path
+            out["size_bytes"] = os.path.getsize(out_path)
+    except Exception:
+        pass
+    return out
+
+
+def _tool_export_view_image_to_file(doc, input_dict):
+    """Export one or more views/sheets as image files (PNG / JPG /
+    BMP / TIFF) at a chosen pixel size."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids   = inp.get("view_ids") or []
+    folder     = _resolve_export_folder(inp.get("folder"), "images")
+    fmt        = (inp.get("image_format") or "PNG").strip().upper()
+    pixel_size = int(inp.get("pixel_size") or 1600)
+    file_prefix = (inp.get("file_prefix") or "").strip()
+
+    if not view_ids:
+        return {"error": "view_ids is required."}
+
+    typed, valids, errors = _typed_view_id_list(doc, view_ids)
+    if typed.Count == 0:
+        return {"error": "No valid views to export.", "errors": errors}
+
+    fmt_map = {
+        "PNG":  ImageFileType.PNG,
+        "JPG":  ImageFileType.JPEGLossless,
+        "JPEG": ImageFileType.JPEGLossless,
+        "BMP":  ImageFileType.BMP,
+        "TIFF": ImageFileType.TIFF,
+        "TGA":  ImageFileType.TARGA,
+    }
+    file_type = fmt_map.get(fmt)
+    if file_type is None:
+        return {"error": ("Unknown image_format '{}'. Use PNG / JPG / "
+                          "BMP / TIFF / TGA.").format(fmt)}
+
+    if not file_prefix:
+        file_prefix = _safe_filename(doc.Title or "revit")
+    file_path_no_ext = os.path.join(folder, file_prefix)
+
+    opts = ImageExportOptions()
+    opts.FilePath = file_path_no_ext
+    opts.HLRandWFViewsFileType = file_type
+    opts.ShadowViewsFileType   = file_type
+    opts.ImageResolution       = ImageResolution.DPI_150
+    opts.ZoomType              = ZoomFitType.FitToPage
+    opts.PixelSize             = pixel_size
+    opts.ExportRange           = ExportRange.SetOfViews
+    try:
+        opts.SetViewsAndSheets(typed)
+    except Exception as e:
+        return {"error": "ImageExportOptions.SetViewsAndSheets failed: {}".format(e)}
+
+    started_at = time.time()
+    try:
+        doc.ExportImage(opts)
+    except Exception as e:
+        return {"error": "ExportImage raised: {}".format(e),
+                "folder": folder}
+
+    ext_map = {
+        "PNG":  [".png"],
+        "JPG":  [".jpg", ".jpeg"],
+        "JPEG": [".jpg", ".jpeg"],
+        "BMP":  [".bmp"],
+        "TIFF": [".tif", ".tiff"],
+        "TGA":  [".tga"],
+    }
+    files = _files_in_folder_since(folder, started_at,
+                                   extensions=ext_map.get(fmt))
+    result = {
+        "folder":       folder,
+        "image_format": fmt,
+        "pixel_size":   pixel_size,
+        "view_count":   typed.Count,
+        "file_count":   len(files),
+        "files":        files,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_export_schedule_to_csv(doc, input_dict):
+    """Export a ViewSchedule's contents to a CSV-style text file
+    (default delimiter ',' / qualifier '\"'). Engineers usually
+    open the output directly in Excel."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    schedule_id = inp.get("schedule_id")
+    folder      = _resolve_export_folder(inp.get("folder"), "schedules")
+    file_name   = (inp.get("file_name") or "").strip()
+    delimiter   = inp.get("delimiter") or ","
+
+    if schedule_id is None:
+        return {"error": "schedule_id is required."}
+    sched, err = _resolve_element(doc, schedule_id)
+    if err:
+        return {"error": "schedule_id: " + err}
+    if not isinstance(sched, ViewSchedule):
+        return {"error": "schedule_id is not a ViewSchedule."}
+
+    if not file_name:
+        file_name = _safe_filename(_safe_name(sched) or "schedule") + ".csv"
+    if "." not in file_name:
+        file_name = file_name + ".csv"
+
+    opts = ViewScheduleExportOptions()
+    try:
+        opts.FieldDelimiter = delimiter
+    except Exception:
+        pass
+    try:
+        opts.TextQualifier  = ExportTextQualifier.DoubleQuote
+    except Exception:
+        pass
+    try:
+        opts.HeadersFootersBlanks = False
+    except Exception:
+        pass
+
+    try:
+        sched.Export(folder, file_name, opts)
+    except Exception as e:
+        return {"error": "Schedule.Export raised: {}".format(e),
+                "folder": folder}
+
+    out_path = os.path.join(folder, file_name)
+    out = {
+        "schedule_id":   _eid_int(sched.Id),
+        "schedule_name": _safe_name(sched),
+        "folder":        folder,
+        "file_name":     file_name,
+    }
+    try:
+        if os.path.isfile(out_path):
+            out["path"]       = out_path
+            out["size_bytes"] = os.path.getsize(out_path)
+    except Exception:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# MEP systems & engineering math (v4.7)
+# ---------------------------------------------------------------------------
+#
+# Wraps Revit's MEP system API: HVAC / piping / electrical systems,
+# their members, connectors, insulation + lining, and read-only
+# size + flow inspection. Skips Revit's routing engine (auto-fitting
+# insertion) and auto-sizing analysis - those need a fuller MEP
+# pipeline that warrants its own iteration.
+
+
+_MEP_SYSTEM_CLASSES = (
+    ("mechanical", MechanicalSystem),
+    ("piping",     PipingSystem),
+    ("electrical", ElectricalSystem),
+)
+
+
+def _system_discipline(sys_el):
+    """Return 'mechanical' / 'piping' / 'electrical' / 'unknown'
+    based on the MEPSystem subclass."""
+    if isinstance(sys_el, MechanicalSystem): return "mechanical"
+    if isinstance(sys_el, PipingSystem):     return "piping"
+    if isinstance(sys_el, ElectricalSystem): return "electrical"
+    return "unknown"
+
+
+def _system_row(sys_el, doc, include_members=False):
+    """Common row builder for system list / detail tools."""
+    row = {
+        "id":           _eid_int(sys_el.Id),
+        "name":         _safe_name(sys_el) or "",
+        "discipline":   _system_discipline(sys_el),
+        "system_type":  None,
+        "system_type_id": None,
+        "member_count": 0,
+        "base_eq_id":   None,
+        "base_eq_name": None,
+    }
+    # System type
+    try:
+        type_id = sys_el.GetTypeId()
+        if type_id is not None and _eid_int(type_id) != -1:
+            type_el = doc.GetElement(type_id)
+            if type_el is not None:
+                row["system_type"]    = _safe_name(type_el)
+                row["system_type_id"] = _eid_int(type_id)
+    except Exception:
+        pass
+    # Base equipment
+    try:
+        be = sys_el.BaseEquipment
+        if be is not None:
+            row["base_eq_id"]   = _eid_int(be.Id)
+            row["base_eq_name"] = _safe_name(be)
+    except Exception:
+        pass
+    # Member count + ids
+    try:
+        elems = sys_el.Elements
+        member_ids = []
+        for el in elems:
+            try:
+                member_ids.append(_eid_int(el.Id))
+            except Exception:
+                continue
+        row["member_count"] = len(member_ids)
+        if include_members:
+            row["member_ids"] = member_ids
+    except Exception:
+        pass
+    # Flow (mech/piping) - reported in cfm or gpm depending on system
+    for fld, names in (
+        ("flow",          ["RBS_DUCT_FLOW_PARAM", "RBS_PIPE_FLOW_PARAM"]),
+    ):
+        for n in names:
+            try:
+                bip = getattr(BuiltInParameter, n, None)
+                if bip is None:
+                    continue
+                p = sys_el.get_Parameter(bip)
+                if p is not None and p.HasValue:
+                    row[fld] = round(float(p.AsDouble()), 4)
+                    break
+            except Exception:
+                continue
+    return row
+
+
+def _tool_list_systems(doc, input_dict):
+    """List every MEP system in the document (mechanical / piping /
+    electrical) with id, name, discipline, type, member count, and
+    base equipment (if any). Optional discipline filter."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    disc_filter = (inp.get("discipline") or "").strip().lower()
+    name_sub    = (inp.get("name_contains") or "").lower()
+
+    out = []
+    try:
+        for disc_name, cls in _MEP_SYSTEM_CLASSES:
+            if disc_filter and disc_filter not in disc_name:
+                continue
+            for sys_el in FilteredElementCollector(doc).OfClass(cls):
+                row = _system_row(sys_el, doc)
+                if name_sub and name_sub not in (row.get("name") or "").lower():
+                    continue
+                out.append(row)
+    except Exception as e:
+        return {"error": "list_systems failed: {}".format(e)}
+
+    out.sort(key=lambda r: (r.get("discipline") or "",
+                            r.get("system_type") or "",
+                            r.get("name") or ""))
+    return {"count": len(out), "systems": out}
+
+
+def _tool_get_system_info(doc, input_dict):
+    """Full detail on one MEP system: members (with id+name+
+    category), flow, base equipment, system type."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    system_id = inp.get("system_id")
+    if system_id is None:
+        return {"error": "system_id is required."}
+
+    sys_el, err = _resolve_element(doc, system_id)
+    if err:
+        return {"error": "system_id: " + err}
+    if not isinstance(sys_el, (MechanicalSystem, PipingSystem, ElectricalSystem)):
+        return {"error": "system_id is not an MEP system."}
+
+    row = _system_row(sys_el, doc, include_members=False)
+    members_detail = []
+    try:
+        for el in sys_el.Elements:
+            try:
+                members_detail.append({
+                    "id":       _eid_int(el.Id),
+                    "name":     _safe_name(el) or "",
+                    "category": el.Category.Name if el.Category else "",
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    row["members"] = members_detail
+    return row
+
+
+def _tool_list_connectors_for_element(doc, input_dict):
+    """List every Connector on an element with: direction (In / Out /
+    Bidirectional), domain (HVAC / Piping / Electrical / Cable Tray
+    Conduit), shape, dimensions, position (XYZ), and id of any
+    element it's connected to. Useful for diagnosing why elements
+    won't join into a system."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_id = inp.get("element_id")
+    if element_id is None:
+        return {"error": "element_id is required."}
+
+    el, err = _resolve_element(doc, element_id)
+    if err:
+        return {"error": "element_id: " + err}
+
+    cm = None
+    try:
+        cm = el.ConnectorManager
+    except Exception:
+        cm = None
+    if cm is None:
+        try:
+            mep_model = el.MEPModel
+            if mep_model is not None:
+                cm = mep_model.ConnectorManager
+        except Exception:
+            cm = None
+    if cm is None:
+        return {"error": "Element has no ConnectorManager (not an MEP element)."}
+
+    rows = []
+    try:
+        for c in cm.Connectors:
+            row = {
+                "id":          int(c.Id),
+                "direction":   str(c.Direction) if hasattr(c, "Direction") else "",
+                "domain":      str(c.Domain) if hasattr(c, "Domain") else "",
+                "shape":       str(c.Shape) if hasattr(c, "Shape") else "",
+                "is_connected": False,
+                "connected_to": [],
+            }
+            try:
+                row["origin"] = _xyz_to_dict(c.Origin)
+            except Exception:
+                pass
+            # Dimensions per shape
+            try:
+                if str(c.Shape) == "Round":
+                    row["radius"] = round(float(c.Radius), 4)
+                else:
+                    row["width"]  = round(float(c.Width), 4)
+                    row["height"] = round(float(c.Height), 4)
+            except Exception:
+                pass
+            # Connected to?
+            try:
+                if c.IsConnected:
+                    row["is_connected"] = True
+                    for other in c.AllRefs:
+                        try:
+                            other_owner = other.Owner
+                            if other_owner is not None and other_owner.Id != el.Id:
+                                row["connected_to"].append({
+                                    "element_id":   _eid_int(other_owner.Id),
+                                    "element_name": _safe_name(other_owner),
+                                })
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            rows.append(row)
+    except Exception as e:
+        return {"error": "Connector enumeration failed: {}".format(e)}
+
+    return {
+        "element_id":     _eid_int(el.Id),
+        "element_name":   _safe_name(el),
+        "connector_count": len(rows),
+        "connectors":     rows,
+    }
+
+
+def _tool_get_unconnected_terminals(doc, input_dict):
+    """Find MEP elements in a category that are NOT currently part
+    of any system - useful for finding diffusers, plumbing fixtures,
+    etc. that haven't been wired up. Pass category like
+    'OST_DuctTerminal', 'OST_PlumbingFixtures', 'OST_LightingFixtures'."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    category = (inp.get("category") or "OST_DuctTerminal").strip()
+    max_results = int(inp.get("max_results") or 500)
+
+    bic = getattr(BuiltInCategory, category, None)
+    if bic is None:
+        return {"error": ("Unknown category: {}. Use a BuiltInCategory "
+                          "name like 'OST_DuctTerminal'.").format(category)}
+
+    out = []
+    truncated = False
+    try:
+        col = FilteredElementCollector(doc).OfCategory(bic).WhereElementIsNotElementType()
+        for el in col:
+            # Get its MEPModel.ConnectorManager and check if any
+            # connector is unconnected.
+            cm = None
+            try:
+                mm = el.MEPModel
+                if mm is not None:
+                    cm = mm.ConnectorManager
+            except Exception:
+                pass
+            if cm is None:
+                try:
+                    cm = el.ConnectorManager
+                except Exception:
+                    cm = None
+            if cm is None:
+                continue
+
+            has_unconnected = False
+            try:
+                for c in cm.Connectors:
+                    try:
+                        if not c.IsConnected:
+                            has_unconnected = True
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+            if not has_unconnected:
+                continue
+
+            row = {
+                "id":       _eid_int(el.Id),
+                "name":     _safe_name(el) or "",
+                "category": el.Category.Name if el.Category else "",
+            }
+            try:
+                row["family"] = el.Symbol.Family.Name
+            except Exception:
+                pass
+            try:
+                row["type"] = _safe_name(el.Symbol)
+            except Exception:
+                pass
+            out.append(row)
+            if len(out) >= max_results:
+                truncated = True
+                break
+    except Exception as e:
+        return {"error": "Enumeration failed: {}".format(e)}
+
+    out.sort(key=lambda r: (r.get("category") or "", r.get("name") or ""))
+    result = {"count": len(out), "elements": out, "category": category}
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+def _tool_get_pipe_duct_sizes(doc, input_dict):
+    """Read sizes + flow on duct / pipe / cable tray / conduit
+    elements. Sizes are reported in feet (Revit internal). For
+    rectangular duct: width + height. For round duct / pipe:
+    diameter. Flow is in CFM for duct, GPM for pipe (Revit's
+    project units may differ - values are raw internal)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids = inp.get("element_ids") or []
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    out = []
+    errors = []
+    for eid in element_ids:
+        el, err = _resolve_element(doc, eid)
+        if err:
+            errors.append({"element_id": eid, "error": err})
+            continue
+        row = {
+            "element_id": _eid_int(el.Id),
+            "name":       _safe_name(el) or "",
+            "category":   el.Category.Name if el.Category else "",
+        }
+        # Width / height / diameter via built-in parameters
+        for fld, bip_name in (
+            ("width_ft",    "RBS_CURVE_WIDTH_PARAM"),
+            ("height_ft",   "RBS_CURVE_HEIGHT_PARAM"),
+            ("diameter_ft", "RBS_CURVE_DIAMETER_PARAM"),
+            ("flow",        "RBS_DUCT_FLOW_PARAM"),
+        ):
+            try:
+                bip = getattr(BuiltInParameter, bip_name, None)
+                if bip is None:
+                    continue
+                p = el.get_Parameter(bip)
+                if p is not None and p.HasValue:
+                    row[fld] = round(float(p.AsDouble()), 4)
+            except Exception:
+                continue
+        # Pipe size + flow
+        for fld, bip_name in (
+            ("pipe_diameter_ft", "RBS_PIPE_OUTER_DIAMETER"),
+            ("pipe_flow",        "RBS_PIPE_FLOW_PARAM"),
+        ):
+            try:
+                bip = getattr(BuiltInParameter, bip_name, None)
+                if bip is None:
+                    continue
+                p = el.get_Parameter(bip)
+                if p is not None and p.HasValue:
+                    row[fld] = round(float(p.AsDouble()), 4)
+            except Exception:
+                continue
+        # System name
+        try:
+            sn_param = el.get_Parameter(BuiltInParameter.RBS_SYSTEM_NAME_PARAM)
+            if sn_param is not None and sn_param.HasValue:
+                row["system_name"] = sn_param.AsString() or ""
+        except Exception:
+            pass
+        out.append(row)
+
+    result = {"count": len(out), "elements": out}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _resolve_system_type(doc, sys_type_id, expected_cls):
+    """Resolve a system_type_id to a system type element of the
+    expected class. Returns (type_el, error)."""
+    if sys_type_id is None:
+        # Pick the first available type
+        try:
+            for t in FilteredElementCollector(doc).OfClass(expected_cls):
+                return t, None
+        except Exception:
+            pass
+        return None, "no system_type_id given and no types in document"
+    el, err = _resolve_element(doc, sys_type_id)
+    if err:
+        return None, "system_type_id: " + err
+    if not isinstance(el, expected_cls):
+        return None, "system_type_id is not a {}".format(expected_cls.__name__)
+    return el, None
+
+
+def _tool_create_mech_system(doc, input_dict):
+    """Create a new MechanicalSystem from a list of element ids +
+    a system type id. Optional base_equipment_id designates which
+    element is the system's 'source' (typically an air handler,
+    fan, RTU). If omitted, no base equipment is assigned."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids       = inp.get("element_ids") or []
+    system_type_id    = inp.get("system_type_id")
+    base_equipment_id = inp.get("base_equipment_id")
+    name              = (inp.get("name") or "").strip()
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    sys_type, err = _resolve_system_type(doc, system_type_id, MechanicalSystemType)
+    if err:
+        return {"error": err}
+
+    base_eid = None
+    if base_equipment_id is not None:
+        be, err = _resolve_element(doc, base_equipment_id)
+        if err:
+            return {"error": "base_equipment_id: " + err}
+        base_eid = be.Id
+
+    typed = _typed_id_list(element_ids)
+    if typed.Count == 0:
+        return {"error": "No valid element ids."}
+
+    try:
+        t = Transaction(doc, "Create mechanical system")
+        t.Start()
+        try:
+            try:
+                sys_el = MechanicalSystem.Create(
+                    doc, base_eid, typed, sys_type.Id)
+            except Exception as e:
+                # Some Revit versions don't accept None for base_eid;
+                # try the no-base overload.
+                if base_eid is None:
+                    sys_el = MechanicalSystem.Create(doc, typed, sys_type.Id)
+                else:
+                    raise
+            if name:
+                try:
+                    sys_el.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "MechanicalSystem.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "system_id":     _eid_int(sys_el.Id),
+        "system_name":   _safe_name(sys_el),
+        "discipline":    "mechanical",
+        "system_type":   _safe_name(sys_type),
+        "member_count":  typed.Count,
+    }
+
+
+def _tool_create_pipe_system(doc, input_dict):
+    """Create a new PipingSystem. Same shape as create_mech_system
+    but uses PipingSystem.Create + PipingSystemType."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids       = inp.get("element_ids") or []
+    system_type_id    = inp.get("system_type_id")
+    base_equipment_id = inp.get("base_equipment_id")
+    name              = (inp.get("name") or "").strip()
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    sys_type, err = _resolve_system_type(doc, system_type_id, PipingSystemType)
+    if err:
+        return {"error": err}
+
+    base_eid = None
+    if base_equipment_id is not None:
+        be, err = _resolve_element(doc, base_equipment_id)
+        if err:
+            return {"error": "base_equipment_id: " + err}
+        base_eid = be.Id
+
+    typed = _typed_id_list(element_ids)
+    if typed.Count == 0:
+        return {"error": "No valid element ids."}
+
+    try:
+        t = Transaction(doc, "Create piping system")
+        t.Start()
+        try:
+            try:
+                sys_el = PipingSystem.Create(doc, base_eid, typed, sys_type.Id)
+            except Exception:
+                if base_eid is None:
+                    sys_el = PipingSystem.Create(doc, typed, sys_type.Id)
+                else:
+                    raise
+            if name:
+                try:
+                    sys_el.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "PipingSystem.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "system_id":    _eid_int(sys_el.Id),
+        "system_name":  _safe_name(sys_el),
+        "discipline":   "piping",
+        "system_type":  _safe_name(sys_type),
+        "member_count": typed.Count,
+    }
+
+
+def _tool_create_electrical_circuit(doc, input_dict):
+    """Create an ElectricalSystem (circuit) from a set of devices +
+    a system type. Different signature than mech/pipe - electrical
+    uses Connector-based creation."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids    = inp.get("element_ids") or []
+    system_type_id = inp.get("system_type_id")
+    name           = (inp.get("name") or "").strip()
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    sys_type, err = _resolve_system_type(doc, system_type_id, ElectricalSystemType)
+    if err:
+        return {"error": err}
+
+    typed = _typed_id_list(element_ids)
+    if typed.Count == 0:
+        return {"error": "No valid element ids."}
+
+    try:
+        t = Transaction(doc, "Create electrical circuit")
+        t.Start()
+        try:
+            # ElectricalSystem.Create(doc, elements, systemType) form
+            sys_el = ElectricalSystem.Create(doc, typed, sys_type.Id)
+            if name:
+                try:
+                    sys_el.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "ElectricalSystem.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "system_id":    _eid_int(sys_el.Id),
+        "system_name":  _safe_name(sys_el),
+        "discipline":   "electrical",
+        "system_type":  _safe_name(sys_type),
+        "member_count": typed.Count,
+    }
+
+
+def _tool_add_element_to_system(doc, input_dict):
+    """Add one or more elements to an existing MEP system. Works on
+    mech / piping / electrical systems alike."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    system_id   = inp.get("system_id")
+    element_ids = inp.get("element_ids") or []
+
+    if system_id is None:
+        return {"error": "system_id is required."}
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    sys_el, err = _resolve_element(doc, system_id)
+    if err:
+        return {"error": "system_id: " + err}
+    if not isinstance(sys_el, (MechanicalSystem, PipingSystem, ElectricalSystem)):
+        return {"error": "system_id is not an MEP system."}
+
+    typed = _typed_id_list(element_ids)
+    if typed.Count == 0:
+        return {"error": "No valid element ids."}
+
+    try:
+        t = Transaction(doc, "Add {} element(s) to system".format(typed.Count))
+        t.Start()
+        try:
+            sys_el.Add(typed)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "MEPSystem.Add failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "system_id":   _eid_int(sys_el.Id),
+        "system_name": _safe_name(sys_el),
+        "added_count": typed.Count,
+    }
+
+
+def _tool_remove_element_from_system(doc, input_dict):
+    """Remove one or more elements from an MEP system. Same shape
+    as add_element_to_system."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    system_id   = inp.get("system_id")
+    element_ids = inp.get("element_ids") or []
+
+    if system_id is None:
+        return {"error": "system_id is required."}
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    sys_el, err = _resolve_element(doc, system_id)
+    if err:
+        return {"error": "system_id: " + err}
+    if not isinstance(sys_el, (MechanicalSystem, PipingSystem, ElectricalSystem)):
+        return {"error": "system_id is not an MEP system."}
+
+    typed = _typed_id_list(element_ids)
+    if typed.Count == 0:
+        return {"error": "No valid element ids."}
+
+    try:
+        t = Transaction(doc, "Remove {} element(s) from system".format(typed.Count))
+        t.Start()
+        try:
+            sys_el.Remove(typed)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "MEPSystem.Remove failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "system_id":     _eid_int(sys_el.Id),
+        "system_name":   _safe_name(sys_el),
+        "removed_count": typed.Count,
+    }
+
+
+def _tool_add_insulation(doc, input_dict):
+    """Add insulation wrap to one or more ducts OR pipes (the API
+    differs slightly between Duct vs Pipe). insulation_type_id is
+    required; thickness_in is in INCHES (converted to feet internally
+    since Revit's internal length unit is feet)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids        = inp.get("element_ids") or []
+    insulation_type_id = inp.get("insulation_type_id")
+    thickness_in       = inp.get("thickness_in")
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+    if insulation_type_id is None:
+        return {"error": ("insulation_type_id is required. Use "
+                          "list_filtered_types to find a "
+                          "DuctInsulationType or PipeInsulationType.")}
+    if thickness_in is None:
+        return {"error": "thickness_in is required (inches)."}
+
+    try:
+        thickness_ft = float(thickness_in) / 12.0
+    except Exception:
+        return {"error": "thickness_in must be numeric."}
+
+    type_el, err = _resolve_element(doc, insulation_type_id)
+    if err:
+        return {"error": "insulation_type_id: " + err}
+
+    added = []
+    errors = []
+    try:
+        t = Transaction(doc, "Add insulation to {} element(s)".format(
+            len(element_ids)))
+        t.Start()
+        try:
+            for eid in element_ids:
+                el, err = _resolve_element(doc, eid)
+                if err:
+                    errors.append({"element_id": eid, "error": err})
+                    continue
+                try:
+                    if isinstance(el, Duct):
+                        ins = DuctInsulation.Create(
+                            doc, el.Id, type_el.Id, thickness_ft)
+                    elif isinstance(el, Pipe):
+                        ins = PipeInsulation.Create(
+                            doc, el.Id, type_el.Id, thickness_ft)
+                    else:
+                        errors.append({
+                            "element_id": _eid_int(el.Id),
+                            "error":      "not a Duct or Pipe ({})".format(
+                                type(el).__name__),
+                        })
+                        continue
+                    added.append({
+                        "element_id":    _eid_int(el.Id),
+                        "element_name":  _safe_name(el),
+                        "insulation_id": _eid_int(ins.Id),
+                    })
+                except Exception as e:
+                    errors.append({
+                        "element_id": _eid_int(el.Id),
+                        "error":      str(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "added_count":   len(added),
+        "added":         added,
+        "thickness_in":  float(thickness_in),
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_add_lining(doc, input_dict):
+    """Add internal lining to one or more DUCTS (acoustic / thermal
+    lining inside the duct). Pipes don't use lining - they use
+    insulation only. thickness_in is in inches."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids    = inp.get("element_ids") or []
+    lining_type_id = inp.get("lining_type_id")
+    thickness_in   = inp.get("thickness_in")
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+    if lining_type_id is None:
+        return {"error": ("lining_type_id is required (a "
+                          "DuctLiningType element).")}
+    if thickness_in is None:
+        return {"error": "thickness_in is required (inches)."}
+
+    try:
+        thickness_ft = float(thickness_in) / 12.0
+    except Exception:
+        return {"error": "thickness_in must be numeric."}
+
+    type_el, err = _resolve_element(doc, lining_type_id)
+    if err:
+        return {"error": "lining_type_id: " + err}
+    if not isinstance(type_el, DuctLiningType):
+        return {"error": "lining_type_id is not a DuctLiningType."}
+
+    added = []
+    errors = []
+    try:
+        t = Transaction(doc, "Add lining to {} duct(s)".format(
+            len(element_ids)))
+        t.Start()
+        try:
+            for eid in element_ids:
+                el, err = _resolve_element(doc, eid)
+                if err:
+                    errors.append({"element_id": eid, "error": err})
+                    continue
+                if not isinstance(el, Duct):
+                    errors.append({
+                        "element_id": _eid_int(el.Id),
+                        "error":      "not a Duct (lining is duct-only)",
+                    })
+                    continue
+                try:
+                    ln = DuctLining.Create(
+                        doc, el.Id, type_el.Id, thickness_ft)
+                    added.append({
+                        "duct_id":    _eid_int(el.Id),
+                        "duct_name":  _safe_name(el),
+                        "lining_id":  _eid_int(ln.Id),
+                    })
+                except Exception as e:
+                    errors.append({
+                        "element_id": _eid_int(el.Id),
+                        "error":      str(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "added_count":  len(added),
+        "added":        added,
+        "thickness_in": float(thickness_in),
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 # ---- Tool registry ---------------------------------------------------------
 
 # API-side tool definitions sent to Anthropic on every request.
@@ -6158,6 +10049,895 @@ TOOL_DEFS = [
             "required": ["element_id"],
         },
     },
+
+    # ---- Annotation finishing (v4.4) --------------------------------------
+
+    {
+        "name": "place_grid",
+        "description": (
+            "Place an architectural grid line by world-space "
+            "endpoints. Z is typically 0 for plan-drawn grids."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":  {"type": "string", "description": "Grid name, e.g. 'A'."},
+                "start": {"type": "object",
+                          "properties": {"x": {"type": "number"},
+                                         "y": {"type": "number"},
+                                         "z": {"type": "number"}}},
+                "end":   {"type": "object",
+                          "properties": {"x": {"type": "number"},
+                                         "y": {"type": "number"},
+                                         "z": {"type": "number"}}},
+            },
+            "required": ["start", "end"],
+        },
+    },
+    {
+        "name": "place_level",
+        "description": (
+            "Place a new Level at the given elevation (feet from "
+            "project base point). The new level can be named."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":         {"type": "string"},
+                "elevation_ft": {"type": "number"},
+            },
+            "required": ["elevation_ft"],
+        },
+    },
+    {
+        "name": "place_dimension",
+        "description": (
+            "Place a linear/aligned dimension in a view across 2+ "
+            "elements (grids, columns, walls, ducts, etc.). The "
+            "dimension snaps to each element's natural reference "
+            "(centerline / location). line_start + line_end define "
+            "WHERE the dimension line is drawn (not the elements'  "
+            "geometry); the dimension extends along that line."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":     {"type": "integer"},
+                "element_ids": {"type": "array", "items": {"type": "integer"},
+                                "description": "Elements to dimension between (2+)."},
+                "line_start":  {"type": "object",
+                                "properties": {"x": {"type": "number"},
+                                               "y": {"type": "number"},
+                                               "z": {"type": "number"}}},
+                "line_end":    {"type": "object",
+                                "properties": {"x": {"type": "number"},
+                                               "y": {"type": "number"},
+                                               "z": {"type": "number"}}},
+            },
+            "required": ["view_id", "element_ids", "line_start", "line_end"],
+        },
+    },
+    {
+        "name": "place_spot_elevation",
+        "description": (
+            "Place a spot elevation in a view anchored to one "
+            "element's reference. origin is the point ON the "
+            "element (where the elevation is measured); bend_point "
+            "and end_point trace the leader from the origin to the "
+            "elevation text."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":    {"type": "integer"},
+                "element_id": {"type": "integer"},
+                "origin":     {"type": "object",
+                               "properties": {"x": {"type": "number"},
+                                              "y": {"type": "number"},
+                                              "z": {"type": "number"}}},
+                "bend_point": {"type": "object",
+                               "properties": {"x": {"type": "number"},
+                                              "y": {"type": "number"},
+                                              "z": {"type": "number"}}},
+                "end_point":  {"type": "object",
+                               "properties": {"x": {"type": "number"},
+                                              "y": {"type": "number"},
+                                              "z": {"type": "number"}}},
+                "has_leader": {"type": "boolean", "description": "Default true."},
+            },
+            "required": ["view_id", "element_id",
+                         "origin", "bend_point", "end_point"],
+        },
+    },
+    {
+        "name": "place_detail_line",
+        "description": (
+            "Place a detail line (view-only line, NOT a model "
+            "element) in a view. Common in drafting views and as "
+            "annotation overlays on plans."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id": {"type": "integer"},
+                "start":   {"type": "object",
+                            "properties": {"x": {"type": "number"},
+                                           "y": {"type": "number"},
+                                           "z": {"type": "number"}}},
+                "end":     {"type": "object",
+                            "properties": {"x": {"type": "number"},
+                                           "y": {"type": "number"},
+                                           "z": {"type": "number"}}},
+            },
+            "required": ["view_id", "start", "end"],
+        },
+    },
+    {
+        "name": "list_filled_region_types",
+        "description": (
+            "List FilledRegionTypes (fill pattern + line styles "
+            "available for place_filled_region)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "place_filled_region",
+        "description": (
+            "Place a 2D FilledRegion (hatched area) in a view. The "
+            "boundary is a list of XYZ points forming a closed "
+            "polygon (last segment auto-closes). Use "
+            "list_filled_region_types first to get a type_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":  {"type": "integer"},
+                "type_id":  {"type": "integer"},
+                "boundary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"x": {"type": "number"},
+                                       "y": {"type": "number"},
+                                       "z": {"type": "number"}},
+                    },
+                    "description": "3+ XYZ points forming a closed polygon.",
+                },
+            },
+            "required": ["view_id", "type_id", "boundary"],
+        },
+    },
+    {
+        "name": "list_revisions",
+        "description": (
+            "List every Revision in the document with sequence, "
+            "description, date, issued info, and visibility."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_revision",
+        "description": (
+            "Create a new Revision. All fields are optional - omit "
+            "and they default to Revit's defaults; the new "
+            "revision's sequence number is auto-assigned. "
+            "visibility accepts 'CloudAndTag', 'Hidden', 'TagOnly'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string"},
+                "date":        {"type": "string", "description": "Free-form string, e.g. '12/15/2025'."},
+                "issued_to":   {"type": "string"},
+                "issued_by":   {"type": "string"},
+                "issued":      {"type": "boolean"},
+                "visibility":  {"type": "string",
+                                "enum": ["CloudAndTag", "Hidden", "TagOnly"]},
+            },
+        },
+    },
+    {
+        "name": "update_revision",
+        "description": (
+            "Edit fields on an existing Revision. Only the fields "
+            "you pass are changed; everything else stays."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "revision_id": {"type": "integer"},
+                "description": {"type": "string"},
+                "date":        {"type": "string"},
+                "issued_to":   {"type": "string"},
+                "issued_by":   {"type": "string"},
+                "issued":      {"type": "boolean"},
+                "visibility":  {"type": "string",
+                                "enum": ["CloudAndTag", "Hidden", "TagOnly"]},
+            },
+            "required": ["revision_id"],
+        },
+    },
+    {
+        "name": "place_revision_cloud",
+        "description": (
+            "Place a revision cloud as a polygon boundary in a "
+            "view. For a rectangle, pass 4 corners as the boundary. "
+            "revision_id is optional - omit it and the highest-"
+            "sequence existing revision is used (or call "
+            "create_revision first if there are no revisions)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":     {"type": "integer"},
+                "revision_id": {"type": "integer"},
+                "boundary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"x": {"type": "number"},
+                                       "y": {"type": "number"},
+                                       "z": {"type": "number"}},
+                    },
+                    "description": "3+ XYZ points (rectangle = 4 corners).",
+                },
+            },
+            "required": ["view_id", "boundary"],
+        },
+    },
+    {
+        "name": "assign_revisions_to_clouds",
+        "description": (
+            "Re-assign one or more existing RevisionClouds to a "
+            "different Revision. One transaction = one undo step."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cloud_ids":   {"type": "array", "items": {"type": "integer"}},
+                "revision_id": {"type": "integer"},
+            },
+            "required": ["cloud_ids", "revision_id"],
+        },
+    },
+    {
+        "name": "add_revisions_to_sheets",
+        "description": (
+            "Apply (associate) one or more revisions to one or more "
+            "sheets WITHOUT drawing any clouds. This is what an "
+            "engineer means when they say 'apply revision X to all "
+            "M-1xx sheets', 'add this revision to these sheets', "
+            "'flag these sheets with the new revision' - they want "
+            "the revision to appear in each sheet's revision "
+            "schedule / title-block revision block. It does NOT "
+            "draw revision clouds. If they actually want a cloud "
+            "drawn, that's place_revision_cloud, which they will "
+            "ask for explicitly (e.g. 'draw a cloud around this "
+            "area', 'cloud this section')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_ids":    {"type": "array", "items": {"type": "integer"}},
+                "revision_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["sheet_ids", "revision_ids"],
+        },
+    },
+    {
+        "name": "remove_revisions_from_sheets",
+        "description": (
+            "Remove revisions from sheets' additional-revisions list. "
+            "Note: only revisions added via add_revisions_to_sheets "
+            "(or the equivalent Revit UI step) can be cleared this "
+            "way. Revisions that appear because of a CLOUD drawn in "
+            "a view can't be removed here - the cloud must be "
+            "deleted or reassigned instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_ids":    {"type": "array", "items": {"type": "integer"}},
+                "revision_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["sheet_ids", "revision_ids"],
+        },
+    },
+
+    # ---- Spaces / rooms / loads (v4.5) ------------------------------------
+
+    {
+        "name": "list_spaces",
+        "description": (
+            "List every MEP Space in the document. Returns id, "
+            "number, name, level, area_sqft, volume_cuft, and "
+            "unbounded (true when the Space has no boundary - common "
+            "for spaces that haven't been placed yet)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+                "max_results":   {"type": "integer", "description": "Default 500."},
+            },
+        },
+    },
+    {
+        "name": "list_rooms",
+        "description": (
+            "List architectural Rooms in the HOST document. Most MEP "
+            "projects don't have rooms in the host - they have "
+            "Spaces. Rooms live in the linked architecture model and "
+            "are queried via get_rooms_in_link (v4.1)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+                "max_results":   {"type": "integer", "description": "Default 500."},
+            },
+        },
+    },
+    {
+        "name": "create_room",
+        "description": (
+            "Manually create ONE Room at a specific XY point on a "
+            "Level. ONLY USE THIS when the user gives explicit XY "
+            "coordinates for a SINGLE room. For 'create rooms on "
+            "level X based on the layout' / 'place rooms in every "
+            "enclosed area' / 'add rooms to this floor', use "
+            "place_rooms_on_level instead - it uses Revit's "
+            "boundary analysis and won't produce unbounded or "
+            "duplicate rooms."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level_id": {"type": "integer"},
+                "x_ft":     {"type": "number"},
+                "y_ft":     {"type": "number"},
+                "number":   {"type": "string"},
+                "name":     {"type": "string"},
+            },
+            "required": ["level_id", "x_ft", "y_ft"],
+        },
+    },
+    {
+        "name": "place_rooms_on_level",
+        "description": (
+            "THE tool for 'create rooms on level X based on the "
+            "layout' / 'add rooms to every enclosed area on this "
+            "floor'. Uses Revit's PlanTopology to find every "
+            "enclosed boundary on the level and places exactly one "
+            "Room per boundary at Revit's chosen location for that "
+            "boundary. Pass name_prefix='Room' to name them 'Room "
+            "1', 'Room 2', ... starting from start_number. "
+            "only_empty_circuits=true (default) skips boundaries "
+            "that already have a room placed. ALWAYS use this "
+            "instead of calling create_room in a loop - that "
+            "approach produces unbounded / redundant rooms because "
+            "you can't reliably guess boundary-interior coordinates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level_id":            {"type": "integer"},
+                "name_prefix":         {"type": "string",
+                                        "description": "e.g. 'Room'."},
+                "start_number":        {"type": "integer", "description": "Default 1."},
+                "only_empty_circuits": {"type": "boolean", "description": "Default true."},
+            },
+            "required": ["level_id"],
+        },
+    },
+    {
+        "name": "create_spaces_from_link_rooms",
+        "description": (
+            "THE MEP setup tool. For every Room in a linked "
+            "architecture model, create a corresponding MEP Space "
+            "in the host document at the same world XY location, "
+            "on the matching host Level (matched by NAME). Skips "
+            "unbounded rooms (no area) and rooms whose level "
+            "doesn't have a host-doc equivalent. Copies number + "
+            "name to the new Space by default. One transaction for "
+            "the whole batch - one undo step covers everything."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "link_id":        {"type": "integer",
+                                   "description": "From list_links."},
+                "name_contains":  {"type": "string"},
+                "min_area_sqft":  {"type": "number"},
+                "only_unmapped":  {"type": "boolean",
+                                   "description": ("Skip rooms whose "
+                                                   "number already has "
+                                                   "a host Space on the "
+                                                   "matching level. "
+                                                   "Default true.")},
+                "copy_number":    {"type": "boolean", "description": "Default true."},
+                "copy_name":      {"type": "boolean", "description": "Default true."},
+            },
+            "required": ["link_id"],
+        },
+    },
+    {
+        "name": "get_space_loads",
+        "description": (
+            "Read computed Design Heating + Design Cooling Loads on "
+            "one or more Spaces. Values are in BTU/hr when "
+            "conversion is available; the raw internal value "
+            "otherwise. Note: loads are populated only AFTER Revit "
+            "runs Heating + Cooling Loads in the Analyze tab; an "
+            "unanalyzed space returns 0 / null."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "space_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["space_ids"],
+        },
+    },
+    {
+        "name": "get_room_finishes_from_arch_link",
+        "description": (
+            "For every Room in a linked arch model, read the four "
+            "finish parameters (Floor, Ceiling, Wall, Base). Useful "
+            "for finish review or for building a project finish "
+            "schedule outside Revit."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "link_id":       {"type": "integer"},
+                "name_contains": {"type": "string"},
+                "max_results":   {"type": "integer", "description": "Default 500."},
+            },
+            "required": ["link_id"],
+        },
+    },
+    {
+        "name": "set_space_type",
+        "description": (
+            "Set the SpaceType (energy occupancy category) on one "
+            "or more Spaces. Drives load-calc assumptions. Pass the "
+            ".NET enum name in PascalCase: 'Office', "
+            "'ConferenceRoom', 'Classroom', 'Corridor', 'Restroom', "
+            "'StorageRoom', 'MechanicalRoom', 'ElectricalRoom', "
+            "'PatientRoom', 'OperatingRoom', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "space_ids": {"type": "array", "items": {"type": "integer"}},
+                "space_type": {"type": "string",
+                               "description": "PascalCase SpaceType enum name."},
+            },
+            "required": ["space_ids", "space_type"],
+        },
+    },
+    {
+        "name": "list_hvac_zones",
+        "description": (
+            "List every HVAC Zone in the document with space_count, "
+            "area_sqft, and level."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_hvac_zone",
+        "description": (
+            "Create an empty HVAC Zone on a Level. Use "
+            "add_spaces_to_zone to populate it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level_id": {"type": "integer"},
+                "name":     {"type": "string"},
+            },
+            "required": ["level_id"],
+        },
+    },
+    {
+        "name": "add_spaces_to_zone",
+        "description": (
+            "Add one or more Spaces to an existing HVAC Zone. "
+            "Spaces must be on the same Level + Phase as the zone."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zone_id":   {"type": "integer"},
+                "space_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["zone_id", "space_ids"],
+        },
+    },
+    {
+        "name": "get_zone_loads",
+        "description": (
+            "Read computed heating + cooling loads on one or more "
+            "HVAC Zones. Values in BTU/hr when conversion succeeds."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zone_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["zone_ids"],
+        },
+    },
+
+    # ---- Export & print (v4.6) --------------------------------------------
+
+    {
+        "name": "export_to_pdf",
+        "description": (
+            "Export sheets / views to PDF using Revit's native PDF "
+            "engine (2022+). combine=true produces one multi-page "
+            "PDF; otherwise one PDF per view. folder defaults to "
+            "%USERPROFILE%\\Documents\\dbHMS Revit Exports\\pdf\\."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":  {"type": "array", "items": {"type": "integer"}},
+                "folder":    {"type": "string"},
+                "combine":   {"type": "boolean", "description": "Default false."},
+                "file_name": {"type": "string", "description": "Used when combine=true."},
+            },
+            "required": ["view_ids"],
+        },
+    },
+    {
+        "name": "export_to_dwg",
+        "description": (
+            "Export sheets / views to AutoCAD DWG. dwg_version "
+            "accepts 'R2018' (default), 'R2013', 'R2010', 'R2007', "
+            "'R2004', 'R2000'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":    {"type": "array", "items": {"type": "integer"}},
+                "folder":      {"type": "string"},
+                "file_prefix": {"type": "string"},
+                "dwg_version": {"type": "string"},
+            },
+            "required": ["view_ids"],
+        },
+    },
+    {
+        "name": "export_to_dwfx",
+        "description": (
+            "Export sheets / views to DWFx (Autodesk Design Web "
+            "Format). combine=true makes one multi-page file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":  {"type": "array", "items": {"type": "integer"}},
+                "folder":    {"type": "string"},
+                "combine":   {"type": "boolean", "description": "Default false."},
+                "file_name": {"type": "string"},
+            },
+            "required": ["view_ids"],
+        },
+    },
+    {
+        "name": "export_to_ifc",
+        "description": (
+            "Export the WHOLE document to IFC. ifc_version accepts "
+            "'IFC4' (default), 'IFC2x3', 'IFC2x2'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder":      {"type": "string"},
+                "file_name":   {"type": "string"},
+                "ifc_version": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "export_to_nwc",
+        "description": (
+            "Export the WHOLE document to NWC (Navisworks Cache). "
+            "REQUIRES the Autodesk Navisworks exporter plugin "
+            "installed; the call fails cleanly if it isn't."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder":    {"type": "string"},
+                "file_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "export_to_fbx",
+        "description": (
+            "Export a single 3D view to FBX (handoff to "
+            "visualization software like 3ds Max). 2D views are "
+            "rejected by Revit."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":   {"type": "integer", "description": "Must be a 3D view."},
+                "folder":    {"type": "string"},
+                "file_name": {"type": "string"},
+            },
+            "required": ["view_id"],
+        },
+    },
+    {
+        "name": "export_to_gbxml",
+        "description": (
+            "Export the document's analytical model to gbXML "
+            "(energy analysis input for eQUEST / IES / OpenStudio)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder":    {"type": "string"},
+                "file_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "export_view_image_to_file",
+        "description": (
+            "Export one or more views / sheets as image files (PNG "
+            "/ JPG / BMP / TIFF / TGA) to disk. pixel_size controls "
+            "width in pixels (height auto-fits). Different from "
+            "Capture active view (which loads into chat memory) - "
+            "this one writes files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":     {"type": "array", "items": {"type": "integer"}},
+                "folder":       {"type": "string"},
+                "image_format": {"type": "string",
+                                 "enum": ["PNG", "JPG", "JPEG", "BMP", "TIFF", "TGA"]},
+                "pixel_size":   {"type": "integer", "description": "Default 1600."},
+                "file_prefix":  {"type": "string"},
+            },
+            "required": ["view_ids"],
+        },
+    },
+    # ---- MEP systems & engineering math (v4.7) ----------------------------
+
+    {
+        "name": "list_systems",
+        "description": (
+            "List every MEP system in the document (mechanical, "
+            "piping, electrical). Optional discipline filter "
+            "('mechanical' / 'piping' / 'electrical') and "
+            "name_contains substring filter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "discipline":    {"type": "string",
+                                  "enum": ["mechanical", "piping", "electrical"]},
+                "name_contains": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "get_system_info",
+        "description": (
+            "Full detail on one MEP system: every member element "
+            "with id+name+category, plus flow, base equipment, and "
+            "system type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "system_id": {"type": "integer"},
+            },
+            "required": ["system_id"],
+        },
+    },
+    {
+        "name": "list_connectors_for_element",
+        "description": (
+            "List every Connector on an MEP element with its "
+            "direction (In/Out/Bidirectional), domain, shape, "
+            "dimensions, position, and whatever it's connected to. "
+            "Useful for diagnosing why two elements won't join into "
+            "a system."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_id": {"type": "integer"},
+            },
+            "required": ["element_id"],
+        },
+    },
+    {
+        "name": "get_unconnected_terminals",
+        "description": (
+            "Find MEP elements in a category that have at least one "
+            "unconnected connector - air terminals not on a duct "
+            "system, plumbing fixtures not wired into a pipe system, "
+            "etc. Pass category as a BuiltInCategory name "
+            "('OST_DuctTerminal', 'OST_PlumbingFixtures', "
+            "'OST_LightingFixtures'). Default: OST_DuctTerminal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category":    {"type": "string"},
+                "max_results": {"type": "integer", "description": "Default 500."},
+            },
+        },
+    },
+    {
+        "name": "get_pipe_duct_sizes",
+        "description": (
+            "Read size + flow on duct / pipe / cable tray / "
+            "conduit elements. Sizes are in FEET (Revit internal "
+            "units - divide by 12 for inches). For rectangular "
+            "duct: width + height. For round: diameter. Flow in "
+            "CFM (duct) or GPM (pipe) using project units."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["element_ids"],
+        },
+    },
+    {
+        "name": "create_mech_system",
+        "description": (
+            "Create a new MechanicalSystem from element ids + a "
+            "system type. Optionally designate a base_equipment_id "
+            "(typically the AHU / fan / RTU that drives the system)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids":       {"type": "array", "items": {"type": "integer"}},
+                "system_type_id":    {"type": "integer",
+                                      "description": "Optional - defaults to first MechanicalSystemType."},
+                "base_equipment_id": {"type": "integer", "description": "Optional."},
+                "name":              {"type": "string"},
+            },
+            "required": ["element_ids"],
+        },
+    },
+    {
+        "name": "create_pipe_system",
+        "description": (
+            "Create a new PipingSystem. Same shape as "
+            "create_mech_system but uses a PipingSystemType."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids":       {"type": "array", "items": {"type": "integer"}},
+                "system_type_id":    {"type": "integer"},
+                "base_equipment_id": {"type": "integer"},
+                "name":              {"type": "string"},
+            },
+            "required": ["element_ids"],
+        },
+    },
+    {
+        "name": "create_electrical_circuit",
+        "description": (
+            "Create an ElectricalSystem (circuit) from devices + a "
+            "system type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids":    {"type": "array", "items": {"type": "integer"}},
+                "system_type_id": {"type": "integer"},
+                "name":           {"type": "string"},
+            },
+            "required": ["element_ids"],
+        },
+    },
+    {
+        "name": "add_element_to_system",
+        "description": (
+            "Add one or more elements to an existing MEP system "
+            "(mech / piping / electrical)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "system_id":   {"type": "integer"},
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["system_id", "element_ids"],
+        },
+    },
+    {
+        "name": "remove_element_from_system",
+        "description": (
+            "Remove one or more elements from an MEP system."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "system_id":   {"type": "integer"},
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["system_id", "element_ids"],
+        },
+    },
+    {
+        "name": "add_insulation",
+        "description": (
+            "Add insulation wrap to ducts or pipes (the API handles "
+            "both). insulation_type_id must be a DuctInsulationType "
+            "for ducts or a PipeInsulationType for pipes; "
+            "thickness_in is in INCHES."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids":         {"type": "array",
+                                        "items": {"type": "integer"}},
+                "insulation_type_id":  {"type": "integer"},
+                "thickness_in":        {"type": "number", "description": "Inches."},
+            },
+            "required": ["element_ids", "insulation_type_id", "thickness_in"],
+        },
+    },
+    {
+        "name": "add_lining",
+        "description": (
+            "Add internal lining to DUCTS (acoustic / thermal "
+            "lining inside the duct). lining_type_id must be a "
+            "DuctLiningType; thickness_in is in INCHES. Pipes "
+            "don't support lining - they use insulation only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids":     {"type": "array",
+                                    "items": {"type": "integer"}},
+                "lining_type_id":  {"type": "integer"},
+                "thickness_in":    {"type": "number", "description": "Inches."},
+            },
+            "required": ["element_ids", "lining_type_id", "thickness_in"],
+        },
+    },
+
+    {
+        "name": "export_schedule_to_csv",
+        "description": (
+            "Export a ViewSchedule to a CSV-style text file. Engineers "
+            "open the output directly in Excel for takeoffs / "
+            "submittals."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "integer"},
+                "folder":      {"type": "string"},
+                "file_name":   {"type": "string"},
+                "delimiter":   {"type": "string", "description": "Default ','. Use '\\t' for TSV."},
+            },
+            "required": ["schedule_id"],
+        },
+    },
 ]
 
 
@@ -6219,6 +10999,57 @@ TOOL_IMPLS = {
     "array_elements_radial":         _tool_array_elements_radial,
     "get_element_location":          _tool_get_element_location,
     "get_element_geometry":          _tool_get_element_geometry,
+    # Annotation finishing (v4.4)
+    "place_grid":                    _tool_place_grid,
+    "place_level":                   _tool_place_level,
+    "place_dimension":               _tool_place_dimension,
+    "place_spot_elevation":          _tool_place_spot_elevation,
+    "place_detail_line":             _tool_place_detail_line,
+    "list_filled_region_types":      _tool_list_filled_region_types,
+    "place_filled_region":           _tool_place_filled_region,
+    "list_revisions":                _tool_list_revisions,
+    "create_revision":               _tool_create_revision,
+    "update_revision":               _tool_update_revision,
+    "place_revision_cloud":          _tool_place_revision_cloud,
+    "assign_revisions_to_clouds":    _tool_assign_revisions_to_clouds,
+    "add_revisions_to_sheets":       _tool_add_revisions_to_sheets,
+    "remove_revisions_from_sheets":  _tool_remove_revisions_from_sheets,
+    # Spaces / rooms / loads (v4.5)
+    "list_spaces":                       _tool_list_spaces,
+    "list_rooms":                        _tool_list_rooms,
+    "create_room":                       _tool_create_room,
+    "place_rooms_on_level":              _tool_place_rooms_on_level,
+    "create_spaces_from_link_rooms":     _tool_create_spaces_from_link_rooms,
+    "get_space_loads":                   _tool_get_space_loads,
+    "get_room_finishes_from_arch_link":  _tool_get_room_finishes_from_arch_link,
+    "set_space_type":                    _tool_set_space_type,
+    "list_hvac_zones":                   _tool_list_hvac_zones,
+    "create_hvac_zone":                  _tool_create_hvac_zone,
+    "add_spaces_to_zone":                _tool_add_spaces_to_zone,
+    "get_zone_loads":                    _tool_get_zone_loads,
+    # Export & print (v4.6)
+    "export_to_pdf":                     _tool_export_to_pdf,
+    "export_to_dwg":                     _tool_export_to_dwg,
+    "export_to_dwfx":                    _tool_export_to_dwfx,
+    "export_to_ifc":                     _tool_export_to_ifc,
+    "export_to_nwc":                     _tool_export_to_nwc,
+    "export_to_fbx":                     _tool_export_to_fbx,
+    "export_to_gbxml":                   _tool_export_to_gbxml,
+    "export_view_image_to_file":         _tool_export_view_image_to_file,
+    "export_schedule_to_csv":            _tool_export_schedule_to_csv,
+    # MEP systems & engineering math (v4.7)
+    "list_systems":                      _tool_list_systems,
+    "get_system_info":                   _tool_get_system_info,
+    "list_connectors_for_element":       _tool_list_connectors_for_element,
+    "get_unconnected_terminals":         _tool_get_unconnected_terminals,
+    "get_pipe_duct_sizes":               _tool_get_pipe_duct_sizes,
+    "create_mech_system":                _tool_create_mech_system,
+    "create_pipe_system":                _tool_create_pipe_system,
+    "create_electrical_circuit":         _tool_create_electrical_circuit,
+    "add_element_to_system":             _tool_add_element_to_system,
+    "remove_element_from_system":        _tool_remove_element_from_system,
+    "add_insulation":                    _tool_add_insulation,
+    "add_lining":                        _tool_add_lining,
 }
 
 
@@ -6959,13 +11790,107 @@ def summarize_tool_result(result):
             return "{} {} element{}".format(
                 "pinned" if result["pinned"] else "unpinned",
                 n, "" if n == 1 else "s")
+        # v4.4 - annotation finishing
+        if "grid_name" in result:
+            return "placed grid '{}'".format(result.get("grid_name") or "?")
+        if "level_name" in result and "elevation_ft" in result:
+            return "placed level '{}' @ {:.2f} ft".format(
+                result.get("level_name") or "?",
+                float(result.get("elevation_ft") or 0))
+        if "dimension_id" in result:
+            return "placed dimension ({} refs)".format(result.get("ref_count", "?"))
+        if "spot_id" in result:
+            return "placed spot elevation"
+        if "detail_line_id" in result:
+            return "placed detail line"
+        if "filled_region_id" in result:
+            return "placed filled region"
+        if "revision_id" in result and "changes" in result:
+            return "updated revision ({} field{})".format(
+                len(result["changes"]),
+                "" if len(result["changes"]) == 1 else "s")
+        if "revision_id" in result and "description" in result and "date" in result:
+            return "created revision"
+        if "cloud_id" in result:
+            return "placed revision cloud"
+        if "revision_id" in result and "updated_count" in result:
+            return "reassigned {} cloud{}".format(
+                result["updated_count"],
+                "" if result["updated_count"] == 1 else "s")
+        if "applied_revision_ids" in result:
+            n = result.get("updated_count", 0)
+            return "applied revision to {} sheet{}".format(
+                n, "" if n == 1 else "s")
+        if "removed_revision_ids" in result:
+            n = result.get("updated_count", 0)
+            return "removed revision from {} sheet{}".format(
+                n, "" if n == 1 else "s")
+        # v4.5 - spaces / rooms / loads
+        if "placed_count" in result and "level_name" in result:
+            n = result["placed_count"]
+            skipped = result.get("skipped_count", 0)
+            if skipped:
+                return "placed {} room{} ({} skipped)".format(
+                    n, "" if n == 1 else "s", skipped)
+            return "placed {} room{}".format(n, "" if n == 1 else "s")
+        if "created_count" in result and "skipped_count" in result:
+            return "created {} space{} ({} skipped)".format(
+                result["created_count"],
+                "" if result["created_count"] == 1 else "s",
+                result["skipped_count"])
+        if "room_id" in result and "level_id" in result:
+            return "created room '{}'".format(result.get("name") or "?")
+        if "zone_id" in result and "zone_name" in result and "level_id" in result:
+            return "created zone '{}'".format(result.get("zone_name") or "?")
+        if "zone_id" in result and "added_count" in result:
+            n = result["added_count"]
+            return "added {} space{} to zone".format(n, "" if n == 1 else "s")
+        if "space_type" in result and "updated_count" in result:
+            n = result["updated_count"]
+            return "set space type on {}".format(n)
+        # v4.6 - export & print
+        if "file_count" in result and "view_count" in result:
+            return "exported {} file{}".format(
+                result["file_count"],
+                "" if result["file_count"] == 1 else "s")
+        if "ifc_version" in result and "file_name" in result:
+            return "IFC: {}".format(result.get("file_name") or "?")
+        if "schedule_id" in result and "file_name" in result:
+            return "CSV: {}".format(result.get("file_name") or "?")
+        if "file_name" in result and "folder" in result and "view_id" not in result:
+            return "exported '{}'".format(result.get("file_name") or "?")
+        if "view_id" in result and "file_name" in result:
+            return "FBX: {}".format(result.get("file_name") or "?")
+        # v4.7 - MEP systems
+        if "system_id" in result and "discipline" in result and "member_count" in result:
+            return "created {} system '{}' ({} members)".format(
+                result.get("discipline") or "?",
+                result.get("system_name") or "?",
+                result.get("member_count") or 0)
+        if "added_count" in result and "thickness_in" in result:
+            n = result["added_count"]
+            return "insulated/lined {} element{}".format(
+                n, "" if n == 1 else "s")
+        if "added_count" in result and "system_id" in result:
+            n = result["added_count"]
+            return "added {} member{} to system".format(n, "" if n == 1 else "s")
+        if "removed_count" in result and "system_id" in result:
+            n = result["removed_count"]
+            return "removed {} member{} from system".format(n, "" if n == 1 else "s")
+        if "connector_count" in result:
+            return "{} connector{}".format(
+                result["connector_count"],
+                "" if result["connector_count"] == 1 else "s")
 
         # Read tools
         if "count" in result:
             n = result["count"]
             label = "result"
             for k in ("sheets", "views", "schedules", "elements", "rows",
-                      "links", "rooms", "tag_types", "filters"):
+                      "links", "rooms", "tag_types", "filters",
+                      "revisions", "filled_region_types",
+                      "spaces", "zones", "loads",
+                      "systems", "connectors"):
                 if k in result:
                     label = k
                     break
