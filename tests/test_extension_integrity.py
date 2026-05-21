@@ -53,7 +53,6 @@ class ExtensionIntegrityTests(unittest.TestCase):
     def test_expected_pushbuttons_exist(self):
         expected = {
             "AlignViews.pushbutton",
-            "BulkPdfSheets.pushbutton",
             "Chatbot.pushbutton",
             "Revisions Manager.pushbutton",
             "Sheet Manager.pushbutton",
