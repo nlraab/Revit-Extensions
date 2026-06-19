@@ -202,6 +202,60 @@ class GlbEdgeCaseTests(unittest.TestCase):
             os.rmdir(tmp)
 
 
+class GlbWriterTests(unittest.TestCase):
+    """The streaming writer must match the in-memory writer byte-for-byte."""
+
+    def _meshes(self):
+        return [
+            Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0],
+                 color=(0.17, 0.42, 0.69), metadata={"element_id": 111}),
+            Mesh(positions=[0, 0, 0, 2, 0, 0, 2, 2, 0, 0, 2, 0],
+                 indices=[0, 1, 2, 0, 2, 3], color=(0.0, 1.0, 0.0),
+                 metadata={"element_id": 222, "discipline": "Mechanical"}),
+        ]
+
+    def test_matches_build_glb_bytes(self):
+        meshes = self._meshes()
+        ref = bytes(gltf.build_glb(meshes, asset_extras={"units": "meters"}))
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "stream.glb")
+        try:
+            w = gltf.GlbWriter(path, asset_extras={"units": "meters"})
+            for m in meshes:
+                w.add(m)
+            size = w.finalize()
+            with open(path, 'rb') as f:
+                data = f.read()
+            self.assertEqual(size, len(data))
+            self.assertEqual(data, ref)            # byte-identical
+            self.assertFalse(os.path.exists(path + ".bin.tmp"))   # temp cleaned
+        finally:
+            for fn in (path, path + ".bin.tmp"):
+                try:
+                    os.remove(fn)
+                except OSError:
+                    pass
+            os.rmdir(tmp)
+
+    def test_skips_empty_mesh(self):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "s.glb")
+        try:
+            w = gltf.GlbWriter(path)
+            w.add(Mesh(positions=[]))
+            w.add(Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0]))
+            w.finalize()
+            with open(path, 'rb') as f:
+                gltf_obj, _ = _parse_glb(f.read())
+            self.assertEqual(len(gltf_obj["nodes"]), 1)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            os.rmdir(tmp)
+
+
 class RoundRobinTests(unittest.TestCase):
     """_round_robin is pure logic (no Revit), so we can exercise the
     interleaving directly with stand-in 'elements'."""

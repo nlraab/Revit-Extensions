@@ -43,19 +43,20 @@ _DISCIPLINE_COLOR = {
 _DEFAULT_COLOR = (0.70, 0.72, 0.74)
 
 
-def extract_slice(doc, view=None, max_elements=1500, max_triangles=300000,
-                  include_links=True):
-    """Extract a slice of the host model plus every loaded link.
+def export_model(doc, out_path, view=None, max_elements=120000,
+                 max_triangles=8000000, include_links=True):
+    """Stream the host model + every loaded link to a .glb at `out_path`.
 
-    Returns:
-        {
-          "meshes": [Mesh, ...],
-          "asset_extras": {...},   # offset, units, axis convention, doc title
-          "stats": {"elements", "host_elements", "link_elements",
-                    "triangles", "models", "capped"},
-        }
+    Memory-safe: geometry is written to disk one element at a time via
+    GlbWriter, so a large building won't exhaust RAM. Bounded by
+    max_elements / max_triangles safety ceilings (reported as 'capped' when
+    hit) so a runaway model can't produce an unbounded file or hang forever.
+
+    Returns {"path", "asset_extras", "stats"} where stats includes
+    host_elements, link_elements, triangles, models, bytes, capped.
     """
     from Autodesk.Revit.DB import Options, ViewDetailLevel
+    from clash_export.gltf import GlbWriter
 
     # Gather elements per source (host + each link), each capped, then
     # interleave so a dense host doesn't starve the links of the triangle
@@ -72,29 +73,6 @@ def extract_slice(doc, view=None, max_elements=1500, max_triangles=300000,
     except Exception:
         pass
 
-    meshes = []
-    total_tris = 0
-    host_used = 0
-    link_used = 0
-    capped = False
-    for el, link in ordered:
-        if total_tris >= max_triangles:
-            capped = True
-            break
-        transform = None
-        if link is not None:
-            transform = _safe(lambda: link.GetTotalTransform(), None)
-        mesh = _element_to_mesh(el, opts, offset, transform)
-        if mesh is None:
-            continue
-        meshes.append(mesh)
-        total_tris += mesh.triangle_count
-        if link is None:
-            host_used += 1
-        else:
-            link_used += 1
-
-    any_source_capped = any(len(els) >= max_elements for _, els in source_lists)
     asset_extras = {
         "generator": "dbHMS 3D Viewer",
         "units": "meters",
@@ -103,15 +81,46 @@ def extract_slice(doc, view=None, max_elements=1500, max_triangles=300000,
         "ft_to_m": FT_TO_M,
         "doc_title": _safe(lambda: doc.Title, ""),
     }
+
+    writer = GlbWriter(out_path, asset_extras=asset_extras)
+    total_tris = 0
+    host_used = 0
+    link_used = 0
+    capped = False
+    try:
+        for el, link in ordered:
+            if total_tris >= max_triangles:
+                capped = True
+                break
+            transform = None
+            if link is not None:
+                transform = _safe(lambda: link.GetTotalTransform(), None)
+            mesh = _element_to_mesh(el, opts, offset, transform)
+            if mesh is None:
+                continue
+            writer.add(mesh)
+            total_tris += mesh.triangle_count
+            if link is None:
+                host_used += 1
+            else:
+                link_used += 1
+        size = writer.finalize()
+    except Exception:
+        writer.close()
+        raise
+
+    if any(len(els) >= max_elements for _, els in source_lists):
+        capped = True
     stats = {
         "elements": host_used + link_used,
         "host_elements": host_used,
         "link_elements": link_used,
         "triangles": total_tris,
         "models": len([s for s in source_lists if s[1]]),
-        "capped": capped or any_source_capped,
+        "bytes": size,
+        "capped": capped,
     }
-    return {"meshes": meshes, "asset_extras": asset_extras, "stats": stats}
+    return {"path": out_path, "asset_extras": asset_extras, "stats": stats}
 
 
 # ---------------------------------------------------------------------------

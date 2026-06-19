@@ -54,7 +54,7 @@ from pyrevit import forms
 import dbhms_ui
 import dbhms_telemetry
 
-from clash_export import revit_geometry, gltf
+from clash_export import revit_geometry
 
 
 SCRIPT_DIR = os.path.dirname(__file__)
@@ -190,13 +190,19 @@ class ViewerForm(forms.WPFWindow):
     # --- Actions ------------------------------------------------------
 
     def _on_export(self, sender, args):
-        """Phase 2: export a small slice of the model to a .glb and open it
-        so Nathan can confirm the geometry came out right. In-panel loading
-        comes next phase."""
+        """Export the whole model (host + linked) to a .glb and load it into
+        the panel. Streams to disk so large models stay memory-safe; models
+        too big for the in-panel loader are saved and their size measured."""
         from pyrevit import revit
         doc = revit.doc
         if doc is None:
             dbhms_ui.info("No active Revit document to export.", title='3D Viewer')
+            return
+        if not forms.alert(
+                "Export the full model (your model plus loaded links) to the "
+                "3D viewer?\n\nOn very large models this can take a while, and "
+                "Revit will be busy until it finishes.",
+                title='3D Viewer', yes=True, no=True):
             return
         try:
             view = doc.ActiveView
@@ -205,16 +211,11 @@ class ViewerForm(forms.WPFWindow):
 
         Mouse.OverrideCursor = Cursors.Wait
         result = None
-        path = None
-        size_bytes = 0
         error = None
         t0 = time.time()
         try:
-            result = revit_geometry.extract_slice(doc, view)
-            if result["meshes"]:
-                path = self._export_path(doc)
-                size_bytes = gltf.write_glb(
-                    path, result["meshes"], asset_extras=result["asset_extras"])
+            path = self._export_path(doc)
+            result = revit_geometry.export_model(doc, path, view=view)
         except Exception:
             error = traceback.format_exc()
         finally:
@@ -225,37 +226,50 @@ class ViewerForm(forms.WPFWindow):
             dbhms_ui.info("Export failed:\n\n{}".format(error),
                           title='3D Viewer export failed')
             return
-        if not result["meshes"]:
+
+        stats = result["stats"]
+        if stats["elements"] == 0 or stats["bytes"] == 0:
             dbhms_ui.info(
                 "No 3D geometry found to export.\n\n"
                 "Open a 3D view with model elements and try again.",
                 title='3D Viewer')
             return
 
-        stats = result["stats"]
+        size_bytes = stats["bytes"]
         size_mb = size_bytes / (1024.0 * 1024.0)
-        note = " (capped slice)" if stats.get("capped") else ""
         host_n = stats.get("host_elements", 0)
         link_n = stats.get("link_elements", 0)
-        self.txt_status.Text = (
-            "Loaded {0} host + {1} linked elements, {2:,} triangles, "
-            "{3:.1f} MB in {4:.1f}s{5}. Drag to orbit, scroll to zoom.".format(
-                host_n, link_n, stats["triangles"], size_mb, seconds, note))
+        cap = (" Hit the safety ceiling, so this is a partial export."
+               if stats.get("capped") else "")
 
-        # Push the model straight into the panel. If the panel isn't ready
-        # (WebView2 still initializing), fall back to opening the file.
-        if not self._load_into_panel(path):
-            dbhms_ui.info(
-                "Exported the model, but the 3D panel wasn't ready to display "
-                "it yet. Opening the file externally instead.\n\n{0}".format(path),
-                title='3D Viewer')
-            try:
-                os.startfile(path)
-            except Exception:
-                try:
-                    os.startfile(os.path.dirname(path))
-                except Exception:
-                    pass
+        # The base64 hand-off is fine up to a point; beyond that the model is
+        # saved to disk and streaming it into the panel is the performance
+        # phase. Keep the limit conservative.
+        load_limit = 25 * 1024 * 1024
+        if size_bytes <= load_limit and self._load_into_panel(path):
+            self.txt_status.Text = (
+                "Loaded {0} host + {1} linked elements, {2:,} triangles, "
+                "{3:.1f} MB in {4:.1f}s. Drag to orbit, scroll to zoom.".format(
+                    host_n, link_n, stats["triangles"], size_mb, seconds))
+            return
+
+        self.txt_status.Text = (
+            "Exported {0} host + {1} linked elements, {2:,} triangles, "
+            "{3:.1f} MB in {4:.1f}s.".format(
+                host_n, link_n, stats["triangles"], size_mb, seconds))
+        dbhms_ui.info(
+            "Exported the full model to glTF (.glb).\n\n"
+            "Host elements: {0}\nLinked elements: {1}\nTriangles: {2:,}\n"
+            "File size: {3:.1f} MB\nTime: {4:.1f}s{5}\n\n"
+            "This file is larger than the in-panel loader handles today, so "
+            "it's saved to disk. Streaming big models into the panel is the "
+            "performance phase.\n\nFile:\n{6}".format(
+                host_n, link_n, stats["triangles"], size_mb, seconds, cap, path),
+            title='3D Viewer - exported')
+        try:
+            os.startfile(os.path.dirname(path))
+        except Exception:
+            pass
 
     def _load_into_panel(self, path):
         """Hand the exported .glb to the WebView2 panel as base64 (the page
