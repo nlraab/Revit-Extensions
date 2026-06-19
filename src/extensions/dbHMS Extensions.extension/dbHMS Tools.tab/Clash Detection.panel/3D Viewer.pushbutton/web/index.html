@@ -6,7 +6,8 @@
 <title>dbHMS 3D Viewer</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1A202C; }
-  #c { width: 100%; height: 100%; display: block; }
+  #c { width: 100%; height: 100%; display: block; cursor: grab; }
+  #c:active { cursor: grabbing; }
   #badge {
     position: fixed; left: 12px; bottom: 10px;
     font-family: 'Segoe UI', system-ui, sans-serif; font-size: 12px;
@@ -14,193 +15,316 @@
     padding: 6px 11px; border-radius: 4px; user-select: none;
     pointer-events: none;
   }
-  #badge b { font-weight: 700; }
-  #badge .db { color: #00BFFF; } #badge .sep { color: #7A8FA6; }
+  #badge .db { color: #00BFFF; font-weight: 700; }
+  #badge .sep { color: #7A8FA6; font-weight: 300; }
+  #hint {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px;
+    color: #718096; text-align: center; user-select: none; pointer-events: none;
+  }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="badge"><b><span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span></b>&nbsp;&nbsp;3D Viewer &mdash; WebGL panel alive (Phase 1)</div>
+<div id="hint">Click <b>Export &amp; Load Model</b> to load the model here.</div>
+<div id="badge"><span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span>&nbsp;&nbsp;3D Viewer</div>
 
 <script>
 "use strict";
 
 var canvas = document.getElementById("c");
 var badge = document.getElementById("badge");
+var hint = document.getElementById("hint");
 var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
 
+// ---- shaders: flat-normal headlight shading, per-mesh base color ----
 var VS = [
   "attribute vec3 aPos;",
-  "attribute vec3 aColor;",
+  "attribute vec3 aNormal;",
   "uniform mat4 uMVP;",
-  "varying vec3 vColor;",
+  "varying vec3 vNormal;",
+  "varying vec3 vWorld;",
   "void main() {",
   "  gl_Position = uMVP * vec4(aPos, 1.0);",
-  "  vColor = aColor;",
+  "  vNormal = aNormal;",         // geometry is already in world space
+  "  vWorld = aPos;",
   "}"
 ].join("\n");
 
 var FS = [
   "precision mediump float;",
-  "varying vec3 vColor;",
-  "void main() { gl_FragColor = vec4(vColor, 1.0); }"
+  "varying vec3 vNormal;",
+  "varying vec3 vWorld;",
+  "uniform vec3 uColor;",
+  "uniform vec3 uCameraPos;",
+  "void main() {",
+  "  vec3 N = normalize(vNormal);",
+  "  vec3 L = normalize(uCameraPos - vWorld);",   // headlight from camera
+  "  float d = abs(dot(N, L));",                  // abs: faces lit both ways
+  "  float lit = 0.35 + 0.65 * d;",
+  "  gl_FragColor = vec4(uColor * lit, 1.0);",
+  "}"
 ].join("\n");
 
-// Cube: 24 vertices (4 per face), 36 indices.
-var positions = [
-  // front (+z)
-  -1,-1, 1,  1,-1, 1,  1, 1, 1, -1, 1, 1,
-  // back (-z)
-  -1,-1,-1, -1, 1,-1,  1, 1,-1,  1,-1,-1,
-  // top (+y)
-  -1, 1,-1, -1, 1, 1,  1, 1, 1,  1, 1,-1,
-  // bottom (-y)
-  -1,-1,-1,  1,-1,-1,  1,-1, 1, -1,-1, 1,
-  // right (+x)
-   1,-1,-1,  1, 1,-1,  1, 1, 1,  1,-1, 1,
-  // left (-x)
-  -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1
-];
+var program = null, loc = {};
+var glPrims = [];                 // {posBuf, normBuf, count, color}
+var bounds = null;                // {center:[x,y,z], radius}
+var cam = { az: 0.9, el: 0.5, dist: 20, target: [0, 0, 0] };
+var dragging = false, lastX = 0, lastY = 0;
 
-// One color per face, repeated for its 4 vertices (dbHMS-ish palette).
-var faceColors = [
-  [0.17, 0.42, 0.69],  // front  - primary blue
-  [0.00, 0.75, 1.00],  // back   - accent cyan
-  [0.22, 0.63, 0.41],  // top    - green
-  [0.90, 0.24, 0.24],  // bottom - red
-  [0.50, 0.35, 0.84],  // right  - purple
-  [0.29, 0.33, 0.41]   // left   - slate
-];
-var colors = [];
-for (var f = 0; f < faceColors.length; f++) {
-  for (var v = 0; v < 4; v++) {
-    colors.push(faceColors[f][0], faceColors[f][1], faceColors[f][2]);
-  }
-}
-
-var indices = [
-  0,1,2, 0,2,3,        // front
-  4,5,6, 4,6,7,        // back
-  8,9,10, 8,10,11,     // top
-  12,13,14, 12,14,15,  // bottom
-  16,17,18, 16,18,19,  // right
-  20,21,22, 20,22,23   // left
-];
-
-function resize() {
-  var dpr = window.devicePixelRatio || 1;
-  var w = Math.floor(canvas.clientWidth * dpr);
-  var h = Math.floor(canvas.clientHeight * dpr);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-}
-
-function compile(type, src) {
-  var s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    throw new Error(gl.getShaderInfoLog(s));
-  }
-  return s;
-}
-
-// --- mat4 helpers (column-major, the layout WebGL expects) ---
+// ---------------------------------------------------------------- matrices
 function perspective(fovy, aspect, near, far) {
-  var f = 1.0 / Math.tan(fovy / 2);
-  var nf = 1 / (near - far);
-  return [
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, (2 * far * near) * nf, 0
-  ];
+  var f = 1.0 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0,
+          0, 0, (far + near) * nf, -1, 0, 0, (2 * far * near) * nf, 0];
 }
 function multiply(a, b) {
   var o = new Array(16);
-  for (var r = 0; r < 4; r++) {
-    for (var c = 0; c < 4; c++) {
-      o[c * 4 + r] = a[0 * 4 + r] * b[c * 4 + 0] +
-                     a[1 * 4 + r] * b[c * 4 + 1] +
-                     a[2 * 4 + r] * b[c * 4 + 2] +
-                     a[3 * 4 + r] * b[c * 4 + 3];
-    }
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) {
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
+                   a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
   }
   return o;
 }
-function translate(x, y, z) {
-  return [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1];
+function lookAt(eye, center, up) {
+  var zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
+  var zl = Math.hypot(zx, zy, zz) || 1; var z = [zx / zl, zy / zl, zz / zl];
+  var xx = up[1] * z[2] - up[2] * z[1], xy = up[2] * z[0] - up[0] * z[2],
+      xz = up[0] * z[1] - up[1] * z[0];
+  var xl = Math.hypot(xx, xy, xz) || 1; var x = [xx / xl, xy / xl, xz / xl];
+  var y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2],
+           z[0] * x[1] - z[1] * x[0]];
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+          -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]),
+          -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
+          -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
 }
-function rotateX(a) {
-  var c = Math.cos(a), s = Math.sin(a);
-  return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1];
+function cameraPos() {
+  var ce = Math.cos(cam.el), se = Math.sin(cam.el);
+  var ca = Math.cos(cam.az), sa = Math.sin(cam.az);
+  return [cam.target[0] + cam.dist * ce * sa,
+          cam.target[1] + cam.dist * se,
+          cam.target[2] + cam.dist * ce * ca];
 }
-function rotateY(a) {
-  var c = Math.cos(a), s = Math.sin(a);
-  return [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1];
+
+// ---------------------------------------------------------------- gl setup
+function compile(type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
 }
-
-function main() {
-  var prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(prog));
-  }
-  gl.useProgram(prog);
-
-  var posBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-  var aPos = gl.getAttribLocation(prog, "aPos");
-  gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
-
-  var colBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-  var aColor = gl.getAttribLocation(prog, "aColor");
-  gl.enableVertexAttribArray(aColor);
-  gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
-
-  var idxBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
-
-  var uMVP = gl.getUniformLocation(prog, "uMVP");
-
+function setupGL() {
+  program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+  loc.aPos = gl.getAttribLocation(program, "aPos");
+  loc.aNormal = gl.getAttribLocation(program, "aNormal");
+  loc.uMVP = gl.getUniformLocation(program, "uMVP");
+  loc.uColor = gl.getUniformLocation(program, "uColor");
+  loc.uCameraPos = gl.getUniformLocation(program, "uCameraPos");
   gl.enable(gl.DEPTH_TEST);
-  gl.clearColor(0.102, 0.125, 0.157, 1.0);  // #1A202C, matches the panel
+  gl.clearColor(0.102, 0.125, 0.157, 1.0);
+}
 
-  function frame(t) {
-    resize();
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+// ---------------------------------------------------------------- glb parse
+function parseGlb(buffer) {
+  var dv = new DataView(buffer);
+  var length = dv.getUint32(8, true);
+  var off = 12, json = null, bin = null;
+  while (off < length) {
+    var clen = dv.getUint32(off, true); off += 4;
+    var ctype = dv.getUint32(off, true); off += 4;
+    if (ctype === 0x4E4F534A) {
+      json = JSON.parse(new TextDecoder("utf-8").decode(
+        new Uint8Array(buffer, off, clen)));
+    } else if (ctype === 0x004E4942) {
+      bin = new Uint8Array(buffer, off, clen);
+    }
+    off += clen;
+  }
+  return { json: json, bin: bin };
+}
 
+function buildPrimitives(gltf, bin) {
+  var binBuf = bin.buffer, base = bin.byteOffset;
+  var prims = [];
+  var nodes = gltf.nodes || [];
+  for (var n = 0; n < nodes.length; n++) {
+    if (nodes[n].mesh === undefined) continue;
+    var mesh = gltf.meshes[nodes[n].mesh];
+    for (var p = 0; p < mesh.primitives.length; p++) {
+      var prim = mesh.primitives[p];
+      var pacc = gltf.accessors[prim.attributes.POSITION];
+      var pbv = gltf.bufferViews[pacc.bufferView];
+      var positions = new Float32Array(
+        binBuf, base + (pbv.byteOffset || 0), pacc.count * 3);
+      var indices = null;
+      if (prim.indices !== undefined) {
+        var iacc = gltf.accessors[prim.indices];
+        var ibv = gltf.bufferViews[iacc.bufferView];
+        indices = new Uint32Array(binBuf, base + (ibv.byteOffset || 0), iacc.count);
+      }
+      var color = [0.7, 0.72, 0.74];
+      if (prim.material !== undefined) {
+        var bcf = gltf.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
+        if (bcf) color = [bcf[0], bcf[1], bcf[2]];
+      }
+      prims.push({ positions: positions, indices: indices, color: color });
+    }
+  }
+  return prims;
+}
+
+// Expand to a non-indexed triangle list + flat per-triangle normals.
+function renderArrays(prim) {
+  var pos = prim.positions, idx = prim.indices, tri;
+  if (idx) {
+    tri = new Float32Array(idx.length * 3);
+    for (var i = 0; i < idx.length; i++) {
+      tri[i * 3] = pos[idx[i] * 3];
+      tri[i * 3 + 1] = pos[idx[i] * 3 + 1];
+      tri[i * 3 + 2] = pos[idx[i] * 3 + 2];
+    }
+  } else {
+    tri = pos;
+  }
+  var norm = new Float32Array(tri.length);
+  for (var t = 0; t + 8 < tri.length; t += 9) {
+    var ux = tri[t + 3] - tri[t], uy = tri[t + 4] - tri[t + 1], uz = tri[t + 5] - tri[t + 2];
+    var vx = tri[t + 6] - tri[t], vy = tri[t + 7] - tri[t + 1], vz = tri[t + 8] - tri[t + 2];
+    var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    var l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    for (var k = 0; k < 9; k += 3) { norm[t + k] = nx; norm[t + k + 1] = ny; norm[t + k + 2] = nz; }
+  }
+  return { tri: tri, norm: norm, count: tri.length / 3 };
+}
+
+function loadModel(buffer) {
+  var parsed = parseGlb(buffer);
+  if (!parsed.json || !parsed.bin) { hint.textContent = "Could not read model file."; return; }
+  // free old GL buffers
+  for (var i = 0; i < glPrims.length; i++) {
+    gl.deleteBuffer(glPrims[i].posBuf); gl.deleteBuffer(glPrims[i].normBuf);
+  }
+  glPrims = [];
+  var prims = buildPrimitives(parsed.json, parsed.bin);
+
+  var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  var totalTris = 0;
+  for (var p = 0; p < prims.length; p++) {
+    var ra = renderArrays(prims[p]);
+    if (ra.count === 0) continue;
+    var posBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, ra.tri, gl.STATIC_DRAW);
+    var normBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, normBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, ra.norm, gl.STATIC_DRAW);
+    glPrims.push({ posBuf: posBuf, normBuf: normBuf, count: ra.count, color: prims[p].color });
+    totalTris += ra.count / 3;
+    for (var v = 0; v < ra.tri.length; v += 3) {
+      if (ra.tri[v] < mn[0]) mn[0] = ra.tri[v]; if (ra.tri[v] > mx[0]) mx[0] = ra.tri[v];
+      if (ra.tri[v + 1] < mn[1]) mn[1] = ra.tri[v + 1]; if (ra.tri[v + 1] > mx[1]) mx[1] = ra.tri[v + 1];
+      if (ra.tri[v + 2] < mn[2]) mn[2] = ra.tri[v + 2]; if (ra.tri[v + 2] > mx[2]) mx[2] = ra.tri[v + 2];
+    }
+  }
+  if (glPrims.length === 0) { hint.textContent = "Model had no geometry."; return; }
+
+  bounds = {
+    center: [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2],
+    radius: Math.max(0.001, Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) / 2)
+  };
+  cam.target = bounds.center.slice();
+  cam.dist = bounds.radius * 2.6;
+  cam.az = 0.9; cam.el = 0.5;
+  hint.style.display = "none";
+  badge.innerHTML = '<span class="db">db</span><span class="sep"> | </span>' +
+    '<span class="db">HMS</span>&nbsp;&nbsp;' +
+    glPrims.length.toLocaleString() + ' meshes, ' +
+    Math.round(totalTris).toLocaleString() + ' triangles';
+}
+
+// ---------------------------------------------------------------- render
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+function frame() {
+  resize();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (glPrims.length > 0) {
     var aspect = canvas.width / Math.max(1, canvas.height);
-    var proj = perspective(45 * Math.PI / 180, aspect, 0.1, 100);
-    var mv = translate(0, 0, -6);
-    mv = multiply(mv, rotateX(t * 0.0007));
-    mv = multiply(mv, rotateY(t * 0.0011));
-    var mvp = multiply(proj, mv);
-
-    gl.uniformMatrix4fv(uMVP, false, new Float32Array(mvp));
-    gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
-    requestAnimationFrame(frame);
+    var eye = cameraPos();
+    var proj = perspective(50 * Math.PI / 180, aspect,
+                            Math.max(0.01, cam.dist * 0.01), cam.dist * 10 + 100);
+    var view = lookAt(eye, cam.target, [0, 1, 0]);
+    var mvp = multiply(proj, view);
+    gl.uniformMatrix4fv(loc.uMVP, false, new Float32Array(mvp));
+    gl.uniform3fv(loc.uCameraPos, new Float32Array(eye));
+    for (var i = 0; i < glPrims.length; i++) {
+      var gp = glPrims[i];
+      gl.bindBuffer(gl.ARRAY_BUFFER, gp.posBuf);
+      gl.enableVertexAttribArray(loc.aPos);
+      gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gp.normBuf);
+      gl.enableVertexAttribArray(loc.aNormal);
+      gl.vertexAttribPointer(loc.aNormal, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform3fv(loc.uColor, new Float32Array(gp.color));
+      gl.drawArrays(gl.TRIANGLES, 0, gp.count);
+    }
   }
   requestAnimationFrame(frame);
 }
 
+// ---------------------------------------------------------------- orbit input
+canvas.addEventListener("mousedown", function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener("mouseup", function () { dragging = false; });
+window.addEventListener("mousemove", function (e) {
+  if (!dragging) return;
+  cam.az -= (e.clientX - lastX) * 0.01;
+  cam.el += (e.clientY - lastY) * 0.01;
+  var lim = Math.PI / 2 - 0.05;
+  if (cam.el > lim) cam.el = lim; if (cam.el < -lim) cam.el = -lim;
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  cam.dist *= (e.deltaY > 0) ? 1.1 : 0.9;
+  if (bounds) { if (cam.dist < bounds.radius * 0.05) cam.dist = bounds.radius * 0.05; }
+}, { passive: false });
+
+// ---------------------------------------------------------------- bootstrap
+function b64ToBuffer(b64) {
+  var bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (var i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
 if (!gl) {
-  badge.innerHTML = "WebGL is not available in this WebView2 panel.";
+  hint.textContent = "WebGL is not available in this panel.";
 } else {
-  try {
-    main();
-  } catch (e) {
-    badge.innerHTML = "WebGL error: " + (e && e.message ? e.message : e);
+  setupGL();
+  requestAnimationFrame(frame);
+  // The Revit side posts the exported .glb to us as base64.
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.addEventListener("message", function (e) {
+      try {
+        hint.textContent = "Loading model...";
+        hint.style.display = "block";
+        loadModel(b64ToBuffer(e.data));
+      } catch (err) {
+        hint.style.display = "block";
+        hint.textContent = "Failed to load model: " + (err && err.message ? err.message : err);
+      }
+    });
   }
 }
 </script>

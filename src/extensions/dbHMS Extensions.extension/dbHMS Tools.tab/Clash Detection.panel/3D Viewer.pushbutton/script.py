@@ -31,6 +31,7 @@ __doc__    = ('dbHMS 3D model viewer. Phase 1: proves the embedded WebGL '
               'panel renders inside Revit. Model export, navigation, '
               'category/workset toggles, and clash overlay come next.')
 
+import base64
 import os
 import time
 import traceback
@@ -236,28 +237,42 @@ class ViewerForm(forms.WPFWindow):
         note = " (capped slice)" if stats.get("capped") else ""
         host_n = stats.get("host_elements", 0)
         link_n = stats.get("link_elements", 0)
-        models_n = stats.get("models", 0)
         self.txt_status.Text = (
-            "Exported {0} host + {1} linked elements, {2:,} triangles, "
-            "{3:.1f} MB in {4:.1f}s{5}.".format(
+            "Loaded {0} host + {1} linked elements, {2:,} triangles, "
+            "{3:.1f} MB in {4:.1f}s{5}. Drag to orbit, scroll to zoom.".format(
                 host_n, link_n, stats["triangles"], size_mb, seconds, note))
-        dbhms_ui.info(
-            "Exported a slice of the model to glTF (.glb).\n\n"
-            "Host elements: {0}\nLinked elements: {1} (from {2} linked "
-            "model(s))\nTriangles: {3:,}\nFile size: {4:.1f} MB\n"
-            "Time: {5:.1f}s{6}\n\nFile:\n{7}\n\n"
-            "Opening it now so you can confirm the geometry. In-panel "
-            "loading arrives in the next phase.".format(
-                host_n, link_n, models_n, stats["triangles"], size_mb,
-                seconds, note, path),
-            title='3D Viewer export complete')
-        try:
-            os.startfile(path)
-        except Exception:
+
+        # Push the model straight into the panel. If the panel isn't ready
+        # (WebView2 still initializing), fall back to opening the file.
+        if not self._load_into_panel(path):
+            dbhms_ui.info(
+                "Exported the model, but the 3D panel wasn't ready to display "
+                "it yet. Opening the file externally instead.\n\n{0}".format(path),
+                title='3D Viewer')
             try:
-                os.startfile(os.path.dirname(path))
+                os.startfile(path)
             except Exception:
-                pass
+                try:
+                    os.startfile(os.path.dirname(path))
+                except Exception:
+                    pass
+
+    def _load_into_panel(self, path):
+        """Hand the exported .glb to the WebView2 panel as base64 (the page
+        decodes + renders it). Returns False if the panel isn't ready."""
+        try:
+            wv = self._webview
+            if wv is None or wv.CoreWebView2 is None:
+                return False
+            with open(path, 'rb') as f:
+                data = f.read()
+            b64 = base64.b64encode(data)
+            if isinstance(b64, bytes):
+                b64 = b64.decode('ascii')
+            wv.CoreWebView2.PostWebMessageAsString(b64)
+            return True
+        except Exception:
+            return False
 
     def _export_path(self, doc):
         base = (os.environ.get('LOCALAPPDATA')
