@@ -1,0 +1,150 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="dbHMS 3D Viewer"
+        Height="780" Width="1120"
+        MinHeight="640" MinWidth="900"
+        WindowStartupLocation="CenterScreen"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+
+    <Window.Resources>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#1A202C"/><Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/><Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#4A5568"/><Setter Property="Margin" Value="0,8,0,2"/>
+        </Style>
+        <Style x:Key="HelperText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/><Setter Property="Foreground" Value="#718096"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style x:Key="MonoText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas"/><Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+        </Style>
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#E2E8F0"/>
+            <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="12"/><Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/><Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="120"/><Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/><Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/><Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Padding" Value="12,6"/><Setter Property="MinWidth" Value="120"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/><Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/><Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Margin" Value="0,3,0,3"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- dbHMS branding header -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+            <Grid>
+                <StackPanel HorizontalAlignment="Left">
+                    <TextBlock Text="3D Viewer" Foreground="White" FontSize="20" FontWeight="Bold"/>
+                    <TextBlock Text="Fly through the model and review clashes — no Enscape, no leaving the toolkit."
+                               Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Opacity="0.85">
+                    <TextBlock Text="db" Foreground="#00BFFF" FontSize="32" FontWeight="Bold" VerticalAlignment="Center"/>
+                    <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32" FontWeight="Light" VerticalAlignment="Center"/>
+                    <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32" FontWeight="Bold" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Footer: status + actions -->
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
+            <Grid>
+                <TextBlock x:Name="txt_status"
+                           Text="Phase 1: proving the 3D panel. You should see a spinning cube on the right."
+                           Foreground="#4A5568" VerticalAlignment="Center" FontStyle="Italic"
+                           HorizontalAlignment="Left"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="btn_open_browser" Content="Open in Browser"
+                            Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                            ToolTip="Coming in a later phase: open this viewer in a plain browser for PMs and contractors."/>
+                    <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Body: controls (left) + 3D panel (right) -->
+        <Grid Margin="20,16,20,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320" MinWidth="280"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="*" MinWidth="420"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left column: controls (mostly placeholders this phase) -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+
+                    <!-- Model -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Model" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Export the Revit model once, then fly through it here. The export step arrives in the next phase."
+                                       Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+                            <Button x:Name="btn_export" Content="Export &amp; Load Model"
+                                    Style="{StaticResource PrimaryButton}"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                    MinWidth="0" Margin="0" Padding="14,8"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Disciplines (wired in a later phase) -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Disciplines" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Instant show / hide. Activates once a model is loaded."
+                                       Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
+                            <StackPanel IsEnabled="False">
+                                <CheckBox x:Name="chk_vis_mechanical"     Content="Mechanical"      IsChecked="True"/>
+                                <CheckBox x:Name="chk_vis_electrical"     Content="Electrical"      IsChecked="True"/>
+                                <CheckBox x:Name="chk_vis_plumbing"       Content="Plumbing"        IsChecked="True"/>
+                                <CheckBox x:Name="chk_vis_fireprotection" Content="Fire Protection" IsChecked="True"/>
+                                <CheckBox x:Name="chk_vis_architectural"  Content="Architectural"   IsChecked="True"/>
+                                <CheckBox x:Name="chk_vis_structural"     Content="Structural"      IsChecked="True"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Categories / Worksets placeholder -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Categories &amp; Worksets" Style="{StaticResource SectionHeader}"/>
+                            <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}"
+                                           Text="The model's categories and worksets will list here after export, each with an instant on/off toggle. The viewer keeps every element tagged, so toggling never touches Revit."/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Right column: the 3D panel. WebView2 attaches to this Border. -->
+            <Border Grid.Column="2" x:Name="brd_viewport"
+                    Background="#1A202C" BorderBrush="#E2E8F0" BorderThickness="1"
+                    CornerRadius="4">
+                <TextBlock Text="Loading 3D engine..." Foreground="#A0AEC0"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>
