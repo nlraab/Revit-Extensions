@@ -32,6 +32,7 @@ __doc__    = ('dbHMS 3D model viewer. Phase 1: proves the embedded WebGL '
               'category/workset toggles, and clash overlay come next.')
 
 import os
+import time
 import traceback
 
 import clr  # noqa: F401
@@ -45,11 +46,14 @@ from System.Windows import (
     HorizontalAlignment, VerticalAlignment,
 )
 from System.Windows.Controls import TextBlock
+from System.Windows.Input import Mouse, Cursors
 from System.Windows.Media import SolidColorBrush, Color
 
 from pyrevit import forms
 import dbhms_ui
 import dbhms_telemetry
+
+from clash_export import revit_geometry, gltf
 
 
 SCRIPT_DIR = os.path.dirname(__file__)
@@ -59,6 +63,16 @@ WEB_INDEX  = os.path.join(SCRIPT_DIR, 'web', 'index.html')
 # WebView2 assemblies we need from Revit's install directory.
 _WEBVIEW2_WPF  = 'Microsoft.Web.WebView2.Wpf.dll'
 _WEBVIEW2_CORE = 'Microsoft.Web.WebView2.Core.dll'
+
+
+def _safe_title(doc):
+    """Sanitize the document title into a filename-safe stem."""
+    try:
+        title = doc.Title or 'model'
+    except Exception:
+        title = 'model'
+    keep = [c for c in title if c.isalnum() or c in (' ', '_', '-')]
+    return ''.join(keep).strip() or 'model'
 
 
 def _revit_dir_with_webview2():
@@ -175,11 +189,86 @@ class ViewerForm(forms.WPFWindow):
     # --- Actions ------------------------------------------------------
 
     def _on_export(self, sender, args):
+        """Phase 2: export a small slice of the model to a .glb and open it
+        so Nathan can confirm the geometry came out right. In-panel loading
+        comes next phase."""
+        from pyrevit import revit
+        doc = revit.doc
+        if doc is None:
+            dbhms_ui.info("No active Revit document to export.", title='3D Viewer')
+            return
+        try:
+            view = doc.ActiveView
+        except Exception:
+            view = None
+
+        Mouse.OverrideCursor = Cursors.Wait
+        result = None
+        path = None
+        size_bytes = 0
+        error = None
+        t0 = time.time()
+        try:
+            result = revit_geometry.extract_slice(doc, view)
+            if result["meshes"]:
+                path = self._export_path(doc)
+                size_bytes = gltf.write_glb(
+                    path, result["meshes"], asset_extras=result["asset_extras"])
+        except Exception:
+            error = traceback.format_exc()
+        finally:
+            Mouse.OverrideCursor = None
+        seconds = time.time() - t0
+
+        if error is not None:
+            dbhms_ui.info("Export failed:\n\n{}".format(error),
+                          title='3D Viewer export failed')
+            return
+        if not result["meshes"]:
+            dbhms_ui.info(
+                "No 3D geometry found to export.\n\n"
+                "Open a 3D view with model elements and try again.",
+                title='3D Viewer')
+            return
+
+        stats = result["stats"]
+        size_mb = size_bytes / (1024.0 * 1024.0)
+        note = " (capped slice)" if stats.get("capped") else ""
+        host_n = stats.get("host_elements", 0)
+        link_n = stats.get("link_elements", 0)
+        models_n = stats.get("models", 0)
+        self.txt_status.Text = (
+            "Exported {0} host + {1} linked elements, {2:,} triangles, "
+            "{3:.1f} MB in {4:.1f}s{5}.".format(
+                host_n, link_n, stats["triangles"], size_mb, seconds, note))
         dbhms_ui.info(
-            "Model export and loading arrive in the next phase.\n\n"
-            "This first build proves the 3D panel renders inside Revit. "
-            "If you can see the spinning cube, the foundation works.",
-            title='3D Viewer')
+            "Exported a slice of the model to glTF (.glb).\n\n"
+            "Host elements: {0}\nLinked elements: {1} (from {2} linked "
+            "model(s))\nTriangles: {3:,}\nFile size: {4:.1f} MB\n"
+            "Time: {5:.1f}s{6}\n\nFile:\n{7}\n\n"
+            "Opening it now so you can confirm the geometry. In-panel "
+            "loading arrives in the next phase.".format(
+                host_n, link_n, models_n, stats["triangles"], size_mb,
+                seconds, note, path),
+            title='3D Viewer export complete')
+        try:
+            os.startfile(path)
+        except Exception:
+            try:
+                os.startfile(os.path.dirname(path))
+            except Exception:
+                pass
+
+    def _export_path(self, doc):
+        base = (os.environ.get('LOCALAPPDATA')
+                or os.environ.get('TEMP') or SCRIPT_DIR)
+        out_dir = os.path.join(base, 'dbHMS', '3DViewer', 'models')
+        try:
+            if not os.path.isdir(out_dir):
+                os.makedirs(out_dir)
+        except Exception:
+            out_dir = base
+        return os.path.join(out_dir, _safe_title(doc) + '.glb')
 
     def _on_close(self, sender, args):
         try:
