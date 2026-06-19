@@ -165,6 +165,69 @@ def configure_for_first_run(view, doc):
     _log("configure: done (fallback)")
 
 
+def enter_fast_navigation(view, doc):
+    """Drop the view to a fast display style for the duration of active
+    movement. This is what Revit's native orbit/zoom does under the hood:
+    render a lighter version of the model while the camera is moving so
+    each frame is cheap, then snap back to full quality when motion stops.
+
+    Caller MUST be inside a Transaction.
+
+    Strategy: switch the display style WITHOUT touching the view template
+    when possible (changing the template forces a Visibility/Graphics
+    recompute, which itself is expensive and flickers). If a template is
+    actively locking the display style, detach it as a fallback so the
+    fast style can take effect. exit_fast_navigation re-applies the
+    template (via configure_for_first_run) when movement stops.
+    """
+    from Autodesk.Revit.DB import (DisplayStyle, ElementId,
+                                   ViewDetailLevel)
+    if view is None:
+        return
+    apply_quality(view, QUALITY_NAVIGATE)  # DisplayStyle.Shading
+
+    # If a view template locks the display style, apply_quality silently
+    # had no effect. Detect that and detach the template so the fast
+    # style can win for the duration of the motion.
+    locked = False
+    try:
+        locked = (view.DisplayStyle != DisplayStyle.Shading
+                  and view.DisplayStyle != DisplayStyle.ShadingWithEdges)
+    except Exception:
+        locked = False
+    if locked:
+        try:
+            view.ViewTemplateId = ElementId.InvalidElementId
+            _log("enter_fast_navigation: detached template to unlock style")
+        except Exception as ex:
+            _log("enter_fast_navigation: detach failed ({})".format(ex))
+        apply_quality(view, QUALITY_NAVIGATE)
+
+    # Keep detail at Fine even while navigating. This view is for clash
+    # detection, so the user needs to see true pipe/duct wall thickness
+    # (Coarse and Medium collapse small runs to single lines, hiding the
+    # very geometry a clash review is about). The cheap part is the
+    # display STYLE (Shaded, set above); Fine detail measured no
+    # noticeable performance cost over Medium on Nathan's heavy model,
+    # so fidelity wins here.
+    try:
+        view.DetailLevel = ViewDetailLevel.Fine
+    except Exception:
+        pass
+
+
+def exit_fast_navigation(view, doc):
+    """Restore full presentation quality after movement stops. Re-runs the
+    normal first-run configuration, which re-applies the firm template
+    (or the Realistic + Fine fallback when no template exists).
+
+    Caller MUST be inside a Transaction.
+    """
+    if view is None:
+        return
+    configure_for_first_run(view, doc)
+
+
 def apply_quality(view, quality):
     """Switch `view` between QUALITY_NAVIGATE (Shaded) and QUALITY_PRESENT
     (Realistic). Caller MUST be inside a Transaction. Idempotent.
@@ -239,7 +302,9 @@ def set_orientation(view, position_xyz, target_xyz, up_xyz):
                       forward.Z / length)
         view.SetOrientation(ViewOrientation3D(
             position_xyz, up_xyz, forward))
-        _log("set_orientation: SetOrientation OK")
+        # NOTE: deliberately NO success log here. set_orientation runs on
+        # every motion frame (~30x/sec); a per-frame file append on the UI
+        # thread is measurable overhead. Errors still log below.
     except Exception as ex:
         _log("set_orientation: failed ({})".format(ex))
 

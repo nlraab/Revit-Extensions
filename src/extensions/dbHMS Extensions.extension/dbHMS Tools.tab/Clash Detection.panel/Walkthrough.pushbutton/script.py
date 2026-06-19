@@ -53,6 +53,7 @@ clr.AddReference("RevitAPIUI")
 import System
 from System import EventHandler
 from System.Windows import Visibility, Input
+from System.Windows.Controls import ListBoxItem
 from System.Windows.Input import (
     Key, Keyboard, Mouse, MouseButtonState, Cursors, CaptureMode,
 )
@@ -99,22 +100,15 @@ _KEY_MAP = {
 # motion feels laggy.
 _TICK_MS = 33
 
+# How long the camera must sit still (no keys, no mouse) before we snap
+# the view back to full presentation quality. Short enough that a brief
+# pause restores fidelity promptly; long enough that the rapid start/stop
+# of normal flying doesn't thrash the display style. Seconds.
+_STOP_DEBOUNCE = 0.3
+
 # Speed multipliers when modifier keys are held.
 _SHIFT_MULTIPLIER = 3.0
 _CTRL_MULTIPLIER  = 0.25
-
-
-# ---------------------------------------------------------------------------
-# Bookmark view-model (binds to ListBox)
-# ---------------------------------------------------------------------------
-
-class _BookmarkRow(object):
-    def __init__(self, bookmark):
-        self.Bookmark = bookmark
-        self.Display  = bookmark.get("name") or "(unnamed)"
-
-    def __str__(self):
-        return self.Display
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +129,9 @@ class _WalkthroughHandler(IExternalEventHandler):
         self.pending_action = None
         self.kwargs         = {}
         self._completion_callback = None
+        # Cached walkthrough view — set on open, reused every motion frame
+        # so the per-frame camera path skips a FilteredElementCollector scan.
+        self._view = None
 
     def set_completion_callback(self, cb):
         """Register a callable invoked on the WPF thread after each
@@ -144,7 +141,11 @@ class _WalkthroughHandler(IExternalEventHandler):
     def Execute(self, app):
         action = self.pending_action
         kwargs = self.kwargs
-        walkthrough_view._log("Execute: action={}".format(action))
+        # set_camera / read_camera fire ~30x/sec during free-fly; logging
+        # them means a file append per frame on the UI thread. Skip those;
+        # log everything else.
+        if action not in ("set_camera", "read_camera"):
+            walkthrough_view._log("Execute: action={}".format(action))
         self.pending_action = None
         self.kwargs = {}
         success, message, payload = False, "(no action)", None
@@ -153,6 +154,8 @@ class _WalkthroughHandler(IExternalEventHandler):
                 success, message, payload = self._open_view(app)
             elif action == "set_camera":
                 success, message, payload = self._set_camera(app, **kwargs)
+            elif action == "end_motion":
+                success, message, payload = self._end_motion(app)
             elif action == "set_discipline":
                 success, message, payload = self._set_discipline(app, **kwargs)
             elif action == "render":
@@ -214,6 +217,7 @@ class _WalkthroughHandler(IExternalEventHandler):
             if txn.HasStarted() and not txn.HasEnded():
                 txn.RollBack()
             return False, "View setup failed: {}".format(ex), None
+        self._view = view  # cache for the per-frame camera hot path
         try:
             uidoc.ActiveView = view
         except Exception:
@@ -230,45 +234,107 @@ class _WalkthroughHandler(IExternalEventHandler):
             return False, "Walkthrough view not found.", None
         return True, "OK", walkthrough_view.get_camera(view)
 
-    def _set_camera(self, app, camera=None):
-        """Apply the camera tuple inside a transaction + refresh the view."""
+    def _set_camera(self, app, camera=None, enter_fast=False):
+        """Apply the camera tuple inside a transaction. Runs ~30x/sec
+        during free-fly, so this is THE performance-critical path.
+
+        Why this used to be unusable: the method forces a synchronous
+        repaint (uidoc.RefreshActiveView). At full presentation quality on
+        a heavy model that repaint measured ~1073 ms — 99.7% of every
+        frame. Because a pyRevit modeless window shares Revit's UI thread,
+        that 1 s repaint froze the keyboard, mouse, and 30 fps timer: the
+        "1-2 fps, unusable" symptom. Native orbit dodges this by rendering
+        a SIMPLIFIED model while the camera is moving, then snapping back
+        to full quality when it stops.
+
+        The fix (Nathan chose "do what native orbit does"): on the first
+        motion frame of a movement burst the form passes enter_fast=True,
+        and we drop the view to a fast display style (Shaded + Medium
+        detail) via walkthrough_view.enter_fast_navigation. Every fast-mode
+        frame is then cheap, so the forced refresh stays well under the
+        frame budget and the controls stay smooth. When the form detects
+        the camera has been still past the debounce window it queues
+        "end_motion", which restores full quality. We force the refresh on
+        EVERY frame now (it's cheap in fast mode) so the picture tracks the
+        camera in real time instead of only updating when motion stops.
+
+        Uses the cached view (no per-frame collector scan) and does no
+        per-frame logging.
+        """
         from Autodesk.Revit.DB import Transaction
         if camera is None:
-            walkthrough_view._log("_set_camera: no camera passed")
             return False, "No camera passed.", None
         uidoc = app.ActiveUIDocument
         if uidoc is None:
-            walkthrough_view._log("_set_camera: no ActiveUIDocument")
             return False, "No active document.", None
         doc = uidoc.Document
-        view = walkthrough_view.find_walkthrough_view(doc)
+        view = self._view
         if view is None:
-            walkthrough_view._log("_set_camera: walkthrough view not found")
+            view = walkthrough_view.find_walkthrough_view(doc)
+            self._view = view
+        if view is None:
             return False, "Walkthrough view not found.", None
-        active_view_id = None
-        try:
-            active_view_id = uidoc.ActiveView.Id
-        except Exception:
-            pass
-        walkthrough_view._log(
-            "_set_camera: view.Id={}, active_view.Id={}, pos={}"
-            .format(view.Id, active_view_id, camera[0]))
         txn = Transaction(doc, "dbHMS Walkthrough camera step")
         try:
             txn.Start()
+            if enter_fast:
+                # First frame of a movement burst — switch to the cheap
+                # navigation display style for the duration of the motion.
+                walkthrough_view.enter_fast_navigation(view, doc)
             walkthrough_view.set_camera(view, camera)
             txn.Commit()
-            walkthrough_view._log("_set_camera: txn committed")
         except Exception as ex:
-            walkthrough_view._log("_set_camera: txn raised {}".format(ex))
+            # The view may have been closed / deleted out from under us —
+            # drop the cache so the next frame re-finds it.
+            self._view = None
             if txn.HasStarted() and not txn.HasEnded():
                 txn.RollBack()
             return False, "Camera set failed: {}".format(ex), None
+        # Force the repaint so the picture tracks the camera every frame.
+        # Cheap now that we're in the fast display style during motion.
         try:
             uidoc.RefreshActiveView()
-            walkthrough_view._log("_set_camera: RefreshActiveView OK")
+        except Exception:
+            pass
+        return True, "OK", None
+
+    def _end_motion(self, app):
+        """Movement stopped (debounced) — restore full presentation
+        quality. Re-applies the firm template (or the Realistic fallback).
+
+        Deliberately does NOT force a repaint. Committing the display-style
+        change already marks the view dirty; Revit then repaints it at full
+        quality on its own next-idle cycle — the SAME asynchronous, non-
+        blocking path native orbit uses when you let go. A forced
+        uidoc.RefreshActiveView() here would do an immediate synchronous
+        full-quality redraw on the shared UI thread, which on a heavy model
+        is ~1 s and locks the user out of moving again until it finishes
+        (the "I stop and can't move for a second" symptom). Handing the
+        snap-back repaint to Revit removes that lockout: the simplified
+        frame lingers a beat, then Revit sharpens it on its own, exactly
+        like native — and the controls never freeze.
+        """
+        from Autodesk.Revit.DB import Transaction
+        uidoc = app.ActiveUIDocument
+        if uidoc is None:
+            return False, "No active document.", None
+        doc = uidoc.Document
+        view = self._view
+        if view is None:
+            view = walkthrough_view.find_walkthrough_view(doc)
+            self._view = view
+        if view is None:
+            return False, "Walkthrough view not found.", None
+        txn = Transaction(doc, "dbHMS Walkthrough restore quality")
+        try:
+            txn.Start()
+            walkthrough_view.exit_fast_navigation(view, doc)
+            txn.Commit()
         except Exception as ex:
-            walkthrough_view._log("_set_camera: RefreshActiveView raised {}".format(ex))
+            if txn.HasStarted() and not txn.HasEnded():
+                txn.RollBack()
+            return False, "Quality restore failed: {}".format(ex), None
+        # No RefreshActiveView — let Revit repaint full quality on idle.
         return True, "OK", None
 
     def _set_discipline(self, app, discipline=None, visible=True):
@@ -348,6 +414,24 @@ class WalkthroughForm(forms.WPFWindow):
         self._drag_origin = None  # (x, y) WPF-local point during active drag
         self._dragging = False    # True only while a mouse button is held
         self._last_tick_time = None
+        # LOD ("do what native orbit does") state. While the camera is
+        # actively moving the view runs in a cheap display style (Shaded +
+        # Medium); when it's been still past _STOP_DEBOUNCE we snap back to
+        # full quality. _fast_active tracks whether we're currently in the
+        # cheap style; _last_input_time is when we last saw movement input.
+        self._fast_active = False
+        self._last_input_time = None
+        # Continuous-fly mode (the chk_continuous_fly toggle): when on, we
+        # stay in the cheap style the WHOLE time instead of snapping back
+        # to full quality on stop. Trades the glossy look for zero re-render
+        # pauses — flying stays smooth and stopping is instant. Best on
+        # heavy models. Driven by the checkbox; default off.
+        self._continuous_fly = False
+        # When the user clicks Save bookmark we first queue a live camera
+        # read (so we capture wherever the view actually is now, including
+        # native orbit/zoom), then finalize the save once that read lands.
+        # Holds the pending bookmark name between those two steps.
+        self._pending_bookmark_name = None
         # Global mouselook mode (F-key toggle): cursor hidden + locked
         # to an anchor screen point, mouse motion rotates camera, all
         # clicks blocked from reaching Revit while active.
@@ -389,6 +473,10 @@ class WalkthroughForm(forms.WPFWindow):
         self.sl_look_sensitivity.ValueChanged += self._on_look_sensitivity_changed
         self._refresh_speed_label()
         self._refresh_look_sensitivity_label()
+
+        # Smooth-fly toggle — stay in the cheap style permanently while on.
+        self.chk_continuous_fly.Checked   += self._on_continuous_fly_changed
+        self.chk_continuous_fly.Unchecked += self._on_continuous_fly_changed
 
         # Look pad — captures mouse + keyboard when clicked
         self.brd_lookpad.MouseLeftButtonDown += self._on_lookpad_mousedown
@@ -467,7 +555,16 @@ class WalkthroughForm(forms.WPFWindow):
             return
         try:
             for b in walkthrough_bookmarks.read_bookmarks(self._project_hash):
-                self.lb_bookmarks.Items.Add(_BookmarkRow(b))
+                # Use a real WPF ListBoxItem with the name as Content and
+                # the bookmark dict stashed on Tag. IronPython's __str__ is
+                # NOT picked up by WPF's item rendering (it falls back to
+                # the .NET type name, e.g. "IronPython.NewTypes..."), so we
+                # set the displayed string explicitly. Tag carries the data
+                # back to the double-click / delete handlers.
+                lbi = ListBoxItem()
+                lbi.Content = b.get("name") or "(unnamed)"
+                lbi.Tag = b
+                self.lb_bookmarks.Items.Add(lbi)
         except Exception as ex:
             self.txt_status.Text = "Couldn't load bookmarks: {}".format(ex)
 
@@ -525,6 +622,25 @@ class WalkthroughForm(forms.WPFWindow):
 
     def _on_look_sensitivity_changed(self, sender, args):
         self._refresh_look_sensitivity_label()
+
+    def _on_continuous_fly_changed(self, sender, args):
+        """Smooth-fly toggle. ON: drop to the cheap style now and stay
+        there (the motion loop stops snapping back). OFF: restore full
+        quality immediately and let the normal LOD behavior resume."""
+        self._continuous_fly = bool(self.chk_continuous_fly.IsChecked)
+        walkthrough_view._log("continuous_fly = {}".format(self._continuous_fly))
+        if self._camera is None:
+            return
+        if self._continuous_fly:
+            # Drop to the light style right away so the change is visible
+            # even before the next movement. Subsequent frames keep it.
+            self._fast_active = True
+            self._queue_action("set_camera", camera=self._camera,
+                               enter_fast=True)
+        else:
+            # Back to full quality now (async repaint, no lockout).
+            self._fast_active = False
+            self._queue_action("end_motion")
 
     def _current_look_sensitivity(self):
         return float(self.sl_look_sensitivity.Value)
@@ -812,15 +928,32 @@ class WalkthroughForm(forms.WPFWindow):
             return
         from datetime import datetime
         now = datetime.now()
+        has_input = bool(self._pressed_keys) or self._mouse_dx != 0 or self._mouse_dy != 0
         # ALWAYS update last-tick-time, even when there's no input.
         # Otherwise after a quiet period, the first input tick computes
         # `dt = now - last_input_tick` which can be many seconds —
         # multiplied by speed that's a huge teleport. Symptom Nathan
         # reported: pressing E after idling jumps the camera way up
         # before settling at the correct speed.
-        if not self._pressed_keys and self._mouse_dx == 0 and self._mouse_dy == 0:
+        if not has_input:
             self._last_tick_time = now
+            # No movement this tick. If we're in the cheap navigation
+            # display style and the camera has been still long enough,
+            # snap back to full presentation quality. The debounce keeps
+            # the rapid start/stop of normal flying from thrashing the
+            # display style on every brief pause.
+            #
+            # Skipped entirely in continuous-fly mode: there we deliberately
+            # stay in the cheap style so there's never a re-render pause.
+            if (not self._continuous_fly and self._fast_active
+                    and self._last_input_time is not None):
+                idle = (now - self._last_input_time).total_seconds()
+                if idle >= _STOP_DEBOUNCE:
+                    self._fast_active = False
+                    self._queue_action("end_motion")
             return
+        # There IS movement input this tick.
+        self._last_input_time = now
         if self._last_tick_time is None:
             dt = _TICK_MS / 1000.0
         else:
@@ -843,7 +976,13 @@ class WalkthroughForm(forms.WPFWindow):
             self._mouse_dx = 0.0
             self._mouse_dy = 0.0
         self._camera = new_camera
-        self._queue_action("set_camera", camera=new_camera)
+        # First frame of a movement burst → tell the Revit side to drop to
+        # the cheap navigation display style (what native orbit does). Once
+        # we're in fast mode, subsequent frames just move the camera.
+        enter_fast = not self._fast_active
+        if enter_fast:
+            self._fast_active = True
+        self._queue_action("set_camera", camera=new_camera, enter_fast=enter_fast)
 
     # --- Handoff: Walkthrough Here from Browser (Iter 13) -------------
     #
@@ -970,6 +1109,24 @@ class WalkthroughForm(forms.WPFWindow):
         )
         if not name:
             return
+        # Capture the LIVE camera before saving. self._camera only tracks
+        # WASD / mouse-look moves; if the user orbited or zoomed natively
+        # in Revit since their last keypress, the cache is stale and we'd
+        # bookmark the old pose. Queue a fresh read_camera and finalize the
+        # save in _on_handler_done once it lands.
+        self._pending_bookmark_name = name
+        self.txt_status.Text = "Saving bookmark..."
+        self._queue_action("read_camera")
+
+    def _finalize_bookmark_save(self, name):
+        """Write the bookmark using the freshly-read self._camera. Called
+        from the read_camera completion once _on_save_bookmark has queued
+        the read."""
+        if self._camera is None:
+            self.txt_status.Text = "Couldn't save bookmark — no camera."
+            return
+        if not self._project_hash:
+            return
         position, forward, up = self._camera
         bm = walkthrough_bookmarks.make_bookmark(
             name, position, forward, up,
@@ -988,7 +1145,7 @@ class WalkthroughForm(forms.WPFWindow):
         item = self.lb_bookmarks.SelectedItem
         if item is None:
             return
-        bm = item.Bookmark
+        bm = item.Tag
         cam = bm.get("camera") or {}
         position = cam.get("position") or [0, 0, 5]
         forward  = cam.get("forward")  or [1, 0, 0]
@@ -1004,7 +1161,7 @@ class WalkthroughForm(forms.WPFWindow):
         item = self.lb_bookmarks.SelectedItem
         if item is None:
             return
-        bm = item.Bookmark
+        bm = item.Tag
         if not forms.alert(
                 "Delete bookmark '{}'?".format(bm.get("name")),
                 title='Delete bookmark', yes=True, no=True):
@@ -1067,6 +1224,13 @@ class WalkthroughForm(forms.WPFWindow):
                 # operating against current state instead of stale cache.
                 if success and payload is not None:
                     self._camera = payload
+                # If a Save bookmark click is waiting on this fresh read,
+                # finalize it now so the bookmark stores the true current
+                # pose, not the stale cache.
+                pending = self._pending_bookmark_name
+                if pending is not None:
+                    self._pending_bookmark_name = None
+                    self._finalize_bookmark_save(pending)
                 return
             if action == "set_camera":
                 # Per-tick camera sets are too noisy to update status for.

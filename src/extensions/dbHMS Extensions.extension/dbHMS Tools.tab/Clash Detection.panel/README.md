@@ -868,28 +868,136 @@ Pure-data, fully unit-tested under CPython.
 
 The form runs a `DispatcherTimer` at ~33 ms (30 fps). Each tick:
 
-1. If no input is active (no keys pressed, no mouse delta), skip — don't
-   queue identical states.
-2. Measure `dt` from the last tick's wall-clock time (so movement is
-   distance-per-second regardless of frame-rate hiccups).
-3. Read `Keyboard.Modifiers` for Shift / Ctrl → multiply base speed by
+1. Detect whether any movement input is active (`has_input` = keys
+   pressed OR a non-zero mouse delta).
+2. **No input:** update the last-tick clock and, if we're currently in
+   the cheap "fast navigation" display style and the camera has been
+   still for longer than `_STOP_DEBOUNCE` (0.3 s), queue an `end_motion`
+   to snap the view back to full quality. Then return.
+3. **Input:** record `_last_input_time`; measure `dt` from the last
+   tick's wall-clock time (so movement is distance-per-second regardless
+   of frame-rate hiccups).
+4. Read `Keyboard.Modifiers` for Shift / Ctrl → multiply base speed by
    3× / ¼× respectively.
-4. Run `walkthrough_motion.step` with the pressed keys + speed + dt.
-5. Run `walkthrough_motion.look` with the accumulated mouse deltas;
+5. Run `walkthrough_motion.step` with the pressed keys + speed + dt.
+6. Run `walkthrough_motion.look` with the accumulated mouse deltas;
    reset the deltas to zero.
-6. Update the cached camera state and queue a `set_camera` ExternalEvent.
+7. Update the cached camera state and queue a `set_camera` ExternalEvent,
+   passing `enter_fast=True` on the *first* frame of a movement burst.
 
-The Revit-side `_set_camera` handler opens a transaction, calls
-`SetOrientation(ViewOrientation3D(...))`, commits, and calls
-`uidoc.RefreshActiveView()` to force a paint. Without the per-tick
-`RefreshActiveView` Revit queues the orientation changes and shows
-them as a single jump.
+The Revit-side `_set_camera` handler opens a transaction, optionally
+drops the view to the fast display style (`enter_fast`), calls
+`SetOrientation(ViewOrientation3D(...))`, commits, then forces one
+`uidoc.RefreshActiveView()`. The transaction commit alone is cheap
+(~1 ms even on a large model).
+
+**The repaint, and the LOD fix (the big lag fix).** A committed
+transaction that changes the active view doesn't reliably repaint it on
+its own while a 30 fps timer is flooding the UI thread — WM_PAINT is the
+lowest-priority Win32 message, so it gets starved and the picture only
+updates when motion stops. So we must force the repaint every frame with
+`uidoc.RefreshActiveView()` — an *immediate, synchronous* repaint on the
+UI thread.
+
+The catch: at full presentation quality (Realistic + Fine) that forced
+repaint measured **~1073 ms per frame** on a large model (the commit was
+~1 ms — the redraw was 99.7% of every frame), profiled via the per-frame
+timings in `walkthrough.log`. Because a pyRevit modeless window shares
+Revit's UI thread, that 1 s repaint froze the keyboard, mouse, and the
+30 fps timer — the "1-2 fps, unusable, controls feel dead" symptom.
+Native orbit stays smooth on the same model because Revit renders a
+*simplified* model while you move and snaps back to full quality when you
+stop. There is no public API for Revit's interactive LOD render, so we
+reproduce the behavior ourselves.
+
+**What we do (LOD / "do what native orbit does"):** while the camera is
+actively moving, the view runs in a cheap display *style* — `Shaded`,
+while keeping `Fine` detail (`walkthrough_view.enter_fast_navigation`).
+Detail stays `Fine` on purpose: this is a clash-detection view, so the
+user must see real pipe/duct wall thickness, which `Coarse`/`Medium`
+collapse to single lines; `Fine` measured no noticeable cost over
+`Medium` on the heavy model, and the display style is where the real
+savings are. Every motion frame is then cheap, so the forced
+`RefreshActiveView` stays well inside
+the frame budget and the controls stay smooth. The moment movement stops
+(debounced 0.3 s), `end_motion` →
+`walkthrough_view.exit_fast_navigation` → `configure_for_first_run`
+restores full presentation quality (firm template, or the Realistic +
+Fine fallback). So the simplified look is visible *only while you're
+actively flying*; the instant you stop, the view goes back to full
+quality.
+
+**Critically, `end_motion` does NOT force a repaint.** Committing the
+display-style change marks the view dirty, and Revit then repaints it at
+full quality on its own next-idle cycle — the same asynchronous,
+non-blocking path native orbit uses when you let go of the mouse. An
+earlier version forced a synchronous `RefreshActiveView()` here; on a
+heavy model that immediate full-quality redraw is ~1 s and runs on the
+shared UI thread, so it locked the user out of moving again until it
+finished ("I stop and can't move for a second while it renders").
+Handing the snap-back repaint to Revit removes that lockout: the
+simplified frame lingers a beat, then Revit sharpens it on its own,
+exactly like native, and the controls never freeze. We force the repaint
+only *during* motion (where it's cheap in the fast style and needed to
+beat WM_PAINT starvation), never on stop.
+
+Two cases for restoring quality:
+
+- **No template (fallback projects, incl. the heavy model that exposed
+  the bug):** the display style is freely settable, so it's a clean
+  `Realistic ↔ Shaded` swap each burst. No template work, no flicker
+  beyond the style change.
+- **Template projects (`dbHMS Walkthrough` applied):** if the template
+  locks the display style, `enter_fast_navigation` detaches the template
+  for the duration of the motion and `configure_for_first_run` re-applies
+  it on stop. That re-attach is a Visibility/Graphics recompute, so there
+  is a brief flicker at the start and end of a movement burst on template
+  projects. Acceptable tradeoff — those projects weren't the laggy ones,
+  and full fidelity is restored the instant you stop.
+
+`Shaded` (display style) + `Fine` (detail level) is the current
+navigate-quality choice. The display style is what's cheapened for speed;
+detail stays `Fine` so pipe/duct thickness is visible for clash review.
+The display style can be dialed lighter (e.g. `Wireframe`) if more
+smoothness is ever needed — that's a one-line change in
+`enter_fast_navigation` — but do not drop the detail level below `Fine`
+without a reason, since that's the geometry a clash review depends on.
+
+**Continuous-fly mode (the `chk_continuous_fly` toggle).** Even with the
+snap-back handed to Revit, on a very heavy model the brief churn each time
+you pause-and-resume can still feel like friction. The "Smooth fly mode
+(stay simplified)" checkbox removes it entirely: while it's on, the form
+sets `self._continuous_fly = True`, which makes the motion loop *skip the
+`end_motion` snap-back* — the view stays in the cheap `Shaded` display
+style (still at `Fine` detail) the whole time you're in the walkthrough. Flying is continuously
+smooth and stopping is instant, because there is never a full-quality
+re-render to wait for. The tradeoff is that the model always looks
+simplified (Shaded) while the toggle is on. Toggling it ON drops to the
+cheap style immediately (`set_camera` with `enter_fast=True`); toggling it
+OFF restores full quality at once (`end_motion`) and the normal LOD
+behavior resumes. Aimed at heavy models where smoothness beats fidelity;
+off by default so light models keep full-quality stills on stop.
+
+This exists because the underlying platform limit is real: a pyRevit tool
+can only move the camera via `View3D.SetOrientation`, which is a
+transactional document edit that forces a repaint. Revit's own native
+orbit/walk uses a separate interactive navigation engine (no transaction,
+GPU LOD) that is **not exposed to the API**, so a tool-driven camera can
+never be quite as smooth as native at full quality. Continuous-fly mode is
+the closest we get from inside Revit: keep every frame cheap, all the
+time. The genuinely native-smooth alternatives are all outside a pyRevit
+tool — a 3Dconnexion SpaceMouse (drives native nav, stays in the Revit
+viewport, full quality) or a real-time engine like Twinmotion / D5 Render
+(WASD + gamepad, but a separate synced window).
+
+The hot path also uses a cached view reference (no per-frame
+`FilteredElementCollector`) and does no per-frame logging, both of which
+were adding avoidable cost to every frame.
 
 Frame rate target is 30 fps because faster (60 fps tick) queues
 ExternalEvents faster than Revit can drain them on dense MEP models —
 the queue backs up, the camera lags input, and users feel like they're
-fighting the controls. 30 fps + light per-tick work (a single
-`SetOrientation` + a single `RefreshActiveView`) keeps up cleanly.
+fighting the controls. 30 fps + light per-tick work keeps up cleanly.
 
 ### Mouse capture inside the look pad
 

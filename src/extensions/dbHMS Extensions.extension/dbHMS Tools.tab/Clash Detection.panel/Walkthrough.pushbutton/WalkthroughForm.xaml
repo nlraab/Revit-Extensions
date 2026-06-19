@@ -195,6 +195,19 @@
                         <TextBlock Style="{StaticResource HelperText}" Margin="0,8,0,0">
                             <Run Text="Hold "/><Run Text="Shift" FontWeight="SemiBold"/><Run Text=" to fly faster, "/><Run Text="Ctrl" FontWeight="SemiBold"/><Run Text=" to slow down."/>
                         </TextBlock>
+
+                        <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                CornerRadius="3" Padding="8" Margin="0,10,0,0">
+                            <StackPanel>
+                                <CheckBox x:Name="chk_continuous_fly" Content="Smooth fly mode (stay simplified)"
+                                          FontWeight="SemiBold"/>
+                                <TextBlock Style="{StaticResource HelperText}" Margin="0,4,0,0">
+                                    <Run Text="Keeps the view in a lighter style the whole time you walk, so flying stays smooth and stopping is instant — never pausing to re-render."/>
+                                    <LineBreak/>
+                                    <Run Text="Tradeoff: the model looks simpler (Shaded) while this is on. Best on heavy models. Turn off for full-quality stills."/>
+                                </TextBlock>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </Border>
 
