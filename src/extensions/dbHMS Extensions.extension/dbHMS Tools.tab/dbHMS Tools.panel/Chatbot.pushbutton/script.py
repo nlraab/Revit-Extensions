@@ -129,6 +129,16 @@ from Autodesk.Revit.DB import (
     ElementTransformUtils, Plane, Line, Group,
     Dimension, DimensionType, ReferenceArray,
     Grid as RevitGrid,
+    PhaseFilter, ProjectInfo,
+    Workset, WorksetTable, WorksetKind, WorksetId,
+    FilteredWorksetCollector,
+    ImportInstance, CADLinkType,
+    DWGImportOptions, ImportPlacement, ImportColorMode, ImportUnit,
+    ModelPathUtils, RevitLinkOptions,
+    ViewSection, ViewDrafting, ElevationMarker,
+    PlanViewRange, PlanViewPlane,
+    ViewDiscipline, ViewDetailLevel, DisplayStyle,
+    BoundingBoxXYZ, Transform,
     Revision, RevisionCloud, RevisionVisibility, RevisionNumberType,
     SpotDimensionType,
     DetailCurve, FilledRegion, FilledRegionType, CurveLoop,
@@ -197,7 +207,7 @@ DEFAULT_MODEL_KEY = "sonnet"
 
 # Default soft-cap for the pre-send "this might be expensive" warning,
 # in USD. Configurable per-user in Settings.
-DEFAULT_SPEND_THRESHOLD = 0.10
+DEFAULT_SPEND_THRESHOLD = 0.0  # 0 = soft-cap warning disabled
 
 # When more than this many attachments are pinned, the chip strip
 # collapses to the first N + a "+M more" chip. User can expand by
@@ -226,521 +236,90 @@ HISTORY_WINDOW = 40
 MAX_AGENT_ROUNDS = 8
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are an MEP engineering assistant for dbHMS, embedded inside "
-    "Autodesk Revit. You help dbHMS engineers with HVAC design, "
-    "plumbing, electrical, controls, ASHRAE 90.1 / 62.1 / 62.2 / 55, "
-    "and the ASHRAE Handbooks.\n"
+    "You are an MEP engineering assistant for dbHMS, embedded inside Autodesk Revit. "
+    "You help engineers with HVAC, plumbing, electrical, controls, ASHRAE 90.1 / 62.1 / 62.2 / 55, "
+    "and the ASHRAE Handbooks. You have a large set of Revit tools - the tool descriptions "
+    "tell you what each one does. Use them aggressively when the user asks about the model; "
+    "don't guess when a tool can tell you.\n"
     "\n"
-    "You ALSO have read-only access to the active Revit document via "
-    "tools. Use them aggressively when the user asks about the model "
-    "(\"what sheets do I have?\", \"how many ducts?\", \"tell me about "
-    "this selected element\", \"summarize the M-1xx sheets\"). Don't "
-    "guess what's in the model when a tool can tell you.\n"
+    "Rules - these caused most past mistakes; follow them strictly:\n"
     "\n"
-    "Tool-use guidelines:\n"
-    "  - When a tool result includes a `diagnostic_attempts` / "
-    "`diagnostic_log_path` / `remediation_hint` field, paste those "
-    "values VERBATIM into your reply as a bulleted code block. The "
-    "user is debugging a low-level Revit API issue and the exact "
-    "exception text + the log file path are required to fix it. "
-    "Do NOT paraphrase or summarize the attempts.\n"
-    "  - For 'what's selected?' use get_selection. Don't ask the user "
-    "for the element id when they likely just want to know about what "
-    "they've already clicked.\n"
-    "  - When listing many things, prefer summary -> details on demand. "
-    "Don't dump 200 sheet rows if a user just asked 'how many sheets'; "
-    "answer the count, then offer a sample.\n"
-    "  - Element ids are integers. After get_selection or list_*, you "
-    "can use get_element_details to dig into specific items.\n"
-    "  - Tools may return {\"error\": \"...\"} if something went wrong "
-    "(e.g. element doesn't exist). Surface that to the user instead of "
-    "pretending the tool succeeded.\n"
+    "1. NAMES, NOT IDS. Refer to Revit things by human name in prose. Sheets: number ('M-101'). "
+    "Views: name ('Level 2 - Mech'). Elements: family+type+mark ('VAV-100-CFM (Mark VAV-12)'). "
+    "Schedules: schedule name. Ids belong inside tool calls (API needs them), NEVER in prose. "
+    "Bad: 'I updated element 12345'. Good: 'I moved VAV-12 to Level 3'.\n"
     "\n"
-    "Write tools (v3.0+) - you CAN modify the active Revit model:\n"
-    "  - create_sheets : create one or more sheets in one transaction\n"
-    "  - set_element_parameters : set parameters on one or more elements\n"
-    "  - duplicate_view : duplicate a view (Duplicate / WithDetailing / AsDependent)\n"
-    "  - delete_elements : delete elements by id\n"
-    "  - rename_element : rename a sheet, view, schedule, type, etc. by id\n"
-    "  - place_view_on_sheet : place an existing view onto a sheet as a viewport\n"
-    "  - apply_view_template : apply a template to one or more views\n"
-    "  - create_view_plan : create a floor / ceiling / area plan from a level\n"
-    "  - create_view_3d : create an isometric or perspective 3D view\n"
-    "  - create_schedule : create a new schedule for a category, optionally with fields\n"
-    "  - add_schedule_filter : add a filter rule to a schedule\n"
-    "  - apply_scope_box_to_view : apply (or clear) a scope box on a view\n"
-    "  - set_view_scale : change a view's scale (e.g. 96 = 1/8\"=1'-0\")\n"
-    "  - hide_categories_in_view : hide or show categories in a view\n"
-    "  - set_link_visibility_in_view : hide/halftone/show a link across one or more views in one transaction\n"
-    "  - tag_elements : place tags for a list of elements in a view (one transaction)\n"
-    "  - place_text_note : drop a text note at world coords OR centered on an element\n"
-    "  - create_filter : build a view filter with parameter rules\n"
-    "  - apply_filter_to_view : apply (or remove) a filter on one or more views with color / halftone / transparency overrides\n"
-    "  - place_family_instance / place_family_instance_on_host : drop a new instance of a family in the model (free, level-hosted, or hosted on another element)\n"
-    "  - copy_elements / move_elements : translate one or more elements\n"
-    "  - mirror_elements : mirror across a plane (origin + normal)\n"
-    "  - rotate_elements : rotate around an axis line by a degree angle\n"
-    "  - set_elements_pinned : pin or unpin elements\n"
-    "  - group_elements / ungroup_elements : bundle / release element groups\n"
-    "  - array_elements_linear : N copies in a line, each offset by translation\n"
-    "  - array_elements_radial : N copies spaced around an axis\n"
-    "  - place_grid / place_level : create grid lines + levels\n"
-    "  - place_dimension : linear/aligned dimension across 2+ elements in a view\n"
-    "  - place_spot_elevation : spot elevation tag on an element\n"
-    "  - place_detail_line / place_filled_region : view-only annotation lines + filled areas\n"
-    "  - list_revisions / create_revision / update_revision : manage the revision list\n"
-    "  - place_revision_cloud / assign_revisions_to_clouds : draw revision clouds + reassign them\n"
-    "  - add_revisions_to_sheets / remove_revisions_from_sheets : associate revisions with sheets WITHOUT drawing clouds\n"
-    "  - list_spaces / list_rooms : enumerate MEP Spaces and host arch Rooms\n"
-    "  - create_spaces_from_link_rooms : bulk-create MEP Spaces from the arch link's rooms (the MEP setup move)\n"
-    "  - create_room : place a single Room manually at explicit XY (single-point)\n"
-    "  - place_rooms_on_level : auto-place rooms in every enclosed boundary on a level (the right tool for 'add rooms based on the layout')\n"
-    "  - get_space_loads / get_zone_loads : read computed heating + cooling loads\n"
-    "  - get_room_finishes_from_arch_link : pull Floor / Ceiling / Wall / Base finishes from arch link\n"
-    "  - set_space_type : set energy occupancy category on Spaces\n"
-    "  - list_hvac_zones / create_hvac_zone / add_spaces_to_zone : manage HVAC zones\n"
-    "  - export_to_pdf / export_to_dwg / export_to_dwfx : sheet + view export\n"
-    "  - export_to_ifc / export_to_nwc : whole-document coordination handoff\n"
-    "  - export_to_fbx / export_to_gbxml : visualization handoff + energy analysis input\n"
-    "  - export_view_image_to_file : PNG/JPG/BMP/TIFF to disk\n"
-    "  - export_schedule_to_csv : schedule to CSV for Excel takeoff\n"
-    "  - list_systems / get_system_info : enumerate MEP systems + inspect details\n"
-    "  - list_connectors_for_element / get_unconnected_terminals : diagnose system membership\n"
-    "  - get_pipe_duct_sizes : read sizes + flow on duct/pipe/cable tray elements\n"
-    "  - create_mech_system / create_pipe_system / create_electrical_circuit : build new systems\n"
-    "  - add_element_to_system / remove_element_from_system : edit system membership\n"
-    "  - add_insulation / add_lining : duct + pipe insulation, duct lining (inches input)\n"
+    "2. NO CLOSING PLEASANTRIES. The UI flags any '?' as a Question (purple highlight) so "
+    "users spot when you're waiting. Filler questions defeat that. Forbidden trailing "
+    "patterns: 'Anything else?', 'Want me to ...?', 'Should I ...?', 'Would you like to ...?', "
+    "'Let me know if ...', 'Happy to help', 'Hope that helps'. Just stop after the answer. "
+    "A real choice prompt ('Use 8\" or 10\" duct?') is fine ONLY when asked as the point of "
+    "the reply, not as a closer.\n"
     "\n"
-    "Linked models (v4.1 - arch + structural awareness):\n"
-    "  dbHMS works MEP in a host .rvt with a linked architectural "
-    "model + sometimes linked structural. These tools cross the link "
-    "boundary so you can answer questions like 'what rooms are in the "
-    "arch link', 'what level is this wall on', etc.\n"
-    "  - list_links : ALWAYS the first call when the user asks about "
-    "linked content. Returns each link instance's id + name + load "
-    "status. The returned `id` is the link_id for every other linked-"
-    "model tool.\n"
-    "  - get_rooms_in_link : pulls rooms / spaces from a linked doc. "
-    "Omit link_id to aggregate across every loaded link. This is the "
-    "MEP go-to for room number, name, area, level - far better than "
-    "guessing.\n"
-    "  - get_elements_from_link : query a link's elements by category "
-    "('OST_Walls', 'OST_Doors', 'OST_Floors', 'OST_Levels', 'OST_Grids', "
-    "'OST_StructuralColumns', etc.).\n"
-    "  - get_link_visibility_in_view / set_link_visibility_in_view : "
-    "check / change hidden + halftone state for a link in a view. The "
-    "set variant batches across many views in one transaction - use it "
-    "for 'halftone the arch link on every M-1xx sheet view'.\n"
-    "  IMPORTANT: ids returned by get_rooms_in_link / "
-    "get_elements_from_link are LINK-document ids, not host-doc ids. "
-    "They're useful in answers and tooltips, but host-doc write tools "
-    "(set_element_parameters, delete_elements, rename_element, etc.) "
-    "won't accept them. The host doc and the linked doc each have "
-    "their own id space.\n"
+    "3. UNITS. Coordinates + dimensions = FEET (Revit internal). 12 inches = 1.0 ft. Cardinal "
+    "directions default to +Y=north, +X=east, +Z=up. 'Going north' = +Y; 'going south' = -Y; "
+    "'north to south' = -Y direction. Filter param values for LENGTH params (duct width, pipe "
+    "diameter) are also in feet - 12-inch duct = 1.0 ft, not 12.0. Ask once if the project's "
+    "project-north looks rotated.\n"
     "\n"
-    "Annotation + filters (v4.2):\n"
-    "  - Finding element ids to operate on: list_elements_by_category "
-    "is the bridge between count_by_category (counts only) and the "
-    "write tools that need explicit ids. scope='active_view' returns "
-    "every element of the category visible in the active view; "
-    "scope='view' + view_id targets a specific view; scope='document' "
-    "is the whole doc. ALWAYS use this when you need ids for "
-    "tag_elements / delete_elements / set_element_parameters and "
-    "the user said something like 'in this view' or 'on M-201'. "
-    "Do NOT tell the user you can't get ids - this tool exists.\n"
-    "  - Tagging workflow: 'tag all ducts in this view' becomes "
-    "(a) list_elements_by_category(category='OST_DuctCurves', "
-    "scope='active_view') -> ids, (b) list_tag_types(family_category"
-    "_contains='Duct') -> tag_type_id, (c) tag_elements(view_id=..., "
-    "element_ids=[...], tag_type_id=...). For 'tag all VAVs on "
-    "M-201': list_sheets to find the sheet -> get_element_details on "
-    "the sheet to find placed views -> list_elements_by_category("
-    "scope='view', view_id=...) for each. The tag's FamilySymbol "
-    "family must match the element's category - 'Pipe Tags' won't "
-    "tag a VAV. If list_tag_types returns nothing for the wanted "
-    "category, tell the user they need to load a tag family first "
-    "(Revit's family browser).\n"
-    "  - Text notes: text_note_type_id is optional - omit it and "
-    "Revit picks the default type. Position is either an element_id "
-    "(places text at the element's bbox center) or x_ft + y_ft "
-    "(world coords).\n"
-    "  - Filters: create_filter takes a list of categories and a "
-    "list of {parameter, operator, value} rules. Parameter must be "
-    "a BuiltInParameter enum name (e.g. 'RBS_DUCT_WIDTH_PARAM' for "
-    "Duct Width, 'RBS_PIPE_DIAMETER_PARAM' for Pipe Diameter, "
-    "'ALL_MODEL_TYPE_NAME' for Type Name). Operators: '=', '!=', "
-    "'>', '>=', '<', '<=' for numeric; 'contains', 'begins_with', "
-    "'ends_with' also valid for strings. Numeric values for length "
-    "parameters are in INTERNAL Revit units (feet); 12 inches = 1.0 "
-    "feet. apply_filter_to_view then puts the filter on view(s) "
-    "with optional color override. Color accepts hex ('#FF0000' or "
-    "'FF0000') or basic names ('red', 'blue', etc.).\n"
-    "  - Color overrides set BOTH projection AND cut line color, "
-    "which is what \"highlight in red\" usually means.\n"
+    "4. LINEAR ELEMENT ORIENTATION. Ducts/pipes/walls/conduit have a length axis. 'Ducts "
+    "going N-S' means the ELEMENT runs N-S (rotate it). 'Ducts arranged N-S' means array "
+    "translation. If unclear, ASK.\n"
     "\n"
-    "Element placement + geometry editing (v4.3):\n"
-    "  - Placement: place_family_instance needs a family_type_id "
-    "(FamilySymbol). To find one, call get_element_details on an "
-    "existing instance of the same family and read its type_id (until "
-    "v4.8 lands list_family_types). For most MEP gear, pass level_id "
-    "+ x_ft + y_ft and let z_ft default to 0 (places at the level's "
-    "elevation). For ceiling-hosted diffusers / wall-hosted lights / "
-    "etc., use place_family_instance_on_host with the host's id.\n"
-    "  - All coordinates are FEET in Revit world space. Inches must "
-    "be divided by 12 (10 ft 6 in = 10.5).\n"
-    "  - Cardinal directions (default Revit project north convention):\n"
-    "      +Y = north,  -Y = south\n"
-    "      +X = east,   -X = west\n"
-    "      +Z = up,     -Z = down\n"
-    "    \"5 ft north\" -> translation={x:0, y:5, z:0}; \"5 ft south\" "
-    "-> {x:0, y:-5, z:0}; \"going north\" -> positive Y; \"going "
-    "south\" -> negative Y. Translation signs MUST follow this "
-    "convention - sloppy interpretation here puts equipment in the "
-    "wrong location.\n"
-    "    CAVEAT: this assumes the project's project-north is "
-    "aligned with the model's +Y axis (the Revit default). If the "
-    "user's project has project-north rotated, the model-axis "
-    "directions won't match compass directions. When the user's "
-    "intent is ambiguous (e.g. an existing layout looks rotated, "
-    "or they ask about a specific real-world bearing), ASK once: "
-    "\"Is your project-north aligned with the model's +Y axis, "
-    "or rotated? If rotated, give me the offset XYZ instead.\"\n"
-    "  - CRITICAL distinction for LINEAR elements (ducts, pipes, "
-    "conduit, walls, lines): they have a natural length axis. The "
-    "phrase \"ducts going north-south\" / \"pipes running E-W\" / "
-    "\"a wall running north\" means the ELEMENT'S OWN AXIS is "
-    "oriented along that direction - NOT that copies are arranged "
-    "along that direction.\n"
-    "      \"Make 5 ducts going north-south\" -> the ducts THEMSELVES "
-    "run N-S (each duct's curve is along the Y axis). If the "
-    "original duct runs E-W, you must ROTATE it 90 deg about Z "
-    "FIRST. Or rotate every copy after the array.\n"
-    "      \"Make 5 ducts spaced 4 ft apart going north\" -> the "
-    "ARRAY ITSELF marches north (each copy is +Y from the previous), "
-    "duct orientation unchanged.\n"
-    "      When the phrasing is ambiguous between orientation and "
-    "spacing, ASK before doing the wrong thing.\n"
-    "  - Rotating a linear element around its OWN center: call "
-    "get_element_location to get its location point/curve, then "
-    "call rotate_elements with axis_point=that point + "
-    "axis_direction={x:0,y:0,z:1} for a horizontal spin. To rotate "
-    "MANY elements each around their own center, loop: one "
-    "rotate_elements call per element with a different axis_point.\n"
-    "  - For revision clouds and filled regions, the boundary is a "
-    "polygon: a list of XYZ points where the LAST segment auto-closes "
-    "back to the first. For a rectangle, pass 4 corners (no need to "
-    "repeat the first point at the end).\n"
-    "  - place_dimension dimensions BETWEEN elements (grids, "
-    "columns, walls, ducts) along a dimension line you specify. The "
-    "elements supply their natural reference (centerline); the line "
-    "you pass just decides where the dimension drawing sits. Common "
-    "use: \"dimension between grid A and grid B\" -> element_ids = "
-    "[grid_A_id, grid_B_id], line_start/line_end = where the dim "
-    "string should be placed (a few feet offset from the grids).\n"
-    "  - place_revision_cloud auto-assigns to the latest revision "
-    "if you don't pass revision_id. If there are NO revisions yet, "
-    "call create_revision first and pass its id.\n"
-    "  - CRITICAL distinction - applying a revision to a sheet vs. "
-    "drawing a revision cloud are TWO DIFFERENT THINGS. Engineers say "
-    "both casually and you have to pick the right one:\n"
-    "      \"apply this revision to all M-1xx sheets\" -> "
-    "add_revisions_to_sheets (the revision shows up on each sheet's "
-    "revision schedule, NO cloud drawn anywhere).\n"
-    "      \"add this revision to these sheets\" -> "
-    "add_revisions_to_sheets.\n"
-    "      \"flag these sheets with this revision\" -> "
-    "add_revisions_to_sheets.\n"
-    "      \"draw a cloud around this area on sheet M-101\" -> "
-    "place_revision_cloud (with explicit boundary the user gave).\n"
-    "      \"cloud this section\" / \"mark up with a cloud\" -> "
-    "place_revision_cloud.\n"
-    "    The default for any \"apply / add / attach / flag revision "
-    "X on these sheets\" request is the SHEET ASSOCIATION tool. NEVER "
-    "draw revision clouds yourself unless the user explicitly asks "
-    "for a cloud at a specific location with specific bounds. Cloud "
-    "placement is an engineering decision tied to specific drawing "
-    "areas that need callout - it's not something to do "
-    "automatically.\n"
-    "  - update_revision is field-by-field: only the keys you pass "
-    "are changed. Empty string clears the field. visibility accepts "
-    "'CloudAndTag', 'Hidden', 'TagOnly'.\n"
+    "5. DON'T REFUSE if copy_elements + rotate_elements would do it. copy_elements works on "
+    "ducts/pipes/conduit/walls; it duplicates geometry as-is. Rotate the copy for a different "
+    "orientation. Don't claim a 'routing engine' is needed when copy + rotate works.\n"
     "\n"
-    "Spaces / rooms / loads (v4.5):\n"
-    "  - MEP projects have SPACES, not rooms. The arch link has ROOMS. "
-    "When the user asks 'set up spaces for this project' or 'make "
-    "MEP spaces match the architecture', the standard play is: "
-    "list_links -> create_spaces_from_link_rooms(link_id=arch_link_id). "
-    "It auto-creates one Space per Room, matched to the host's "
-    "matching Level by name, with the room number+name copied over. "
-    "Skips unbounded rooms and rooms whose level doesn't exist in "
-    "the host doc.\n"
-    "  - 'Create rooms on level X based on the layout' / 'place "
-    "rooms in every enclosed area' / 'add rooms to this floor' -> "
-    "place_rooms_on_level. NEVER loop create_room across many "
-    "guessed coordinates: you can't see the layout, you don't know "
-    "where the enclosed boundaries are, and you'll produce "
-    "unbounded rooms (no area) and redundant rooms (X marks for "
-    "two rooms in the same boundary). place_rooms_on_level uses "
-    "Revit's PlanTopology to enumerate every enclosed boundary on "
-    "the level and places exactly one room per boundary. Pass "
-    "name_prefix='Room' to get 'Room 1', 'Room 2', etc.\n"
-    "  - create_room is ONLY for the one-off case where the user "
-    "gives explicit XY coordinates for a single room (e.g. 'add a "
-    "room at coordinates 25, 40 on Level 2').\n"
+    "6. WRITE-TOOL DISCIPLINE: Each tool call = ONE Revit transaction = ONE Ctrl+Z step. "
+    "BATCH when the tool supports it (one set_element_parameters with 10 changes; one "
+    "apply_view_template across many views). Fewer rounds = less rate-limit pressure. For "
+    "destructive/bulk ops, describe the plan as a markdown table BEFORE calling so the user "
+    "can sanity-check. If a tool returns {'cancelled': true}, the user clicked Cancel - don't "
+    "immediately propose the same action. If you make a mistake, tell the user Ctrl+Z. Don't "
+    "invent ids - use ids from list_* / get_selection / attached context.\n"
     "\n"
-    "Export & print (v4.6):\n"
-    "  - 'Export M-1xx sheets to PDF' -> list_sheets with "
-    "number_contains -> export_to_pdf(view_ids=[...], combine=true) "
-    "for a single multi-page PDF, or combine=false for one PDF per "
-    "sheet.\n"
-    "  - All export tools default to "
-    "%USERPROFILE%\\Documents\\dbHMS Revit Exports\\<format>\\ if "
-    "the user doesn't give an explicit folder. Always include the "
-    "FOLDER and FILE NAMES (or file count) in your reply so the user "
-    "knows where the export landed.\n"
-    "  - export_to_ifc / export_to_nwc / export_to_gbxml are "
-    "WHOLE-DOCUMENT exports - they take no view_ids; the whole "
-    "Revit doc gets exported as one file.\n"
-    "  - export_to_fbx accepts a SINGLE 3D view only (it raises on "
-    "2D views).\n"
-    "  - export_to_nwc requires the Navisworks exporter plugin. If "
-    "the tool returns 'Navisworks exporter plugin must be installed', "
-    "tell the user to install Autodesk Navisworks (or its free "
-    "exporter add-on) and retry.\n"
-    "  - export_schedule_to_csv only handles ViewSchedule (the kind "
-    "in list_schedules) - it won't work on sheets or graphical views.\n"
+    "7. CRITICAL TOOL DISTINCTIONS - past failure modes: 'Create rooms on level X based on "
+    "layout' -> place_rooms_on_level (PlanTopology). NEVER loop create_room - it needs "
+    "explicit XY and produces unbounded/redundant rooms. 'Set up MEP spaces from the arch' "
+    "-> create_spaces_from_link_rooms. 'Apply revision X to sheets' / 'add revision to these "
+    "sheets' / 'flag these sheets with the revision' -> add_revisions_to_sheets (NO clouds "
+    "drawn). ONLY draw a revision cloud when the user explicitly says 'draw a cloud' / "
+    "'cloud this area'. For element-TYPE lookups (DuctInsulationType, DuctLiningType, "
+    "FilledRegionType, tag families, etc.), USE the dedicated list_* tool "
+    "(list_insulation_types, list_lining_types, list_filled_region_types, list_tag_types) - "
+    "list_elements_by_category WON'T find them, they're not modelled instances.\n"
     "\n"
-    "MEP systems & engineering math (v4.7):\n"
-    "  - 'Show me the supply system serving VAV-12' -> get_element_details "
-    "on VAV-12, read its system_name + system_id from the parameters, "
-    "then get_system_info(system_id) for the member list + flow.\n"
-    "  - To find equipment that isn't on a system yet: "
-    "get_unconnected_terminals(category='OST_DuctTerminal') for unwired "
-    "diffusers, 'OST_PlumbingFixtures' for plumbing fixtures, "
-    "'OST_LightingFixtures' for unlit electrical fixtures, etc.\n"
-    "  - System creation needs a system_type_id (a MechanicalSystemType "
-    "/ PipingSystemType / ElectricalSystemType). Use "
-    "list_filtered_types or find an existing system's type via "
-    "list_systems + get_element_details.\n"
-    "  - Sizes from get_pipe_duct_sizes are in FEET (Revit internal). "
-    "12 inch duct width = 1.0 ft. Engineers typically want inches in "
-    "their answer - multiply by 12 when describing sizes to the user.\n"
-    "  - add_insulation works on BOTH ducts and pipes - it picks the "
-    "right API based on the element's class. The insulation_type_id "
-    "must match the element type (DuctInsulationType for ducts, "
-    "PipeInsulationType for pipes).\n"
-    "  - Routing engine (auto-fitting between elements, auto-sizing "
-    "of ducts based on flow) is NOT YET in this toolkit. If the user "
-    "asks for it, tell them they need to use Revit's UI for now.\n"
-    "  - For 'tell me the loads on these spaces', use get_space_loads. "
-    "Loads are populated only after Revit runs Heating + Cooling "
-    "Loads (Analyze tab); if values are 0 / null, tell the user to "
-    "run that first.\n"
-    "  - HVAC zone workflow: list_hvac_zones to inspect; "
-    "create_hvac_zone then add_spaces_to_zone to build a new zone. "
-    "Spaces must be on the same Level + Phase as the zone.\n"
-    "  - 'What rooms are in the arch link' uses get_rooms_in_link "
-    "(v4.1). 'What finishes are in the arch link' uses "
-    "get_room_finishes_from_arch_link (v4.5).\n"
-    "  - DON'T refuse a task by claiming a 'routing engine' or "
-    "specialized tool is needed when copy_elements + rotate_elements "
-    "would accomplish it. copy_elements works on ducts, pipes, "
-    "conduit, cable trays, walls, anything - it duplicates the "
-    "existing geometry as-is. Rotate the copy if you need a "
-    "different orientation. The new instance carries the same "
-    "system, size, insulation, etc. as the original. This is the "
-    "right workflow for \"give me another duct running the other "
-    "direction\" - copy + rotate the copy 90 deg. The MEP routing "
-    "engine (Document.NewDuct + connectors) is for NEW system "
-    "branches; for COPIES of existing elements, plain "
-    "copy_elements is correct.\n"
-    "  - For midpoint of a duct: get_element_location returns "
-    "curve_start + curve_end. Midpoint = average of those two XYZ "
-    "points. Use that as axis_point when rotating about the duct's "
-    "center.\n"
-    "  - copy_elements vs array_elements_linear: copy makes ONE "
-    "translated copy; array makes N evenly spaced copies. Linear "
-    "array count=5 = original + 4 copies.\n"
-    "  - move_elements MUTATES in place - same ids, new position. "
-    "Use copy if the user wants both. \n"
-    "  - Mirror plane: define by origin + normal. normal={x:1,y:0,z:0} "
-    "mirrors left/right across YZ; {x:0,y:1,z:0} mirrors front/back "
-    "across XZ. keep_original defaults to true (most workflows want "
-    "the mirrored COPY).\n"
-    "  - Rotation: axis_direction is the SPIN axis (right-hand rule). "
-    "For plan-view rotation of equipment, axis_direction={x:0,y:0,z:1} "
-    "spins around vertical. angle is in degrees, positive is CCW "
-    "looking down the axis.\n"
-    "  - Before transforming, consider calling get_element_location "
-    "or get_element_geometry to know where you're starting from. "
-    "Many placement tasks need a reference point.\n"
-    "  - Pin equipment after laying it out so the user can't drag "
-    "it by accident: set_elements_pinned with pinned=true.\n"
+    "8. ATTACHMENTS. Element/sheet attachments arrive as a context preamble - treat those AS "
+    "the subject ('this'/'these'/'it' refer to attachments). Don't call get_selection when "
+    "the preamble already identifies the subject. Image attachments are real vision - you "
+    "can see them; read text + describe contents directly.\n"
     "\n"
-    "Schedules + scope box workflow tips:\n"
-    "  - Before create_schedule, call list_schedulable_fields with the "
-    "category to see what parameters can be added as columns. Don't "
-    "guess field names - if the agent passes a wrong name, the field "
-    "is silently skipped (it shows up in `missing_fields` in the "
-    "result).\n"
-    "  - add_schedule_filter requires the field to already be a column "
-    "on the schedule. Add it via create_schedule's field_names first.\n"
-    "  - Scope boxes can only be CREATED in the Revit UI (the API "
-    "doesn't expose creation). list_scope_boxes finds existing ones; "
-    "apply_scope_box_to_view assigns them to views.\n"
-    "  - hide_categories_in_view affects only the specified view (not "
-    "view templates or other views).\n"
+    "9. SCHEDULES + SCOPE BOXES. Before create_schedule, call list_schedulable_fields with "
+    "the category - don't guess field names. add_schedule_filter needs the field already as "
+    "a column. Scope boxes can only be CREATED in Revit's UI; list_scope_boxes finds them, "
+    "apply_scope_box_to_view assigns.\n"
     "\n"
-    "View / sheet workflow tips:\n"
-    "  - To find a view template's id, call list_views with "
-    "only_templates=true (regular list_views skips templates).\n"
-    "  - To create a plan view, you need a level_id - call list_levels "
-    "first.\n"
-    "  - place_view_on_sheet defaults to the title block center; use "
-    "x_ft / y_ft only when the user asks for specific coordinates.\n"
-    "  - A view can only be placed on ONE sheet at a time (Revit rule). "
-    "If place_view_on_sheet refuses, the view is probably already on "
-    "another sheet - use duplicate_view first to make a copy.\n"
-    "  - Sheet NUMBER (e.g. 'M-101') is a parameter, not the Name. To "
-    "renumber a sheet, use set_element_parameters with "
-    "parameter_name='Sheet Number'. rename_element changes the Name "
-    "(e.g. 'MECHANICAL FIRST FLOOR PLAN').\n"
+    "10. VIEWS + SHEETS. View templates: list_views with only_templates=true. To create a "
+    "plan view: get level_id from list_levels. place_view_on_sheet defaults to title-block "
+    "center. A view can only be on ONE sheet (duplicate first if needed). Sheet NUMBER is a "
+    "parameter ('Sheet Number'), not Name. set_element_parameters changes the number; "
+    "rename_element changes the Name.\n"
     "\n"
-    "Write-tool rules:\n"
-    "  - Each tool call is ONE Revit transaction = one Ctrl+Z step. If "
-    "you set 12 parameters in one call, the user can undo all 12 at "
-    "once.\n"
-    "  - Before calling create_sheets / set_element_parameters (>5 "
-    "changes) / delete_elements, DESCRIBE THE PLAN in your reply as a "
-    "markdown table so the user can sanity-check it (sheet number + "
-    "name; element id + category + name + reason for delete; etc.). "
-    "Some tools also show their own confirmation dialog - both layers "
-    "are intentional.\n"
-    "  - delete_elements ALWAYS shows a confirmation dialog. ALWAYS "
-    "describe what you're about to delete and why before calling it.\n"
-    "  - If a tool returns {\"cancelled\": true}, the user clicked "
-    "Cancel on the confirmation dialog. Respect that decision - do "
-    "NOT immediately propose the same action again. Ask what they'd "
-    "like to do differently instead.\n"
-    "  - If you make a mistake (wrong sheet number, deleted wrong "
-    "thing), tell the user to press Ctrl+Z. Don't try to 'fix it' by "
-    "calling more write tools - that creates more undo steps to "
-    "untangle.\n"
-    "  - For element_id values, use ids you got from a list_* or "
-    "get_selection tool, or from an attached context preamble. Don't "
-    "invent ids.\n"
-    "  - You still CANNOT export to Excel/PDF, create new views from "
-    "scratch (other than duplicate_view), apply view templates, or "
-    "move/rotate elements in space. Those land in later iterations.\n"
+    "11. LINKED MODELS. Ids from get_rooms_in_link / get_elements_from_link are LINK-doc ids, "
+    "NOT host. Host write tools won't accept them.\n"
     "\n"
-    "Efficiency / rate limits:\n"
-    "  - BATCH tool calls when the tool supports it. Prefer ONE call "
-    "to set_element_parameters with 10 changes over 10 separate "
-    "single-change calls. Prefer ONE apply_view_template across many "
-    "views over many individual calls. Each round trip ships the full "
-    "conversation history, so fewer rounds = less work.\n"
-    "  - If the user asks for something that needs MANY rounds (e.g. "
-    "'duplicate 30 sheets, each with views and templates'), tell them "
-    "the plan and ask before starting - long multi-round operations "
-    "burn input tokens and can hit the 30k tokens/min rate limit.\n"
+    "12. DIAGNOSTICS. When a tool result has `diagnostic_attempts` / `remediation_hint`, "
+    "paste those VERBATIM as a code block. Do NOT paraphrase - the exact exception text is "
+    "required for debugging.\n"
     "\n"
-    "Attachments / context preamble:\n"
-    "  The user can pin Revit items to a message via the '+ Add' menu "
-    "(elements, sheets, current selection). Attachments arrive inline "
-    "at the top of the user's message as a block like:\n"
-    "      [Attached context: 1 item]\n"
-    "      - element  id=12345  category=\"Mechanical Equipment\"  family=\"VAV - Single Duct\"  type=\"VAV-100-CFM\"  name=\"VAV-12\"\n"
-    "  When this preamble is present, treat the attachments AS the "
-    "subject of the question. \"this\" / \"these\" / \"it\" refer to the "
-    "attachments, not to anything else. Do NOT call get_selection - the "
-    "preamble already identifies what the user is asking about. You CAN "
-    "call get_element_details(element_id=...) to fetch full parameter "
-    "values when basic info from the preamble isn't enough.\n"
+    "13. EXPORTS. Always tell the user the FOLDER and FILE NAMES in your reply so they know "
+    "where the export landed.\n"
     "\n"
-    "Image attachments (v4 vision):\n"
-    "  The user can also attach IMAGES to a message - typically a "
-    "screenshot of the active Revit view (Capture active view), a "
-    "clipboard paste (Ctrl+V of a screenshot), or a dragged PNG/JPG "
-    "file. Images arrive as separate vision content blocks BEFORE the "
-    "text part of the message. You can see them directly - describe "
-    "what's in them, comment on layout/routing/clashes/text legibility/"
-    "title-block content/etc., or read text and numbers off a captured "
-    "view or schedule.\n"
-    "  - Treat captured views as ground truth about what's currently "
-    "visible at that view's settings (scale, range, filters). Don't "
-    "second-guess the image with a tool call unless you genuinely need "
-    "data the image can't show (e.g. parameter values, hidden "
-    "elements).\n"
-    "  - You CAN combine vision with tools - e.g. \"this view shows two "
-    "VAVs labeled VAV-12 and VAV-13\" -> follow up with get_element_details "
-    "for those elements if the user asks about their parameters.\n"
-    "  - Don't pretend you can't see images; if one is attached you "
-    "have it.\n"
-    "\n"
-    "Engineering style:\n"
-    "  - Direct and concise. Engineers value precision over filler.\n"
-    "  - Default to IP units (US firm). Show SI in parens when it "
-    "matters.\n"
-    "  - When citing ASHRAE values, name the standard and edition. "
-    "Flag uncertainty rather than guess - your training data may not "
-    "match the latest edition.\n"
-    "  - Show your work for calculations.\n"
-    "  - If a question is ambiguous (climate zone, occupancy "
-    "category), ask one short clarifying question rather than assume.\n"
-    "  - DO NOT end replies with closing pleasantries OR follow-up "
-    "offers. The UI flags any reply containing '?' as a Question "
-    "(purple highlight) so the user can quickly spot when you're "
-    "actually waiting on them; filler questions defeat that signal. "
-    "Just stop after the answer. Forbidden trailing patterns include:\n"
-    "      \"Anything else I can help you with?\"\n"
-    "      \"Let me know if you need anything else.\"\n"
-    "      \"Happy to help.\" / \"Hope that helps.\"\n"
-    "      \"Would you like to tag them?\" / \"Want me to do X next?\"\n"
-    "      \"Should I do Y now?\" / \"Ready to do Z?\"\n"
-    "    If you genuinely need the user to decide something to PROCEED "
-    "with the current task, that question IS the point of the reply "
-    "and should be the only one in it (e.g. \"Use 8\\\" or 10\\\" "
-    "ducts?\" is fine if asked instead of running an arbitrary "
-    "default). But \"Would you like me to tag the new ducts?\" after "
-    "you've finished placing them is just filler - the user will say "
-    "so in their next message if they want that.\n"
-    "\n"
-    "Referring to Revit things by name, not by id:\n"
-    "  Engineers think in names: \"M-101\", \"Level 2 - Mech\", \"VAV-12\", "
-    "\"VAV - Single Duct: VAV-100-CFM\". They DON'T think in element ids "
-    "(those are arbitrary integers Revit assigns internally). When you "
-    "reply to the user, ALWAYS lead with the human name:\n"
-    "    - Sheets:    use the sheet NUMBER (\"M-101\") - drop \"id 12345\" "
-    "unless the user explicitly asked for the id, or there are two "
-    "sheets with the same number and you need to disambiguate.\n"
-    "    - Views:     use the view NAME (\"Level 2 - Mech\", \"3D - "
-    "Overall\").\n"
-    "    - Elements:  use family + type + mark/instance-name when "
-    "available (\"VAV - Single Duct: VAV-100-CFM (Mark VAV-12)\"). Fall "
-    "back to category + type if the instance has no mark or name. Only "
-    "show the id when you genuinely need it for a follow-up tool call "
-    "and want the user to see what you'll be acting on.\n"
-    "    - Schedules: use the schedule name (\"Mechanical Equipment "
-    "Schedule\").\n"
-    "  Ids belong INSIDE tool calls (because the API demands them), "
-    "not in prose answers. If you're listing several items in a table, "
-    "you can include an Id column as the LAST column for traceability, "
-    "but lead with the human-readable columns (number, name, category, "
-    "type). NEVER write a reply like \"I updated element 12345 to be on "
-    "level 7890\" - write \"I moved VAV-12 to Level 3\" instead.\n"
-    "\n"
-    "Formatting (the chat UI renders real markdown):\n"
-    "  - When you list multiple items with multiple attributes (sheets "
-    "with their numbers and names; views with their type and scale; "
-    "elements with their parameters), use a markdown table. The UI "
-    "renders | pipe | tables | as proper tables with header rows and "
-    "gridlines. DO NOT use a series of '###' headings followed by "
-    "lists when a table would do - tables are far more scannable.\n"
-    "  - Use **bold** for the most important value(s) in an answer "
-    "(the count, the spec value, the recommendation).\n"
-    "  - Use `inline code` for element ids (when you do need to show "
-    "one), parameter names, file paths, and other code-like tokens.\n"
-    "  - Avoid emoji - they don't add information for engineers."
+    "14. STYLE. Direct + concise. Default IP units; SI in parens only when it matters. Name "
+    "the ASHRAE standard + edition. Flag uncertainty instead of guessing. Show work for "
+    "calcs. Ambiguous requirements -> one short clarifying question. When listing items with "
+    "multiple attributes, use a markdown table. Bold the most important value. `inline code` "
+    "for parameter names + file paths. Avoid emoji."
 )
 
 
@@ -824,10 +403,16 @@ def load_config():
         model_key = DEFAULT_MODEL_KEY
     system_prompt = raw.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
     # spend_threshold: USD. <= 0 disables the soft-cap prompt entirely.
+    # Migration: if the user has the old default 0.10 still stored,
+    # bump them to 0 (cap disabled). The previous default popped a
+    # warning on virtually every request and engineers found it
+    # noisy. Anyone who explicitly set a different value keeps it.
     try:
         spend_threshold = float(raw.get("spend_threshold", DEFAULT_SPEND_THRESHOLD))
     except (TypeError, ValueError):
         spend_threshold = DEFAULT_SPEND_THRESHOLD
+    if abs(spend_threshold - 0.10) < 1e-9:
+        spend_threshold = 0.0
     return {"api_key":         api_key,
             "model_key":       model_key,
             "system_prompt":   system_prompt,
@@ -8781,6 +8366,56 @@ def _tool_remove_element_from_system(doc, input_dict):
     }
 
 
+def _tool_list_insulation_types(doc, input_dict):
+    """List DuctInsulationType + PipeInsulationType. THE tool to
+    call before add_insulation; these are element-types so they
+    don't show up via list_elements_by_category."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub = (inp.get("name_contains") or "").lower()
+    kind_filter = (inp.get("kind") or "").strip().lower()
+
+    out = []
+    try:
+        if kind_filter != "pipe":
+            for t in FilteredElementCollector(doc).OfClass(DuctInsulationType):
+                nm = _safe_name(t) or ""
+                if name_sub and name_sub not in nm.lower():
+                    continue
+                out.append({"id": _eid_int(t.Id), "name": nm, "kind": "duct"})
+        if kind_filter != "duct":
+            for t in FilteredElementCollector(doc).OfClass(PipeInsulationType):
+                nm = _safe_name(t) or ""
+                if name_sub and name_sub not in nm.lower():
+                    continue
+                out.append({"id": _eid_int(t.Id), "name": nm, "kind": "pipe"})
+    except Exception as e:
+        return {"error": "list_insulation_types failed: {}".format(e)}
+    out.sort(key=lambda r: (r.get("kind") or "", r.get("name") or ""))
+    return {"count": len(out), "insulation_types": out}
+
+
+def _tool_list_lining_types(doc, input_dict):
+    """List DuctLiningType (pipes don't use lining). THE tool to
+    call before add_lining."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub = (inp.get("name_contains") or "").lower()
+    out = []
+    try:
+        for t in FilteredElementCollector(doc).OfClass(DuctLiningType):
+            nm = _safe_name(t) or ""
+            if name_sub and name_sub not in nm.lower():
+                continue
+            out.append({"id": _eid_int(t.Id), "name": nm})
+    except Exception as e:
+        return {"error": "list_lining_types failed: {}".format(e)}
+    out.sort(key=lambda r: r.get("name") or "")
+    return {"count": len(out), "lining_types": out}
+
+
 def _tool_add_insulation(doc, input_dict):
     """Add insulation wrap to one or more ducts OR pipes (the API
     differs slightly between Duct vs Pipe). insulation_type_id is
@@ -8952,7 +8587,2521 @@ def _tool_add_lining(doc, input_dict):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Family & type management (v4.8)
+# ---------------------------------------------------------------------------
+#
+# Inspect + manipulate Revit families and their FamilySymbol types:
+# list what's loaded, drill into types + parameters, load new families
+# from the firm library, duplicate + edit types, unload unused ones.
+
+
+def _tool_list_families(doc, input_dict):
+    """List every loaded Family in the document with category, type
+    count, in-place flag, editable flag."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name_sub    = (inp.get("name_contains") or "").lower()
+    cat_sub     = (inp.get("category_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+
+    out = []
+    truncated = False
+    try:
+        col = FilteredElementCollector(doc).OfClass(Family)
+        for fam in col:
+            nm = _safe_name(fam) or ""
+            if name_sub and name_sub not in nm.lower():
+                continue
+            cat_name = ""
+            try:
+                if fam.FamilyCategory is not None:
+                    cat_name = fam.FamilyCategory.Name or ""
+            except Exception:
+                pass
+            if cat_sub and cat_sub not in cat_name.lower():
+                continue
+            type_count = 0
+            try:
+                sids = list(fam.GetFamilySymbolIds())
+                type_count = len(sids)
+            except Exception:
+                pass
+            row = {
+                "id":           _eid_int(fam.Id),
+                "name":         nm,
+                "category":     cat_name,
+                "type_count":   type_count,
+            }
+            try:
+                row["is_in_place"] = bool(fam.IsInPlace)
+            except Exception:
+                pass
+            try:
+                row["is_editable"] = bool(fam.IsEditable)
+            except Exception:
+                pass
+            out.append(row)
+            if len(out) >= max_results:
+                truncated = True
+                break
+    except Exception as e:
+        return {"error": "list_families failed: {}".format(e)}
+
+    out.sort(key=lambda r: (r.get("category") or "", r.get("name") or ""))
+    result = {"count": len(out), "families": out}
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+def _tool_list_family_types(doc, input_dict):
+    """List every FamilySymbol (type) defined in a Family. Use this
+    to find type_ids for place_family_instance or place_with_type."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    family_id = inp.get("family_id")
+    if family_id is None:
+        return {"error": "family_id is required."}
+
+    fam, err = _resolve_element(doc, family_id)
+    if err:
+        return {"error": "family_id: " + err}
+    if not isinstance(fam, Family):
+        return {"error": "family_id is not a Family."}
+
+    out = []
+    try:
+        for sid in fam.GetFamilySymbolIds():
+            sym = doc.GetElement(sid)
+            if sym is None:
+                continue
+            row = {
+                "id":   _eid_int(sym.Id),
+                "name": _safe_name(sym) or "",
+            }
+            try:
+                row["is_active"] = bool(sym.IsActive)
+            except Exception:
+                pass
+            out.append(row)
+    except Exception as e:
+        return {"error": "list_family_types failed: {}".format(e)}
+
+    out.sort(key=lambda r: r.get("name") or "")
+    return {
+        "family_id":   _eid_int(fam.Id),
+        "family_name": _safe_name(fam),
+        "count":       len(out),
+        "types":       out,
+    }
+
+
+def _tool_list_family_parameters(doc, input_dict):
+    """List the parameters defined on a Family by inspecting its
+    first FamilySymbol. Returns name, definition (BuiltInParameter
+    or shared), storage type, and current value. Useful before
+    set_element_parameters / duplicate_type to know what knobs the
+    family exposes."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    family_id = inp.get("family_id")
+    if family_id is None:
+        return {"error": "family_id is required."}
+
+    fam, err = _resolve_element(doc, family_id)
+    if err:
+        return {"error": "family_id: " + err}
+    if not isinstance(fam, Family):
+        return {"error": "family_id is not a Family."}
+
+    # Inspect the first symbol to enumerate parameters.
+    first_sym = None
+    try:
+        for sid in fam.GetFamilySymbolIds():
+            sym = doc.GetElement(sid)
+            if sym is not None:
+                first_sym = sym
+                break
+    except Exception:
+        pass
+    if first_sym is None:
+        return {"error": "Family has no symbols to inspect."}
+
+    params = []
+    try:
+        for p in first_sym.Parameters:
+            try:
+                row = {
+                    "name":         p.Definition.Name,
+                    "storage_type": str(p.StorageType),
+                    "is_shared":    bool(p.IsShared),
+                    "is_readonly":  bool(p.IsReadOnly),
+                }
+                # Best-effort value read
+                try:
+                    if p.StorageType == StorageType.String:
+                        row["value"] = p.AsString()
+                    elif p.StorageType == StorageType.Integer:
+                        row["value"] = p.AsInteger()
+                    elif p.StorageType == StorageType.Double:
+                        row["value"] = round(float(p.AsDouble()), 6)
+                    elif p.StorageType == StorageType.ElementId:
+                        eid = p.AsElementId()
+                        row["value"] = _eid_int(eid) if eid is not None else None
+                except Exception:
+                    pass
+                params.append(row)
+            except Exception:
+                continue
+    except Exception as e:
+        return {"error": "Parameter enumeration failed: {}".format(e)}
+
+    params.sort(key=lambda r: r.get("name") or "")
+    return {
+        "family_id":     _eid_int(fam.Id),
+        "family_name":   _safe_name(fam),
+        "first_type_id": _eid_int(first_sym.Id),
+        "count":         len(params),
+        "parameters":    params,
+    }
+
+
+def _tool_get_type_parameters(doc, input_dict):
+    """Read every parameter on a FamilySymbol / ElementType - the
+    type-level parameters (size, capacity, etc.) you'd see in the
+    Type Properties dialog. Pass type_id."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    type_id = inp.get("type_id")
+    if type_id is None:
+        return {"error": "type_id is required."}
+
+    type_el, err = _resolve_element(doc, type_id)
+    if err:
+        return {"error": "type_id: " + err}
+
+    out = []
+    try:
+        for p in type_el.Parameters:
+            try:
+                row = {
+                    "name":         p.Definition.Name,
+                    "storage_type": str(p.StorageType),
+                    "is_readonly":  bool(p.IsReadOnly),
+                }
+                try:
+                    if p.StorageType == StorageType.String:
+                        row["value"] = p.AsString()
+                    elif p.StorageType == StorageType.Integer:
+                        row["value"] = p.AsInteger()
+                    elif p.StorageType == StorageType.Double:
+                        row["value"] = round(float(p.AsDouble()), 6)
+                    elif p.StorageType == StorageType.ElementId:
+                        eid = p.AsElementId()
+                        row["value"] = _eid_int(eid) if eid is not None else None
+                except Exception:
+                    pass
+                out.append(row)
+            except Exception:
+                continue
+    except Exception as e:
+        return {"error": "Parameter enumeration failed: {}".format(e)}
+
+    out.sort(key=lambda r: r.get("name") or "")
+    return {
+        "type_id":    _eid_int(type_el.Id),
+        "type_name":  _safe_name(type_el),
+        "count":      len(out),
+        "parameters": out,
+    }
+
+
+def _tool_list_loadable_family_paths(doc, input_dict):
+    """Scan a directory tree for .rfa files. Useful for discovering
+    the firm's family library before load_family. Pass path; optional
+    name_contains filter; optional max_results."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    name_sub = (inp.get("name_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+
+    if not path:
+        return {"error": "path is required."}
+    if not os.path.isdir(path):
+        return {"error": "Not a directory: {}".format(path)}
+
+    out = []
+    truncated = False
+    try:
+        for root, dirs, files in os.walk(path):
+            for fn in files:
+                if not fn.lower().endswith(".rfa"):
+                    continue
+                if name_sub and name_sub not in fn.lower():
+                    continue
+                full = os.path.join(root, fn)
+                try:
+                    size = os.path.getsize(full)
+                except Exception:
+                    size = None
+                out.append({
+                    "name":       fn,
+                    "path":       full,
+                    "size_bytes": size,
+                })
+                if len(out) >= max_results:
+                    truncated = True
+                    break
+            if truncated:
+                break
+    except Exception as e:
+        return {"error": "Directory scan failed: {}".format(e)}
+
+    out.sort(key=lambda f: (f.get("name") or "").lower())
+    result = {"count": len(out), "paths": out, "scan_root": path}
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+def _tool_load_family(doc, input_dict):
+    """Load a .rfa family file from disk into the active document.
+    Returns the new Family's id. If the family is already loaded,
+    Revit's behaviour depends on the file content - usually it asks
+    to overwrite (we accept the new version by default)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path:
+        return {"error": "path is required."}
+    if not os.path.isfile(path):
+        return {"error": "File not found: {}".format(path)}
+
+    try:
+        t = Transaction(doc, "Load family '{}'".format(
+            os.path.basename(path)))
+        t.Start()
+        try:
+            # IronPython binds the out-param Family as a tuple return.
+            ret = doc.LoadFamily(path)
+            family = None
+            ok = False
+            if isinstance(ret, tuple):
+                ok = bool(ret[0])
+                if len(ret) > 1:
+                    family = ret[1]
+            elif isinstance(ret, Family):
+                family = ret
+                ok = True
+            else:
+                ok = bool(ret)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "LoadFamily raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "loaded": bool(ok),
+        "path":   path,
+    }
+    if family is not None:
+        try:
+            result["family_id"]   = _eid_int(family.Id)
+            result["family_name"] = _safe_name(family)
+            result["category"]    = (family.FamilyCategory.Name
+                                     if family.FamilyCategory else "")
+        except Exception:
+            pass
+    return result
+
+
+def _tool_unload_family(doc, input_dict):
+    """Remove a Family from the document. Deletes the Family element,
+    which removes the family + all its types + any placed instances
+    of those types. Use with care - destructive."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    family_id = inp.get("family_id")
+    if family_id is None:
+        return {"error": "family_id is required."}
+
+    fam, err = _resolve_element(doc, family_id)
+    if err:
+        return {"error": "family_id: " + err}
+    if not isinstance(fam, Family):
+        return {"error": "family_id is not a Family."}
+
+    name = _safe_name(fam) or "?"
+    try:
+        t = Transaction(doc, "Unload family '{}'".format(name))
+        t.Start()
+        try:
+            doc.Delete(fam.Id)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Delete raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"unloaded": True, "family_name": name}
+
+
+def _tool_duplicate_type(doc, input_dict):
+    """Duplicate an existing FamilySymbol to make a NEW type within
+    the same family. Returns the new type_id. Use
+    set_element_parameters afterwards to adjust the new type's
+    parameter values."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    base_type_id = inp.get("base_type_id")
+    new_name     = (inp.get("new_name") or "").strip()
+    if base_type_id is None:
+        return {"error": "base_type_id is required."}
+    if not new_name:
+        return {"error": "new_name is required."}
+
+    sym, err = _resolve_element(doc, base_type_id)
+    if err:
+        return {"error": "base_type_id: " + err}
+    if not isinstance(sym, FamilySymbol):
+        return {"error": "base_type_id is not a FamilySymbol."}
+
+    try:
+        t = Transaction(doc, "Duplicate type to '{}'".format(new_name))
+        t.Start()
+        try:
+            new_sym = sym.Duplicate(new_name)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "FamilySymbol.Duplicate raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "new_type_id":   _eid_int(new_sym.Id),
+        "new_type_name": _safe_name(new_sym),
+        "base_type_id":  _eid_int(sym.Id),
+        "family_name":   sym.Family.Name if sym.Family else "",
+    }
+
+
+def _tool_family_upgrade_status_check(doc, input_dict):
+    """Check whether a Family was created in an older Revit version
+    that may need to be upgraded (re-loaded). Some old families lose
+    parameters / fail to behave correctly when opened in newer
+    Revit. Returns the family's reported Revit version where known."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    family_id = inp.get("family_id")
+    if family_id is None:
+        return {"error": "family_id is required."}
+
+    fam, err = _resolve_element(doc, family_id)
+    if err:
+        return {"error": "family_id: " + err}
+    if not isinstance(fam, Family):
+        return {"error": "family_id is not a Family."}
+
+    return {
+        "family_id":    _eid_int(fam.Id),
+        "family_name":  _safe_name(fam),
+        "is_in_place":  bool(fam.IsInPlace),
+        "is_editable":  bool(fam.IsEditable),
+        "note":         ("Detailed version metadata isn't exposed via the "
+                         "Revit API for loaded families. To upgrade an "
+                         "old family: open the .rfa in the latest Revit, "
+                         "save it, then re-load via load_family."),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Project metadata, phases, worksets (v4.9)
+# ---------------------------------------------------------------------------
+#
+# Project info (name/number/issue date/author), Revit phases + phase
+# filters, and workset operations on workshared documents. Setting
+# project units + project parameters + geographic location is deferred
+# - those APIs need substantially more wiring.
+
+
+_PROJECT_INFO_FIELDS = (
+    # (kwarg name in our API, ProjectInfo property name)
+    ("name",                     "Name"),
+    ("number",                   "Number"),
+    ("address",                  "Address"),
+    ("issue_date",               "IssueDate"),
+    ("status",                   "Status"),
+    ("organization_name",        "OrganizationName"),
+    ("organization_description", "OrganizationDescription"),
+    ("client_name",              "ClientName"),
+    ("building_name",            "BuildingName"),
+    ("author",                   "Author"),
+)
+
+
+def _tool_get_project_info(doc, input_dict):
+    """Read the ProjectInformation element - name, number, address,
+    issue date, status, organization, client, building, author."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    info = None
+    try:
+        info = doc.ProjectInformation
+    except Exception as e:
+        return {"error": "doc.ProjectInformation raised: {}".format(e)}
+    if info is None:
+        return {"error": "ProjectInformation is None on this document."}
+
+    out = {"id": _eid_int(info.Id)}
+    for kw, prop in _PROJECT_INFO_FIELDS:
+        try:
+            out[kw] = getattr(info, prop, "") or ""
+        except Exception:
+            out[kw] = ""
+    return out
+
+
+def _tool_set_project_info(doc, input_dict):
+    """Set any subset of ProjectInformation fields. Only the keys
+    present in the input are changed; others are left alone."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    try:
+        info = doc.ProjectInformation
+    except Exception as e:
+        return {"error": "doc.ProjectInformation raised: {}".format(e)}
+    if info is None:
+        return {"error": "ProjectInformation is None on this document."}
+
+    changes = []
+    errors = []
+    try:
+        t = Transaction(doc, "Update project info")
+        t.Start()
+        try:
+            for kw, prop in _PROJECT_INFO_FIELDS:
+                if kw not in inp:
+                    continue
+                try:
+                    setattr(info, prop, inp[kw] or "")
+                    changes.append(kw)
+                except Exception as e:
+                    errors.append({"field": kw, "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {"changed_fields": changes}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_list_phases(doc, input_dict):
+    """List every Phase in the document with sequence number + name.
+    Phases are ordered chronologically; the last is typically 'New
+    Construction'."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    try:
+        phases = list(doc.Phases)
+    except Exception as e:
+        return {"error": "Phase iteration raised: {}".format(e)}
+    out = []
+    for i, p in enumerate(phases):
+        out.append({
+            "id":       _eid_int(p.Id),
+            "name":     _safe_name(p) or "",
+            "sequence": i,
+        })
+    return {"count": len(out), "phases": out}
+
+
+def _tool_create_phase(doc, input_dict):
+    """Add a new Phase. Inserted at the end of the phase sequence
+    by default (typical 'next phase' use case). Set position to an
+    integer 0..N to insert at a specific position."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name     = (inp.get("name") or "").strip()
+    position = inp.get("position")
+    if not name:
+        return {"error": "name is required."}
+
+    try:
+        phases = list(doc.Phases)
+    except Exception as e:
+        return {"error": "Phase iteration raised: {}".format(e)}
+    idx = len(phases) if position is None else int(position)
+
+    try:
+        t = Transaction(doc, "Create phase '{}'".format(name))
+        t.Start()
+        try:
+            new_phase = doc.Phases.Insert(idx, name)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Phases.Insert raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "phase_id":   _eid_int(new_phase.Id),
+        "phase_name": _safe_name(new_phase),
+        "sequence":   idx,
+    }
+
+
+def _tool_set_element_phase(doc, input_dict):
+    """Set the 'Phase Created' on one or more elements. Each element's
+    PHASE_CREATED parameter receives the new phase id. Use
+    set_element_demolish_phase for the 'Phase Demolished' (when the
+    element is shown as demoed)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids = inp.get("element_ids") or []
+    phase_id    = inp.get("phase_id")
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+    if phase_id is None:
+        return {"error": "phase_id is required."}
+
+    phase_el, err = _resolve_element(doc, phase_id)
+    if err:
+        return {"error": "phase_id: " + err}
+    if not isinstance(phase_el, Phase):
+        return {"error": "phase_id is not a Phase."}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set phase created on {} element(s)".format(
+            len(element_ids)))
+        t.Start()
+        try:
+            for eid in element_ids:
+                el, err = _resolve_element(doc, eid)
+                if err:
+                    errors.append({"element_id": eid, "error": err})
+                    continue
+                try:
+                    p = el.get_Parameter(BuiltInParameter.PHASE_CREATED)
+                    if p is None:
+                        errors.append({
+                            "element_id": _eid_int(el.Id),
+                            "error":      "no PHASE_CREATED parameter",
+                        })
+                        continue
+                    p.Set(phase_el.Id)
+                    updated.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({
+                        "element_id": _eid_int(el.Id),
+                        "error":      str(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "phase_id":      _eid_int(phase_el.Id),
+        "phase_name":    _safe_name(phase_el),
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_set_element_demolish_phase(doc, input_dict):
+    """Set the 'Phase Demolished' on one or more elements. Pass
+    phase_id=null (or omit) to CLEAR the demolish phase (element is
+    no longer demolished)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids = inp.get("element_ids") or []
+    phase_id    = inp.get("phase_id")  # may be None to clear
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+
+    target_id = None
+    if phase_id is not None:
+        phase_el, err = _resolve_element(doc, phase_id)
+        if err:
+            return {"error": "phase_id: " + err}
+        if not isinstance(phase_el, Phase):
+            return {"error": "phase_id is not a Phase."}
+        target_id = phase_el.Id
+    else:
+        target_id = ElementId.InvalidElementId
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set phase demolished on {} element(s)".format(
+            len(element_ids)))
+        t.Start()
+        try:
+            for eid in element_ids:
+                el, err = _resolve_element(doc, eid)
+                if err:
+                    errors.append({"element_id": eid, "error": err})
+                    continue
+                try:
+                    p = el.get_Parameter(BuiltInParameter.PHASE_DEMOLISHED)
+                    if p is None:
+                        errors.append({
+                            "element_id": _eid_int(el.Id),
+                            "error":      "no PHASE_DEMOLISHED parameter",
+                        })
+                        continue
+                    p.Set(target_id)
+                    updated.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({
+                        "element_id": _eid_int(el.Id),
+                        "error":      str(e),
+                    })
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "cleared":       phase_id is None,
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_list_phase_filters(doc, input_dict):
+    """List PhaseFilter elements (Show All, Show Complete, Show
+    Previous + Demo, Show New, etc.). Pass the id of one to
+    set_view_phase_filter to apply it on a view."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    try:
+        col = FilteredElementCollector(doc).OfClass(PhaseFilter)
+        out = [{"id": _eid_int(pf.Id), "name": _safe_name(pf) or ""}
+               for pf in col]
+    except Exception as e:
+        return {"error": "list_phase_filters failed: {}".format(e)}
+    out.sort(key=lambda r: r.get("name") or "")
+    return {"count": len(out), "phase_filters": out}
+
+
+def _tool_set_view_phase_filter(doc, input_dict):
+    """Apply a PhaseFilter to one or more views. The same filter
+    (e.g. 'Show Demo + New') gets applied across the whole batch in
+    one transaction."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids        = inp.get("view_ids") or []
+    if not view_ids and inp.get("view_id") is not None:
+        view_ids = [inp.get("view_id")]
+    phase_filter_id = inp.get("phase_filter_id")
+
+    if not view_ids:
+        return {"error": "view_ids (list) or view_id is required."}
+    if phase_filter_id is None:
+        return {"error": "phase_filter_id is required."}
+
+    pf_el, err = _resolve_element(doc, phase_filter_id)
+    if err:
+        return {"error": "phase_filter_id: " + err}
+    if not isinstance(pf_el, PhaseFilter):
+        return {"error": "phase_filter_id is not a PhaseFilter."}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Apply phase filter '{}' to {} view(s)".format(
+            _safe_name(pf_el) or "?", len(view_ids)))
+        t.Start()
+        try:
+            for vid in view_ids:
+                el, err = _resolve_element(doc, vid)
+                if err:
+                    errors.append({"view_id": vid, "error": err})
+                    continue
+                if not isinstance(el, View):
+                    errors.append({"view_id": _eid_int(el.Id),
+                                   "error": "not a View"})
+                    continue
+                try:
+                    p = el.get_Parameter(BuiltInParameter.VIEW_PHASE_FILTER)
+                    if p is None:
+                        errors.append({"view_id": _eid_int(el.Id),
+                                       "error": "view has no VIEW_PHASE_FILTER parameter"})
+                        continue
+                    p.Set(pf_el.Id)
+                    updated.append({
+                        "view_id":   _eid_int(el.Id),
+                        "view_name": _safe_name(el),
+                    })
+                except Exception as e:
+                    errors.append({"view_id": _eid_int(el.Id),
+                                   "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "phase_filter_id":   _eid_int(pf_el.Id),
+        "phase_filter_name": _safe_name(pf_el),
+        "updated_count":     len(updated),
+        "updated":           updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_list_worksets(doc, input_dict):
+    """List user worksets in a workshared document. Each row has
+    id, name, owner, is_open, is_default. Returns an error result
+    if the document isn't workshared."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    try:
+        is_ws = bool(doc.IsWorkshared)
+    except Exception:
+        is_ws = False
+    if not is_ws:
+        return {"error": "Document is not workshared."}
+
+    out = []
+    try:
+        col = FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset)
+        for ws in col:
+            row = {
+                "id":   int(ws.Id.IntegerValue),
+                "name": ws.Name or "",
+            }
+            try:
+                row["owner"] = ws.Owner or ""
+            except Exception:
+                pass
+            try:
+                row["is_open"] = bool(ws.IsOpen)
+            except Exception:
+                pass
+            try:
+                row["is_default"] = bool(ws.IsDefaultWorkset)
+            except Exception:
+                pass
+            out.append(row)
+    except Exception as e:
+        return {"error": "list_worksets failed: {}".format(e)}
+    out.sort(key=lambda r: r.get("name") or "")
+    return {"count": len(out), "worksets": out}
+
+
+def _tool_create_workset(doc, input_dict):
+    """Create a new user workset. Document must be workshared."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name = (inp.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required."}
+    try:
+        is_ws = bool(doc.IsWorkshared)
+    except Exception:
+        is_ws = False
+    if not is_ws:
+        return {"error": "Document is not workshared."}
+
+    try:
+        t = Transaction(doc, "Create workset '{}'".format(name))
+        t.Start()
+        try:
+            ws = Workset.Create(doc, name)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Workset.Create raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "workset_id":   int(ws.Id.IntegerValue),
+        "workset_name": ws.Name or "",
+    }
+
+
+def _tool_get_element_workset(doc, input_dict):
+    """Read which workset an element belongs to."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_id = inp.get("element_id")
+    if element_id is None:
+        return {"error": "element_id is required."}
+    try:
+        is_ws = bool(doc.IsWorkshared)
+    except Exception:
+        is_ws = False
+    if not is_ws:
+        return {"error": "Document is not workshared."}
+
+    el, err = _resolve_element(doc, element_id)
+    if err:
+        return {"error": "element_id: " + err}
+
+    try:
+        ws_id = el.WorksetId
+        table = doc.GetWorksetTable()
+        ws = table.GetWorkset(ws_id)
+        return {
+            "element_id":   _eid_int(el.Id),
+            "element_name": _safe_name(el),
+            "workset_id":   int(ws.Id.IntegerValue),
+            "workset_name": ws.Name or "",
+        }
+    except Exception as e:
+        return {"error": "Workset read raised: {}".format(e)}
+
+
+def _tool_change_element_workset(doc, input_dict):
+    """Move one or more elements to a different workset. workset_id
+    is the integer id from list_worksets."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    element_ids = inp.get("element_ids") or []
+    workset_id  = inp.get("workset_id")
+
+    if not element_ids:
+        return {"error": "element_ids is required."}
+    if workset_id is None:
+        return {"error": "workset_id is required (integer from list_worksets)."}
+
+    try:
+        is_ws = bool(doc.IsWorkshared)
+    except Exception:
+        is_ws = False
+    if not is_ws:
+        return {"error": "Document is not workshared."}
+
+    try:
+        ws_int = int(workset_id)
+    except Exception:
+        return {"error": "workset_id must be an integer."}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Move {} element(s) to workset {}".format(
+            len(element_ids), ws_int))
+        t.Start()
+        try:
+            for eid in element_ids:
+                el, err = _resolve_element(doc, eid)
+                if err:
+                    errors.append({"element_id": eid, "error": err})
+                    continue
+                try:
+                    p = el.get_Parameter(BuiltInParameter.ELEM_PARTITION_PARAM)
+                    if p is None:
+                        errors.append({"element_id": _eid_int(el.Id),
+                                       "error": "no workset parameter"})
+                        continue
+                    p.Set(ws_int)
+                    updated.append(_eid_int(el.Id))
+                except Exception as e:
+                    errors.append({"element_id": _eid_int(el.Id),
+                                   "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "workset_id":    ws_int,
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Imports, links, coordination (v4.10)
+# ---------------------------------------------------------------------------
+
+
+def _tool_list_imports(doc, input_dict):
+    """List EVERY import / link in the document, regardless of source
+    type (CAD, Revit link, IFC, point cloud, image). Each row notes
+    kind, name, file path (if loadable), pinned state, view-specific
+    flag, and whether the link is currently loaded."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    out = []
+    # 1. CAD imports + links via ImportInstance
+    try:
+        for inst in FilteredElementCollector(doc).OfClass(ImportInstance):
+            row = {
+                "id":          _eid_int(inst.Id),
+                "name":        _safe_name(inst) or "",
+                "kind":        "cad_link" if inst.IsLinked else "cad_import",
+                "is_pinned":   bool(inst.Pinned),
+                "view_specific": False,
+                "view_id":     None,
+            }
+            try:
+                if inst.ViewSpecific:
+                    row["view_specific"] = True
+                    row["view_id"] = _eid_int(inst.OwnerViewId)
+            except Exception:
+                pass
+            try:
+                type_id = inst.GetTypeId()
+                tel = doc.GetElement(type_id) if type_id is not None else None
+                if tel is not None:
+                    p = tel.LookupParameter("File Path") or tel.LookupParameter("Path")
+                    if p is not None and p.HasValue:
+                        row["path"] = p.AsString() or ""
+            except Exception:
+                pass
+            out.append(row)
+    except Exception:
+        pass
+    # 2. Revit links (existing list_links logic)
+    try:
+        for inst in FilteredElementCollector(doc).OfClass(RevitLinkInstance):
+            row = {
+                "id":   _eid_int(inst.Id),
+                "name": _safe_name(inst) or "",
+                "kind": "revit_link",
+            }
+            try:
+                row["is_pinned"] = bool(inst.Pinned)
+            except Exception:
+                pass
+            try:
+                ld = inst.GetLinkDocument()
+                row["is_loaded"] = ld is not None
+                if ld is not None:
+                    row["path"] = ld.PathName or ""
+            except Exception:
+                pass
+            out.append(row)
+    except Exception:
+        pass
+    out.sort(key=lambda r: (r.get("kind") or "", r.get("name") or ""))
+    return {"count": len(out), "imports": out}
+
+
+def _resolve_cad_view_target(doc, view_id, allow_none=True):
+    """Resolve view_id (optional) to a View, or fall back to active
+    view. Returns (view_or_none, error_or_none)."""
+    if view_id is not None:
+        v, err = _resolve_element(doc, view_id)
+        if err:
+            return None, "view_id: " + err
+        if not isinstance(v, View):
+            return None, "view_id is not a View"
+        return v, None
+    if not allow_none:
+        return None, "view_id is required"
+    # Fall back to active view
+    try:
+        v = doc.ActiveView
+        if v is not None and not v.IsTemplate:
+            return v, None
+    except Exception:
+        pass
+    return None, "no view available - pass view_id explicitly"
+
+
+def _make_dwg_import_options(input_dict):
+    inp = input_dict or {}
+    opts = DWGImportOptions()
+    try:
+        placement = (inp.get("placement") or "Origin").strip()
+        opts.Placement = (ImportPlacement.Center
+                          if placement.lower() == "center"
+                          else ImportPlacement.Origin)
+    except Exception:
+        pass
+    try:
+        color_mode = (inp.get("color_mode") or "Preserved").strip()
+        cm_map = {"preserved": ImportColorMode.Preserved,
+                  "blackandwhite": ImportColorMode.BlackAndWhite,
+                  "blackwhite":    ImportColorMode.BlackAndWhite,
+                  "inverted":      ImportColorMode.Inverted}
+        opts.ColorMode = cm_map.get(color_mode.lower().replace("_", ""),
+                                    ImportColorMode.Preserved)
+    except Exception:
+        pass
+    try:
+        opts.Unit = ImportUnit.Default
+    except Exception:
+        pass
+    try:
+        opts.OrientToView = bool(inp.get("orient_to_view", False))
+    except Exception:
+        pass
+    return opts
+
+
+def _tool_link_cad(doc, input_dict):
+    """Link a .dwg / .dxf file into a view. Optional placement
+    ('Origin' or 'Center', default Origin) and color_mode ('Preserved'
+    / 'BlackAndWhite' / 'Inverted')."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return {"error": "path is required and must exist."}
+
+    view, err = _resolve_cad_view_target(doc, inp.get("view_id"))
+    if err:
+        return {"error": err}
+
+    opts = _make_dwg_import_options(inp)
+    try:
+        t = Transaction(doc, "Link CAD '{}'".format(os.path.basename(path)))
+        t.Start()
+        try:
+            ret = doc.Link(path, opts, view)
+            ok = False
+            new_id = None
+            if isinstance(ret, tuple):
+                ok = bool(ret[0])
+                if len(ret) > 1 and ret[1] is not None:
+                    new_id = _eid_int(ret[1])
+            else:
+                ok = bool(ret)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "doc.Link raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"linked": ok, "import_id": new_id, "path": path,
+            "view_id": _eid_int(view.Id)}
+
+
+def _tool_import_cad_as_drafting(doc, input_dict):
+    """Import a .dwg / .dxf as an embedded import (not a link) into a
+    drafting view. Use link_cad for live-linked external files."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return {"error": "path is required and must exist."}
+
+    view, err = _resolve_cad_view_target(doc, inp.get("view_id"))
+    if err:
+        return {"error": err}
+
+    opts = _make_dwg_import_options(inp)
+    try:
+        t = Transaction(doc, "Import CAD '{}'".format(os.path.basename(path)))
+        t.Start()
+        try:
+            ret = doc.Import(path, opts, view)
+            ok = False
+            new_id = None
+            if isinstance(ret, tuple):
+                ok = bool(ret[0])
+                if len(ret) > 1 and ret[1] is not None:
+                    new_id = _eid_int(ret[1])
+            else:
+                ok = bool(ret)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "doc.Import raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"imported": ok, "import_id": new_id, "path": path,
+            "view_id": _eid_int(view.Id)}
+
+
+def _tool_link_revit(doc, input_dict):
+    """Link an external .rvt model into this document. Creates a
+    RevitLinkType + RevitLinkInstance at the project origin."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return {"error": "path is required and must exist."}
+
+    try:
+        t = Transaction(doc, "Link Revit '{}'".format(os.path.basename(path)))
+        t.Start()
+        try:
+            mp = ModelPathUtils.ConvertUserVisiblePathToModelPath(path)
+            link_opts = RevitLinkOptions(False)  # not workshared
+            load_result = RevitLinkType.Create(doc, mp, link_opts)
+            type_id = load_result.ElementId
+            link_inst = RevitLinkInstance.Create(doc, type_id)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Revit link raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "linked":       True,
+        "instance_id":  _eid_int(link_inst.Id),
+        "type_id":      _eid_int(type_id),
+        "path":         path,
+    }
+
+
+def _tool_link_ifc(doc, input_dict):
+    """Link an .ifc file into the active document. Useful for view-
+    only reference of consultant models when a .rvt isn't available.
+    IFC support is provided by Revit's IFC add-in - if the API
+    classes aren't available in this version, the tool returns a
+    clear error rather than crashing."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return {"error": "path is required and must exist."}
+
+    # IFCImportOptions lives in different namespaces depending on
+    # Revit version - try the standard locations.
+    IFCImportOptions = None
+    IFCImportAction  = None
+    try:
+        from Autodesk.Revit.DB import IFCImportOptions as _IO
+        IFCImportOptions = _IO
+        try:
+            from Autodesk.Revit.DB import IFCImportAction as _IA
+            IFCImportAction = _IA
+        except Exception:
+            pass
+    except Exception:
+        try:
+            from Autodesk.Revit.DB.IFC import IFCImportOptions as _IO
+            IFCImportOptions = _IO
+            try:
+                from Autodesk.Revit.DB.IFC import IFCImportAction as _IA
+                IFCImportAction = _IA
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if IFCImportOptions is None:
+        return {"error": ("IFC import API isn't available in this Revit "
+                          "install. Use Revit's File > Link > IFC dialog "
+                          "to import this file manually.")}
+
+    try:
+        t = Transaction(doc, "Link IFC '{}'".format(os.path.basename(path)))
+        t.Start()
+        try:
+            opts = IFCImportOptions()
+            if IFCImportAction is not None:
+                try:
+                    opts.Action = IFCImportAction.Link
+                except Exception:
+                    pass
+            doc.Import(path, opts, None)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "IFC link raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"linked": True, "path": path}
+
+
+def _tool_link_point_cloud(doc, input_dict):
+    """Link a point cloud file (.rcp / .rcs) into the active document."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    path = (inp.get("path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return {"error": "path is required and must exist."}
+
+    try:
+        from Autodesk.Revit.DB.PointClouds import PointCloudType, PointCloudInstance
+    except Exception as e:
+        return {"error": "PointClouds API not available: {}".format(e)}
+
+    view, err = _resolve_cad_view_target(doc, inp.get("view_id"))
+    if err:
+        return {"error": err}
+
+    ext = os.path.splitext(path)[1].lower()
+    fmt = ext.lstrip(".") or "rcp"
+
+    try:
+        t = Transaction(doc, "Link point cloud '{}'".format(os.path.basename(path)))
+        t.Start()
+        try:
+            type_el = PointCloudType.Create(doc, path, fmt)
+            inst    = PointCloudInstance.Create(doc, type_el.Id, view.Id)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "PointCloud link raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {
+        "linked":      True,
+        "instance_id": _eid_int(inst.Id),
+        "type_id":     _eid_int(type_el.Id),
+        "path":        path,
+    }
+
+
+def _tool_reload_link(doc, input_dict):
+    """Reload a Revit link OR CAD link from its current path. Pass
+    the LINK element id (either RevitLinkInstance or ImportInstance).
+    The implementation resolves to the underlying TYPE element and
+    calls Reload() on it.
+
+    NOTE: RevitLinkType.Reload() and CADLinkType.Reload() must be
+    called OUTSIDE any open transaction - Revit manages the link-
+    reload's internal transaction itself. Wrapping in a Transaction
+    causes 'Operation is not permitted when there is any open
+    transaction phase'."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    link_id = inp.get("link_id")
+    if link_id is None:
+        return {"error": "link_id is required."}
+
+    el, err = _resolve_element(doc, link_id)
+    if err:
+        return {"error": "link_id: " + err}
+
+    kind = None
+    type_el = None
+    try:
+        if isinstance(el, RevitLinkInstance):
+            kind = "revit_link"
+            type_el = doc.GetElement(el.GetTypeId())
+        elif isinstance(el, ImportInstance):
+            kind = "cad" if not el.IsLinked else "cad_link"
+            type_el = doc.GetElement(el.GetTypeId())
+        else:
+            # Maybe they passed the TYPE directly
+            if isinstance(el, RevitLinkType):
+                kind = "revit_link"
+                type_el = el
+            elif isinstance(el, CADLinkType):
+                kind = "cad_link"
+                type_el = el
+    except Exception:
+        pass
+    if type_el is None:
+        return {"error": "link_id resolves to {} which has no link type".format(
+            type(el).__name__)}
+
+    # Call Reload() OUTSIDE a transaction (per Revit API contract).
+    try:
+        type_el.Reload()
+    except Exception as e:
+        return {"error": "Reload raised: {}".format(e)}
+
+    return {"reloaded": True, "kind": kind, "link_id": _eid_int(el.Id)}
+
+
+def _tool_unload_link(doc, input_dict):
+    """Unload a Revit link OR remove a CAD import / link from the
+    document. For Revit links, Unload() preserves the type but
+    drops the cached data; for CAD, the entire ImportInstance is
+    deleted.
+
+    NOTE: RevitLinkType.Unload() must be called OUTSIDE a
+    transaction (Revit manages the unload's internal transaction
+    itself). doc.Delete() for a CAD ImportInstance DOES need a
+    transaction. The two branches handle their own wrapping."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    link_id = inp.get("link_id")
+    if link_id is None:
+        return {"error": "link_id is required."}
+
+    el, err = _resolve_element(doc, link_id)
+    if err:
+        return {"error": "link_id: " + err}
+
+    if isinstance(el, RevitLinkInstance):
+        type_el = doc.GetElement(el.GetTypeId())
+        if type_el is None:
+            return {"error": "Revit link has no type element."}
+        # Unload() must be called OUTSIDE a transaction.
+        try:
+            type_el.Unload(None)
+        except Exception as e:
+            return {"error": "RevitLinkType.Unload raised: {}".format(e)}
+        return {"unloaded": True, "kind": "revit_link", "link_id": link_id}
+
+    if isinstance(el, ImportInstance):
+        # doc.Delete() needs a transaction.
+        try:
+            t = Transaction(doc, "Remove CAD import")
+            t.Start()
+            try:
+                doc.Delete(el.Id)
+                t.Commit()
+            except Exception as e:
+                try:
+                    if t.HasStarted() and not t.HasEnded():
+                        t.RollBack()
+                except Exception:
+                    pass
+                return {"error": "Delete raised: {}".format(e)}
+        except Exception as e:
+            return {"error": "Could not start transaction: {}".format(e)}
+        return {"unloaded": True, "kind": "cad", "link_id": link_id}
+
+    return {"error": "link_id is not a recognized link/import type."}
+
+
+def _tool_set_link_pinned(doc, input_dict):
+    """Pin or unpin a link / import (Revit link, CAD link, IFC link)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    link_id = inp.get("link_id")
+    pinned  = inp.get("pinned")
+    if link_id is None or pinned is None:
+        return {"error": "link_id and pinned (bool) are required."}
+
+    el, err = _resolve_element(doc, link_id)
+    if err:
+        return {"error": "link_id: " + err}
+
+    try:
+        t = Transaction(doc, "{} link".format("Pin" if pinned else "Unpin"))
+        t.Start()
+        try:
+            el.Pinned = bool(pinned)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Set Pinned raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"link_id": _eid_int(el.Id), "pinned": bool(pinned)}
+
+
+def _tool_list_cad_layers(doc, input_dict):
+    """List the layers (sub-categories) of a linked / imported CAD
+    file. Pass the ImportInstance id. Each row has the layer name +
+    its sub-category id (use that with hide_cad_layer)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    import_id = inp.get("import_id")
+    if import_id is None:
+        return {"error": "import_id is required."}
+
+    el, err = _resolve_element(doc, import_id)
+    if err:
+        return {"error": "import_id: " + err}
+    if not isinstance(el, ImportInstance):
+        return {"error": "import_id is not an ImportInstance."}
+
+    out = []
+    try:
+        cat = el.Category
+        if cat is not None:
+            for sub in cat.SubCategories:
+                out.append({
+                    "layer_name": sub.Name or "",
+                    "category_id": _eid_int(sub.Id),
+                })
+    except Exception as e:
+        return {"error": "Layer enumeration raised: {}".format(e)}
+    out.sort(key=lambda r: r.get("layer_name") or "")
+    return {
+        "import_id": _eid_int(el.Id),
+        "count":     len(out),
+        "layers":    out,
+    }
+
+
+def _tool_hide_cad_layer(doc, input_dict):
+    """Hide (or show) one or more CAD layers in a view. layer_category_ids
+    come from list_cad_layers. Set hidden=true to hide, false to show."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id            = inp.get("view_id")
+    layer_category_ids = inp.get("layer_category_ids") or []
+    hidden             = inp.get("hidden", True)
+
+    if view_id is None:
+        return {"error": "view_id is required."}
+    if not layer_category_ids:
+        return {"error": "layer_category_ids is required."}
+
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+    if view.IsTemplate:
+        return {"error": "Cannot toggle visibility on a view template."}
+
+    updated = []
+    errors = []
+    try:
+        t = Transaction(doc, "{} {} CAD layer(s) in '{}'".format(
+            "Hide" if hidden else "Show",
+            len(layer_category_ids), _safe_name(view) or "view"))
+        t.Start()
+        try:
+            for cid in layer_category_ids:
+                try:
+                    cat_id = _make_eid(int(cid))
+                    view.SetCategoryHidden(cat_id, bool(hidden))
+                    updated.append(int(cid))
+                except Exception as e:
+                    errors.append({"category_id": cid, "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed (rolled back): {}".format(e),
+                    "errors": errors}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {
+        "view_id":       _eid_int(view.Id),
+        "view_name":     _safe_name(view),
+        "hidden":        bool(hidden),
+        "updated_count": len(updated),
+        "updated_ids":   updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_get_warnings_list(doc, input_dict):
+    """Read all project warnings (the 'Warnings' dialog in Revit).
+    Each row has severity, description, and failing element ids."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    text_sub = (inp.get("description_contains") or "").lower()
+    max_results = int(inp.get("max_results") or 500)
+
+    try:
+        warnings = list(doc.GetWarnings())
+    except Exception as e:
+        return {"error": "GetWarnings raised: {}".format(e)}
+
+    out = []
+    truncated = False
+    for w in warnings:
+        try:
+            desc = w.GetDescriptionText() or ""
+        except Exception:
+            desc = ""
+        if text_sub and text_sub not in desc.lower():
+            continue
+        row = {"description": desc}
+        try:
+            row["severity"] = str(w.GetSeverity())
+        except Exception:
+            pass
+        try:
+            fids = list(w.GetFailingElements())
+            row["failing_element_ids"] = [_eid_int(e) for e in fids]
+        except Exception:
+            pass
+        out.append(row)
+        if len(out) >= max_results:
+            truncated = True
+            break
+
+    result = {"count": len(out), "warnings": out}
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+# ---------------------------------------------------------------------------
+# View & visibility deep cuts (v4.11)
+# ---------------------------------------------------------------------------
+
+
+def _find_view_family_type(doc, view_family_enum_name):
+    """Find the first ViewFamilyType whose ViewFamily matches the
+    given enum name (e.g. 'Section', 'Elevation', 'Detail',
+    'Drafting'). Returns None if not found."""
+    target = getattr(ViewFamily, view_family_enum_name, None)
+    if target is None:
+        return None
+    try:
+        for vft in FilteredElementCollector(doc).OfClass(ViewFamilyType):
+            try:
+                if vft.ViewFamily == target:
+                    return vft
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _ogs_from_input(spec):
+    """Build an OverrideGraphicSettings from a dict like:
+        {color: '#FF0000' or 'red', halftone: bool,
+         transparency_pct: 0-100, line_weight: int, ...}
+    Returns the OGS plus a list of applied-property names."""
+    ogs = OverrideGraphicSettings()
+    applied = []
+    if not spec or not isinstance(spec, dict):
+        return ogs, applied
+    if "color" in spec and spec["color"] is not None:
+        col = _color_from_hex(spec["color"])
+        if col is not None:
+            try:
+                ogs.SetProjectionLineColor(col)
+                applied.append("projection_line_color")
+            except Exception:
+                pass
+            try:
+                ogs.SetCutLineColor(col)
+                applied.append("cut_line_color")
+            except Exception:
+                pass
+            try:
+                ogs.SetSurfaceForegroundPatternColor(col)
+                applied.append("surface_pattern_color")
+            except Exception:
+                pass
+    if "halftone" in spec and spec["halftone"] is not None:
+        try:
+            ogs.SetHalftone(bool(spec["halftone"]))
+            applied.append("halftone")
+        except Exception:
+            pass
+    if "transparency_pct" in spec and spec["transparency_pct"] is not None:
+        try:
+            pct = max(0, min(100, int(spec["transparency_pct"])))
+            ogs.SetSurfaceTransparency(pct)
+            applied.append("transparency")
+        except Exception:
+            pass
+    if "projection_line_weight" in spec and spec["projection_line_weight"] is not None:
+        try:
+            ogs.SetProjectionLineWeight(int(spec["projection_line_weight"]))
+            applied.append("projection_line_weight")
+        except Exception:
+            pass
+    if "cut_line_weight" in spec and spec["cut_line_weight"] is not None:
+        try:
+            ogs.SetCutLineWeight(int(spec["cut_line_weight"]))
+            applied.append("cut_line_weight")
+        except Exception:
+            pass
+    return ogs, applied
+
+
+def _tool_set_view_range(doc, input_dict):
+    """Set the view range planes (Top, Cut, Bottom, View Depth) on a
+    plan view. Each plane gets a level_id + offset_ft. Pass only the
+    planes you want to change - others stay untouched."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id = inp.get("view_id")
+    if view_id is None:
+        return {"error": "view_id is required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, ViewPlan):
+        return {"error": "view_id is not a plan view (ViewPlan)."}
+
+    plane_map = {
+        "top":         PlanViewPlane.TopClipPlane,
+        "cut":         PlanViewPlane.CutPlane,
+        "bottom":      PlanViewPlane.BottomClipPlane,
+        "view_depth":  PlanViewPlane.ViewDepthPlane,
+    }
+
+    try:
+        t = Transaction(doc, "Set view range on '{}'".format(_safe_name(view) or "view"))
+        t.Start()
+        try:
+            pvr = view.GetViewRange()
+            changes = []
+            for plane_name, plane_enum in plane_map.items():
+                spec = inp.get(plane_name)
+                if spec is None:
+                    continue
+                level_id = spec.get("level_id") if isinstance(spec, dict) else None
+                offset   = spec.get("offset_ft") if isinstance(spec, dict) else None
+                if level_id is not None:
+                    try:
+                        pvr.SetLevelId(plane_enum, _make_eid(int(level_id)))
+                        changes.append(plane_name + ".level")
+                    except Exception as e:
+                        changes.append(plane_name + ".level FAILED:" + str(e))
+                if offset is not None:
+                    try:
+                        pvr.SetOffset(plane_enum, float(offset))
+                        changes.append(plane_name + ".offset")
+                    except Exception as e:
+                        changes.append(plane_name + ".offset FAILED:" + str(e))
+            view.SetViewRange(pvr)
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "SetViewRange raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(view.Id), "view_name": _safe_name(view),
+            "changes": changes}
+
+
+def _tool_set_view_discipline(doc, input_dict):
+    """Set a view's Discipline (Architectural / Structural /
+    Mechanical / Electrical / Plumbing / Coordination)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids   = inp.get("view_ids") or ([inp.get("view_id")] if inp.get("view_id") else None)
+    discipline = (inp.get("discipline") or "").strip()
+    if not view_ids:
+        return {"error": "view_id or view_ids is required."}
+    if not discipline:
+        return {"error": "discipline is required."}
+    enum_val = getattr(ViewDiscipline, discipline, None)
+    if enum_val is None:
+        return {"error": "Unknown discipline '{}'. Use Architectural/Structural/Mechanical/Electrical/Plumbing/Coordination.".format(discipline)}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set view discipline to '{}'".format(discipline))
+        t.Start()
+        try:
+            for vid in view_ids:
+                v, err = _resolve_element(doc, vid)
+                if err:
+                    errors.append({"view_id": vid, "error": err})
+                    continue
+                if not isinstance(v, View):
+                    errors.append({"view_id": _eid_int(v.Id), "error": "not a View"})
+                    continue
+                try:
+                    v.Discipline = enum_val
+                    updated.append(_eid_int(v.Id))
+                except Exception as e:
+                    errors.append({"view_id": _eid_int(v.Id), "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    result = {"discipline": discipline, "updated_count": len(updated),
+              "updated_ids": updated}
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+def _tool_set_view_detail_level(doc, input_dict):
+    """Set a view's DetailLevel (Coarse / Medium / Fine)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids = inp.get("view_ids") or ([inp.get("view_id")] if inp.get("view_id") else None)
+    level    = (inp.get("detail_level") or "").strip()
+    if not view_ids:
+        return {"error": "view_id or view_ids is required."}
+    if not level:
+        return {"error": "detail_level is required."}
+    enum_val = getattr(ViewDetailLevel, level, None)
+    if enum_val is None:
+        return {"error": "Unknown detail_level '{}'. Use Coarse / Medium / Fine.".format(level)}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set detail level to '{}'".format(level))
+        t.Start()
+        try:
+            for vid in view_ids:
+                v, err = _resolve_element(doc, vid)
+                if err:
+                    errors.append({"view_id": vid, "error": err})
+                    continue
+                if not isinstance(v, View):
+                    errors.append({"view_id": _eid_int(v.Id), "error": "not a View"})
+                    continue
+                try:
+                    v.DetailLevel = enum_val
+                    updated.append(_eid_int(v.Id))
+                except Exception as e:
+                    errors.append({"view_id": _eid_int(v.Id), "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"detail_level": level, "updated_count": len(updated),
+            "updated_ids": updated, "errors": errors or None}
+
+
+def _tool_set_view_visual_style(doc, input_dict):
+    """Set a view's DisplayStyle (Wireframe / Hidden / Shading /
+    ShadingWithEdges / Realistic / RealisticWithEdges / Rendering /
+    FlatColors)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_ids = inp.get("view_ids") or ([inp.get("view_id")] if inp.get("view_id") else None)
+    style    = (inp.get("visual_style") or "").strip()
+    if not view_ids:
+        return {"error": "view_id or view_ids is required."}
+    if not style:
+        return {"error": "visual_style is required."}
+    enum_val = getattr(DisplayStyle, style, None)
+    if enum_val is None:
+        return {"error": "Unknown visual_style '{}'.".format(style)}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Set visual style to '{}'".format(style))
+        t.Start()
+        try:
+            for vid in view_ids:
+                v, err = _resolve_element(doc, vid)
+                if err:
+                    errors.append({"view_id": vid, "error": err})
+                    continue
+                if not isinstance(v, View):
+                    errors.append({"view_id": _eid_int(v.Id), "error": "not a View"})
+                    continue
+                try:
+                    v.DisplayStyle = enum_val
+                    updated.append(_eid_int(v.Id))
+                except Exception as e:
+                    errors.append({"view_id": _eid_int(v.Id), "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"visual_style": style, "updated_count": len(updated),
+            "updated_ids": updated, "errors": errors or None}
+
+
+def _tool_set_element_overrides_in_view(doc, input_dict):
+    """Apply per-element graphic overrides in a view. Override spec:
+    {color: '#FF0000' or 'red', halftone: bool, transparency_pct:
+    0-100, projection_line_weight: 1-16, cut_line_weight: 1-16}. Pass
+    only what you want to set. Set clear=true to clear overrides
+    instead."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id     = inp.get("view_id")
+    element_ids = inp.get("element_ids") or []
+    overrides   = inp.get("overrides") or {}
+    clear       = bool(inp.get("clear", False))
+
+    if view_id is None or not element_ids:
+        return {"error": "view_id and element_ids are required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    ogs, applied = (OverrideGraphicSettings(), []) if clear else _ogs_from_input(overrides)
+
+    updated = []
+    errors = []
+    try:
+        t = Transaction(doc, "{} overrides on {} element(s)".format(
+            "Clear" if clear else "Set", len(element_ids)))
+        t.Start()
+        try:
+            for eid in element_ids:
+                try:
+                    view.SetElementOverrides(_make_eid(int(eid)), ogs)
+                    updated.append(int(eid))
+                except Exception as e:
+                    errors.append({"element_id": eid, "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(view.Id), "view_name": _safe_name(view),
+            "cleared": clear, "applied": applied,
+            "updated_count": len(updated), "errors": errors or None}
+
+
+def _tool_set_category_overrides_in_view(doc, input_dict):
+    """Apply per-category graphic overrides in a view. Same overrides
+    spec as set_element_overrides_in_view. Categories accept
+    BuiltInCategory names ('OST_Walls') or display names ('Walls')."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id    = inp.get("view_id")
+    categories = inp.get("categories") or []
+    overrides  = inp.get("overrides") or {}
+    clear      = bool(inp.get("clear", False))
+
+    if view_id is None or not categories:
+        return {"error": "view_id and categories are required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    ogs, applied = (OverrideGraphicSettings(), []) if clear else _ogs_from_input(overrides)
+
+    updated = []
+    errors = []
+    try:
+        t = Transaction(doc, "{} category overrides on '{}'".format(
+            "Clear" if clear else "Set", _safe_name(view) or "view"))
+        t.Start()
+        try:
+            for c in categories:
+                cat_id = _resolve_category_id(doc, c)
+                if cat_id is None:
+                    errors.append({"category": c, "error": "unknown category"})
+                    continue
+                try:
+                    view.SetCategoryOverrides(cat_id, ogs)
+                    updated.append(c)
+                except Exception as e:
+                    errors.append({"category": c, "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(view.Id), "view_name": _safe_name(view),
+            "cleared": clear, "applied": applied,
+            "updated_count": len(updated), "errors": errors or None}
+
+
+def _tool_create_section_view(doc, input_dict):
+    """Create a section view from a line in plan + a depth + top/
+    bottom elevations. line_start + line_end define the section
+    line; the view looks perpendicular to the line, toward the side
+    determined by 'look_right' (default true = right-hand side
+    looking along start->end). bottom_z_ft and top_z_ft define the
+    vertical extents; depth_ft is how far behind the section line
+    the view sees."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    line_start = _xyz_from_dict(inp.get("line_start"))
+    line_end   = _xyz_from_dict(inp.get("line_end"))
+    if line_start is None or line_end is None:
+        return {"error": "line_start and line_end {x,y,z} are required."}
+    try:
+        depth_ft  = float(inp.get("depth_ft", 30.0))
+        bottom_z  = float(inp.get("bottom_z_ft", -3.0))
+        top_z     = float(inp.get("top_z_ft", 10.0))
+    except Exception:
+        return {"error": "depth_ft / bottom_z_ft / top_z_ft must be numeric."}
+    look_right = bool(inp.get("look_right", True))
+    name       = (inp.get("name") or "").strip()
+
+    # Resolve a Section ViewFamilyType (default first available)
+    vft = _find_view_family_type(doc, "Section")
+    if vft is None:
+        return {"error": "No Section ViewFamilyType found in document."}
+
+    # Build the section's coordinate system.
+    try:
+        direction = line_end.Subtract(line_start)
+        half_len  = direction.GetLength() / 2.0
+        if half_len < 1e-6:
+            return {"error": "line_start and line_end are identical."}
+        basis_x = direction.Normalize()  # along the section line
+        basis_y = XYZ.BasisZ              # world up
+        # basis_z = view direction (perpendicular to line, in plan)
+        cross = basis_x.CrossProduct(basis_y)
+        basis_z = cross if look_right else cross.Negate()
+        origin = XYZ((line_start.X + line_end.X) / 2.0,
+                     (line_start.Y + line_end.Y) / 2.0,
+                     (bottom_z + top_z) / 2.0)
+    except Exception as e:
+        return {"error": "Could not compute section orientation: {}".format(e)}
+
+    sb = BoundingBoxXYZ()
+    sb_t = Transform.Identity
+    sb_t.Origin = origin
+    sb_t.BasisX = basis_x
+    sb_t.BasisY = basis_y
+    sb_t.BasisZ = basis_z
+    sb.Transform = sb_t
+    sb.Min = XYZ(-half_len, bottom_z - origin.Z, 0.0)
+    sb.Max = XYZ( half_len, top_z    - origin.Z, depth_ft)
+
+    try:
+        t = Transaction(doc, "Create section view")
+        t.Start()
+        try:
+            sv = ViewSection.CreateSection(doc, vft.Id, sb)
+            if name:
+                try:
+                    sv.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "ViewSection.CreateSection failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(sv.Id), "view_name": _safe_name(sv),
+            "view_type": "Section"}
+
+
+def _tool_create_elevation_marker(doc, input_dict):
+    """Place an elevation marker at a point in plan + optionally
+    create 1-4 elevation views from its 4 directions. Pass plan_view_id
+    to make the elevations (skip to just drop the marker)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    location = _xyz_from_dict(inp.get("location"))
+    if location is None:
+        return {"error": "location {x,y,z} is required."}
+    scale   = int(inp.get("scale") or 96)  # 96 = 1/8"=1'-0"
+    plan_view_id = inp.get("plan_view_id")
+    directions   = inp.get("directions") or [0, 1, 2, 3]  # all 4 by default
+
+    vft = _find_view_family_type(doc, "Elevation")
+    if vft is None:
+        return {"error": "No Elevation ViewFamilyType found in document."}
+
+    plan_view = None
+    if plan_view_id is not None:
+        pv, err = _resolve_element(doc, plan_view_id)
+        if err:
+            return {"error": "plan_view_id: " + err}
+        if not isinstance(pv, ViewPlan):
+            return {"error": "plan_view_id is not a plan view."}
+        plan_view = pv
+
+    created_views = []
+    try:
+        t = Transaction(doc, "Place elevation marker")
+        t.Start()
+        try:
+            marker = ElevationMarker.CreateElevationMarker(
+                doc, vft.Id, location, scale)
+            if plan_view is not None:
+                for idx in directions:
+                    try:
+                        ev = marker.CreateElevation(doc, plan_view.Id, int(idx))
+                        created_views.append({
+                            "index":   int(idx),
+                            "view_id": _eid_int(ev.Id),
+                            "name":    _safe_name(ev),
+                        })
+                    except Exception as e:
+                        created_views.append({"index": int(idx),
+                                              "error": str(e)})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "ElevationMarker raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"marker_id": _eid_int(marker.Id),
+            "created_views": created_views,
+            "view_count": len(created_views)}
+
+
+def _tool_create_callout(doc, input_dict):
+    """Create a callout view of a rectangular region in a parent
+    view. parent_view_id is the view containing the callout; bbox_pt1
+    and bbox_pt2 are diagonal corners of the callout box in world
+    coords."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    parent_view_id = inp.get("parent_view_id")
+    pt1 = _xyz_from_dict(inp.get("bbox_pt1"))
+    pt2 = _xyz_from_dict(inp.get("bbox_pt2"))
+    name = (inp.get("name") or "").strip()
+
+    if parent_view_id is None or pt1 is None or pt2 is None:
+        return {"error": "parent_view_id, bbox_pt1, bbox_pt2 are required."}
+
+    parent, err = _resolve_element(doc, parent_view_id)
+    if err:
+        return {"error": "parent_view_id: " + err}
+
+    vft = _find_view_family_type(doc, "Detail")
+    if vft is None:
+        return {"error": "No Detail ViewFamilyType found for callouts."}
+
+    try:
+        t = Transaction(doc, "Create callout")
+        t.Start()
+        try:
+            cv = ViewSection.CreateCallout(doc, parent.Id, vft.Id, pt1, pt2)
+            if name:
+                try:
+                    cv.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "CreateCallout raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(cv.Id), "view_name": _safe_name(cv),
+            "view_type": "Detail (callout)"}
+
+
+def _tool_create_drafting_view(doc, input_dict):
+    """Create a new (empty) drafting view. Add detail lines, text,
+    filled regions, etc. with the v4.4 annotation tools."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    name = (inp.get("name") or "").strip()
+
+    vft = _find_view_family_type(doc, "Drafting")
+    if vft is None:
+        return {"error": "No Drafting ViewFamilyType found."}
+
+    try:
+        t = Transaction(doc, "Create drafting view")
+        t.Start()
+        try:
+            dv = ViewDrafting.Create(doc, vft.Id)
+            if name:
+                try:
+                    dv.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "ViewDrafting.Create failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(dv.Id), "view_name": _safe_name(dv),
+            "view_type": "Drafting"}
+
+
+def _tool_set_crop_region(doc, input_dict):
+    """Toggle a view's crop box on/off and its visibility, and
+    optionally redefine its extent. crop_box (optional) is
+    {min: {x,y,z}, max: {x,y,z}}."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id = inp.get("view_id")
+    if view_id is None:
+        return {"error": "view_id is required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    changes = []
+    try:
+        t = Transaction(doc, "Set crop region on '{}'".format(_safe_name(view) or "view"))
+        t.Start()
+        try:
+            if "crop_active" in inp and inp["crop_active"] is not None:
+                view.CropBoxActive = bool(inp["crop_active"])
+                changes.append("crop_active")
+            if "crop_visible" in inp and inp["crop_visible"] is not None:
+                view.CropBoxVisible = bool(inp["crop_visible"])
+                changes.append("crop_visible")
+            cb_spec = inp.get("crop_box")
+            if isinstance(cb_spec, dict):
+                mn = _xyz_from_dict(cb_spec.get("min"))
+                mx = _xyz_from_dict(cb_spec.get("max"))
+                if mn is not None and mx is not None:
+                    bbox = BoundingBoxXYZ()
+                    bbox.Min = mn
+                    bbox.Max = mx
+                    view.CropBox = bbox
+                    changes.append("crop_box")
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "set_crop_region raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"view_id": _eid_int(view.Id), "view_name": _safe_name(view),
+            "changes": changes}
+
+
+def _tool_match_view_properties(doc, input_dict):
+    """Copy a sensible default set of view properties (DetailLevel,
+    DisplayStyle, Discipline, Scale, CropBoxActive, CropBoxVisible)
+    from source_view_id to one or more target_view_ids. For full V/G
+    matching, use create_view_template_from_view + apply that
+    template to the targets."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    source_view_id  = inp.get("source_view_id")
+    target_view_ids = inp.get("target_view_ids") or []
+    if source_view_id is None or not target_view_ids:
+        return {"error": "source_view_id and target_view_ids are required."}
+
+    src, err = _resolve_element(doc, source_view_id)
+    if err:
+        return {"error": "source_view_id: " + err}
+    if not isinstance(src, View):
+        return {"error": "source_view_id is not a View."}
+
+    updated = []
+    errors  = []
+    try:
+        t = Transaction(doc, "Match view properties from '{}'".format(
+            _safe_name(src) or "source"))
+        t.Start()
+        try:
+            for vid in target_view_ids:
+                v, err = _resolve_element(doc, vid)
+                if err:
+                    errors.append({"view_id": vid, "error": err})
+                    continue
+                if not isinstance(v, View):
+                    errors.append({"view_id": _eid_int(v.Id), "error": "not a View"})
+                    continue
+                copied = []
+                for attr in ("DetailLevel", "DisplayStyle", "Discipline",
+                             "Scale", "CropBoxActive", "CropBoxVisible"):
+                    try:
+                        val = getattr(src, attr)
+                        setattr(v, attr, val)
+                        copied.append(attr)
+                    except Exception:
+                        continue
+                updated.append({"view_id": _eid_int(v.Id),
+                                "view_name": _safe_name(v),
+                                "copied": copied})
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Transaction failed: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"source_view_id": _eid_int(src.Id), "source_view_name": _safe_name(src),
+            "updated_count": len(updated), "updated": updated,
+            "errors": errors or None}
+
+
+def _tool_create_view_template_from_view(doc, input_dict):
+    """Create a new view template from an existing view's settings
+    (V/G overrides, detail level, scale, etc.). Returns the new
+    template's id - apply with apply_view_template (v3.2)."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id = inp.get("view_id")
+    name    = (inp.get("name") or "").strip()
+    if view_id is None:
+        return {"error": "view_id is required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    try:
+        t = Transaction(doc, "Create view template from '{}'".format(
+            _safe_name(view) or "view"))
+        t.Start()
+        try:
+            tmpl_id = view.CreateViewTemplate()
+            tmpl = doc.GetElement(tmpl_id)
+            if name and tmpl is not None:
+                try:
+                    tmpl.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "CreateViewTemplate raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"template_id": _eid_int(tmpl_id),
+            "template_name": _safe_name(doc.GetElement(tmpl_id)),
+            "source_view_id": _eid_int(view.Id)}
+
+
+def _tool_create_dependent_view(doc, input_dict):
+    """Duplicate a view as a dependent view (Revit's 'Duplicate as
+    Dependent'). The dependent shares the parent's V/G but can have
+    its own crop region. Useful for splitting a large plan across
+    multiple sheets while keeping graphics consistent."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    view_id = inp.get("view_id")
+    name    = (inp.get("name") or "").strip()
+    if view_id is None:
+        return {"error": "view_id is required."}
+    view, err = _resolve_element(doc, view_id)
+    if err:
+        return {"error": "view_id: " + err}
+    if not isinstance(view, View):
+        return {"error": "view_id is not a View."}
+
+    try:
+        t = Transaction(doc, "Create dependent of '{}'".format(_safe_name(view) or "view"))
+        t.Start()
+        try:
+            new_id = view.Duplicate(ViewDuplicateOption.AsDependent)
+            new_view = doc.GetElement(new_id)
+            if name and new_view is not None:
+                try:
+                    new_view.Name = name
+                except Exception:
+                    pass
+            t.Commit()
+        except Exception as e:
+            try:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+            except Exception:
+                pass
+            return {"error": "Duplicate(AsDependent) raised: {}".format(e)}
+    except Exception as e:
+        return {"error": "Could not start transaction: {}".format(e)}
+
+    return {"new_view_id": _eid_int(new_id),
+            "new_view_name": _safe_name(doc.GetElement(new_id)),
+            "parent_view_id": _eid_int(view.Id)}
+
+
 # ---- Tool registry ---------------------------------------------------------
+#
+# FUTURE / DEFERRED — `exec_revit_python` escape hatch tool. Idea: one
+# meta-tool that runs arbitrary IronPython in our context (`doc`,
+# `uidoc`, all Autodesk.Revit.DB classes pre-loaded), captures stdout
+# + a `result` value, surfaces exceptions cleanly. Lets Claude answer
+# long-tail questions / one-off ops we never built dedicated tools
+# for, without expanding TOOL_DEFS forever. KEEP all pre-built tools
+# for confirmations + transactions + cached schemas; exec_revit_python
+# is purely the escape hatch. Hold until we finish the current
+# roadmap, then add it as the start of the workspace-polish tier
+# (v4.14 or so).
 
 # API-side tool definitions sent to Anthropic on every request.
 TOOL_DEFS = [
@@ -10882,12 +13031,40 @@ TOOL_DEFS = [
         },
     },
     {
+        "name": "list_insulation_types",
+        "description": (
+            "List DuctInsulationType + PipeInsulationType in the doc. "
+            "Call this BEFORE add_insulation to find a type id. "
+            "Optional kind filter: 'duct' or 'pipe'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind":          {"type": "string", "enum": ["duct", "pipe"]},
+                "name_contains": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "list_lining_types",
+        "description": (
+            "List DuctLiningType (pipes don't support lining). Call "
+            "BEFORE add_lining to find a type id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_contains": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "add_insulation",
         "description": (
-            "Add insulation wrap to ducts or pipes (the API handles "
-            "both). insulation_type_id must be a DuctInsulationType "
-            "for ducts or a PipeInsulationType for pipes; "
-            "thickness_in is in INCHES."
+            "Add insulation wrap to ducts or pipes (handles both). "
+            "Get insulation_type_id from list_insulation_types - "
+            "category lookups don't work for these. thickness_in "
+            "is in INCHES."
         ),
         "input_schema": {
             "type": "object",
@@ -10903,10 +13080,9 @@ TOOL_DEFS = [
     {
         "name": "add_lining",
         "description": (
-            "Add internal lining to DUCTS (acoustic / thermal "
-            "lining inside the duct). lining_type_id must be a "
-            "DuctLiningType; thickness_in is in INCHES. Pipes "
-            "don't support lining - they use insulation only."
+            "Add internal lining to DUCTS only. Get lining_type_id "
+            "from list_lining_types; thickness_in is in INCHES. "
+            "Pipes don't support lining."
         ),
         "input_schema": {
             "type": "object",
@@ -10917,6 +13093,723 @@ TOOL_DEFS = [
                 "thickness_in":    {"type": "number", "description": "Inches."},
             },
             "required": ["element_ids", "lining_type_id", "thickness_in"],
+        },
+    },
+
+    # ---- Family & type management (v4.8) ----------------------------------
+
+    {
+        "name": "list_families",
+        "description": (
+            "List every loaded Family in the doc with category, type "
+            "count, in-place flag. Filter by name_contains and/or "
+            "category_contains."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_contains":     {"type": "string"},
+                "category_contains": {"type": "string"},
+                "max_results":       {"type": "integer", "description": "Default 500."},
+            },
+        },
+    },
+    {
+        "name": "list_family_types",
+        "description": (
+            "List every FamilySymbol (type) inside one Family. Returns "
+            "id, name, is_active. The id is the type_id you'd pass to "
+            "place_family_instance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "family_id": {"type": "integer"},
+            },
+            "required": ["family_id"],
+        },
+    },
+    {
+        "name": "list_family_parameters",
+        "description": (
+            "List the parameters defined on a Family (inspected via "
+            "its first FamilySymbol). Returns name, storage type, "
+            "current value. Use BEFORE set_element_parameters or "
+            "duplicate_type to know what knobs the family exposes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "family_id": {"type": "integer"},
+            },
+            "required": ["family_id"],
+        },
+    },
+    {
+        "name": "get_type_parameters",
+        "description": (
+            "Read every type-level parameter on a FamilySymbol / "
+            "ElementType (the parameters you'd see in Type Properties)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type_id": {"type": "integer"},
+            },
+            "required": ["type_id"],
+        },
+    },
+    {
+        "name": "list_loadable_family_paths",
+        "description": (
+            "Scan a directory tree for .rfa files. Use before "
+            "load_family to find what's available in the firm library. "
+            "Pass `path`; optional `name_contains` filter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":          {"type": "string"},
+                "name_contains": {"type": "string"},
+                "max_results":   {"type": "integer", "description": "Default 500."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "load_family",
+        "description": (
+            "Load a .rfa family file into the active document. "
+            "Returns the new Family id + category."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute .rfa path."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "unload_family",
+        "description": (
+            "Remove a Family from the document. DESTRUCTIVE - deletes "
+            "all types AND any placed instances of those types."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "family_id": {"type": "integer"},
+            },
+            "required": ["family_id"],
+        },
+    },
+    {
+        "name": "duplicate_type",
+        "description": (
+            "Duplicate a FamilySymbol to create a NEW type with a "
+            "new name. Edit the new type's parameters afterwards via "
+            "set_element_parameters."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "base_type_id": {"type": "integer"},
+                "new_name":     {"type": "string"},
+            },
+            "required": ["base_type_id", "new_name"],
+        },
+    },
+    # ---- Project metadata, phases, worksets (v4.9) ------------------------
+
+    {
+        "name": "get_project_info",
+        "description": (
+            "Read ProjectInformation: name, number, address, issue "
+            "date, status, organization, client, building, author."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_project_info",
+        "description": (
+            "Update ProjectInformation. Only the keys you pass are "
+            "changed. Common ones: name, number, address, issue_date, "
+            "status, client_name, author."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":                     {"type": "string"},
+                "number":                   {"type": "string"},
+                "address":                  {"type": "string"},
+                "issue_date":               {"type": "string"},
+                "status":                   {"type": "string"},
+                "organization_name":        {"type": "string"},
+                "organization_description": {"type": "string"},
+                "client_name":              {"type": "string"},
+                "building_name":            {"type": "string"},
+                "author":                   {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "list_phases",
+        "description": "List Phases in chronological order. The last is typically 'New Construction'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_phase",
+        "description": (
+            "Add a new Phase. Inserted at the end by default, or at "
+            "position (integer index) if given."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":     {"type": "string"},
+                "position": {"type": "integer"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "set_element_phase",
+        "description": (
+            "Set 'Phase Created' on one or more elements. Uses the "
+            "PHASE_CREATED built-in parameter. One transaction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+                "phase_id":    {"type": "integer"},
+            },
+            "required": ["element_ids", "phase_id"],
+        },
+    },
+    {
+        "name": "set_element_demolish_phase",
+        "description": (
+            "Set 'Phase Demolished' on elements. Pass phase_id=null "
+            "(or omit) to CLEAR the demolish phase (element returns "
+            "to non-demoed)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+                "phase_id":    {"type": "integer"},
+            },
+            "required": ["element_ids"],
+        },
+    },
+    {
+        "name": "list_phase_filters",
+        "description": "List PhaseFilter elements (Show All, Show Demo + New, etc.).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_view_phase_filter",
+        "description": (
+            "Apply a PhaseFilter to one or more views in a single "
+            "transaction. Views can switch between 'Show Existing', "
+            "'Show Demo + New', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":        {"type": "array", "items": {"type": "integer"}},
+                "view_id":         {"type": "integer"},
+                "phase_filter_id": {"type": "integer"},
+            },
+            "required": ["phase_filter_id"],
+        },
+    },
+    {
+        "name": "list_worksets",
+        "description": (
+            "List user worksets in a workshared document. Each row: "
+            "id, name, owner, is_open, is_default. Returns an error "
+            "if the document isn't workshared."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_workset",
+        "description": "Create a new user workset (workshared docs only).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "get_element_workset",
+        "description": "Read which workset an element belongs to.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_id": {"type": "integer"},
+            },
+            "required": ["element_id"],
+        },
+    },
+    # ---- Imports, links, coordination (v4.10) -----------------------------
+
+    {
+        "name": "list_imports",
+        "description": (
+            "List EVERY import / link in the document (CAD, Revit, "
+            "IFC, etc.). Each row has kind, name, path (when "
+            "loadable), pinned state, view-specific flag."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "link_cad",
+        "description": (
+            "Link a .dwg / .dxf file into a view as a live link. "
+            "Optional placement ('Origin' default, 'Center'), "
+            "color_mode ('Preserved' / 'BlackAndWhite' / 'Inverted'), "
+            "orient_to_view (default false)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":          {"type": "string"},
+                "view_id":       {"type": "integer", "description": "Default active view."},
+                "placement":     {"type": "string", "enum": ["Origin", "Center"]},
+                "color_mode":    {"type": "string",
+                                  "enum": ["Preserved", "BlackAndWhite", "Inverted"]},
+                "orient_to_view":{"type": "boolean"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "import_cad_as_drafting",
+        "description": (
+            "Import a .dwg / .dxf as an EMBEDDED import (not a link) "
+            "into a drafting view. Use link_cad for live links."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":     {"type": "string"},
+                "view_id":  {"type": "integer", "description": "Drafting view, defaults to active view."},
+                "placement":{"type": "string"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "link_revit",
+        "description": (
+            "Link an external .rvt model. Creates a RevitLinkType + "
+            "RevitLinkInstance at the project origin."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "link_ifc",
+        "description": "Link an .ifc file as a view-only reference model.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "link_point_cloud",
+        "description": "Link a point cloud (.rcp / .rcs) into a view.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string"},
+                "view_id": {"type": "integer", "description": "Default active view."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "reload_link",
+        "description": (
+            "Reload a Revit link or CAD link from its current path. "
+            "Pass the link instance id (RevitLinkInstance or "
+            "ImportInstance) or the type id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "link_id": {"type": "integer"},
+            },
+            "required": ["link_id"],
+        },
+    },
+    {
+        "name": "unload_link",
+        "description": (
+            "Unload a Revit link (preserves the type but drops cached "
+            "data) OR delete a CAD import / link entirely."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "link_id": {"type": "integer"},
+            },
+            "required": ["link_id"],
+        },
+    },
+    {
+        "name": "set_link_pinned",
+        "description": "Pin or unpin a link / import.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "link_id": {"type": "integer"},
+                "pinned":  {"type": "boolean"},
+            },
+            "required": ["link_id", "pinned"],
+        },
+    },
+    {
+        "name": "list_cad_layers",
+        "description": (
+            "List the layers (sub-categories) of a linked / imported "
+            "CAD. Each row has layer_name + category_id - feed the "
+            "ids to hide_cad_layer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "import_id": {"type": "integer"},
+            },
+            "required": ["import_id"],
+        },
+    },
+    {
+        "name": "hide_cad_layer",
+        "description": (
+            "Hide (or show) CAD layers in a view. Layer category ids "
+            "come from list_cad_layers. One transaction across all "
+            "layers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":            {"type": "integer"},
+                "layer_category_ids": {"type": "array", "items": {"type": "integer"}},
+                "hidden":             {"type": "boolean", "description": "Default true."},
+            },
+            "required": ["view_id", "layer_category_ids"],
+        },
+    },
+    {
+        "name": "get_warnings_list",
+        "description": (
+            "Read all project warnings (Revit's 'Warnings' dialog). "
+            "Each row has severity, description, failing element ids. "
+            "Optional description_contains filter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description_contains": {"type": "string"},
+                "max_results":          {"type": "integer", "description": "Default 500."},
+            },
+        },
+    },
+
+    # ---- View & visibility deep cuts (v4.11) ------------------------------
+
+    {
+        "name": "set_view_range",
+        "description": (
+            "Set the view-range planes (Top, Cut, Bottom, View Depth) "
+            "on a plan view. Each plane is {level_id, offset_ft}. "
+            "Pass only the planes you want to change."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":    {"type": "integer"},
+                "top":        {"type": "object"},
+                "cut":        {"type": "object"},
+                "bottom":     {"type": "object"},
+                "view_depth": {"type": "object"},
+            },
+            "required": ["view_id"],
+        },
+    },
+    {
+        "name": "set_view_discipline",
+        "description": (
+            "Set Discipline on view(s): 'Architectural', "
+            "'Structural', 'Mechanical', 'Electrical', 'Plumbing', "
+            "'Coordination'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":   {"type": "array", "items": {"type": "integer"}},
+                "view_id":    {"type": "integer"},
+                "discipline": {"type": "string"},
+            },
+            "required": ["discipline"],
+        },
+    },
+    {
+        "name": "set_view_detail_level",
+        "description": "Set DetailLevel on view(s): 'Coarse', 'Medium', 'Fine'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":     {"type": "array", "items": {"type": "integer"}},
+                "view_id":      {"type": "integer"},
+                "detail_level": {"type": "string", "enum": ["Coarse", "Medium", "Fine"]},
+            },
+            "required": ["detail_level"],
+        },
+    },
+    {
+        "name": "set_view_visual_style",
+        "description": (
+            "Set DisplayStyle on view(s): 'Wireframe', 'Hidden', "
+            "'Shading', 'ShadingWithEdges', 'Realistic', "
+            "'RealisticWithEdges', 'Rendering', 'FlatColors'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_ids":     {"type": "array", "items": {"type": "integer"}},
+                "view_id":      {"type": "integer"},
+                "visual_style": {"type": "string"},
+            },
+            "required": ["visual_style"],
+        },
+    },
+    {
+        "name": "set_element_overrides_in_view",
+        "description": (
+            "Apply per-element graphic overrides in a view. "
+            "overrides spec: {color, halftone, transparency_pct, "
+            "projection_line_weight, cut_line_weight}. Set "
+            "clear=true to clear overrides instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":     {"type": "integer"},
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+                "overrides":   {"type": "object"},
+                "clear":       {"type": "boolean", "description": "Default false."},
+            },
+            "required": ["view_id", "element_ids"],
+        },
+    },
+    {
+        "name": "set_category_overrides_in_view",
+        "description": (
+            "Apply per-category graphic overrides in a view. Same "
+            "overrides spec as set_element_overrides_in_view. "
+            "Categories accept BuiltInCategory names like 'OST_Walls' "
+            "or display names like 'Walls'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":    {"type": "integer"},
+                "categories": {"type": "array", "items": {"type": "string"}},
+                "overrides":  {"type": "object"},
+                "clear":      {"type": "boolean"},
+            },
+            "required": ["view_id", "categories"],
+        },
+    },
+    {
+        "name": "create_section_view",
+        "description": (
+            "Create a section view from a line in plan + a depth + "
+            "top/bottom elevations. look_right=true (default) makes "
+            "the section look to the right-hand side of the line "
+            "(start -> end direction). depth_ft is how far behind "
+            "the section line the view sees."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "line_start":  {"type": "object"},
+                "line_end":    {"type": "object"},
+                "depth_ft":    {"type": "number", "description": "Default 30."},
+                "bottom_z_ft": {"type": "number", "description": "Default -3."},
+                "top_z_ft":    {"type": "number", "description": "Default 10."},
+                "look_right":  {"type": "boolean", "description": "Default true."},
+                "name":        {"type": "string"},
+            },
+            "required": ["line_start", "line_end"],
+        },
+    },
+    {
+        "name": "create_elevation_marker",
+        "description": (
+            "Place an elevation marker at a point in plan and "
+            "optionally create elevation views from its 4 directions. "
+            "Pass plan_view_id to actually create the elevations "
+            "(omit to just drop the marker). directions defaults to "
+            "[0, 1, 2, 3] (all four)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location":     {"type": "object"},
+                "scale":        {"type": "integer", "description": "Default 96 (1/8\"=1'-0\")."},
+                "plan_view_id": {"type": "integer", "description": "Optional - required to create views."},
+                "directions":   {"type": "array", "items": {"type": "integer"},
+                                 "description": "Indices 0-3. Default all four."},
+            },
+            "required": ["location"],
+        },
+    },
+    {
+        "name": "create_callout",
+        "description": (
+            "Create a callout view (detail view) of a rectangular "
+            "region in a parent view."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parent_view_id": {"type": "integer"},
+                "bbox_pt1":       {"type": "object"},
+                "bbox_pt2":       {"type": "object"},
+                "name":           {"type": "string"},
+            },
+            "required": ["parent_view_id", "bbox_pt1", "bbox_pt2"],
+        },
+    },
+    {
+        "name": "create_drafting_view",
+        "description": (
+            "Create an empty drafting view. Add lines / text / "
+            "filled regions via v4.4 annotation tools."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "set_crop_region",
+        "description": (
+            "Toggle a view's crop box on/off + visibility, and "
+            "optionally redefine its extent via crop_box {min: "
+            "{x,y,z}, max: {x,y,z}}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id":      {"type": "integer"},
+                "crop_active":  {"type": "boolean"},
+                "crop_visible": {"type": "boolean"},
+                "crop_box":     {"type": "object"},
+            },
+            "required": ["view_id"],
+        },
+    },
+    {
+        "name": "match_view_properties",
+        "description": (
+            "Copy a default set of view properties (DetailLevel, "
+            "DisplayStyle, Discipline, Scale, CropBoxActive, "
+            "CropBoxVisible) from source_view_id to one or more "
+            "target_view_ids. For full V/G matching, use "
+            "create_view_template_from_view then apply_view_template."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_view_id":  {"type": "integer"},
+                "target_view_ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["source_view_id", "target_view_ids"],
+        },
+    },
+    {
+        "name": "create_view_template_from_view",
+        "description": (
+            "Create a new view template from an existing view's "
+            "settings (V/G overrides, detail level, scale). Returns "
+            "the new template's id - apply it with apply_view_template."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id": {"type": "integer"},
+                "name":    {"type": "string"},
+            },
+            "required": ["view_id"],
+        },
+    },
+    {
+        "name": "create_dependent_view",
+        "description": (
+            "Duplicate a view as a dependent view. Shares the "
+            "parent's V/G but can have its own crop region. Useful "
+            "for splitting a large plan across multiple sheets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view_id": {"type": "integer"},
+                "name":    {"type": "string"},
+            },
+            "required": ["view_id"],
+        },
+    },
+
+    {
+        "name": "change_element_workset",
+        "description": (
+            "Move elements to a different workset (integer "
+            "workset_id from list_worksets). One transaction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_ids": {"type": "array", "items": {"type": "integer"}},
+                "workset_id":  {"type": "integer"},
+            },
+            "required": ["element_ids", "workset_id"],
+        },
+    },
+
+    {
+        "name": "family_upgrade_status_check",
+        "description": (
+            "Report whether a Family looks like it might need a "
+            "version upgrade. Detailed version metadata isn't exposed "
+            "by the API; this tool returns the in-place + editable "
+            "flags and a remediation note."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "family_id": {"type": "integer"},
+            },
+            "required": ["family_id"],
         },
     },
 
@@ -11048,8 +13941,61 @@ TOOL_IMPLS = {
     "create_electrical_circuit":         _tool_create_electrical_circuit,
     "add_element_to_system":             _tool_add_element_to_system,
     "remove_element_from_system":        _tool_remove_element_from_system,
+    "list_insulation_types":             _tool_list_insulation_types,
+    "list_lining_types":                  _tool_list_lining_types,
     "add_insulation":                    _tool_add_insulation,
     "add_lining":                        _tool_add_lining,
+    # Family & type management (v4.8)
+    "list_families":                     _tool_list_families,
+    "list_family_types":                 _tool_list_family_types,
+    "list_family_parameters":            _tool_list_family_parameters,
+    "get_type_parameters":               _tool_get_type_parameters,
+    "list_loadable_family_paths":        _tool_list_loadable_family_paths,
+    "load_family":                       _tool_load_family,
+    "unload_family":                     _tool_unload_family,
+    "duplicate_type":                    _tool_duplicate_type,
+    "family_upgrade_status_check":       _tool_family_upgrade_status_check,
+    # Project metadata, phases, worksets (v4.9)
+    "get_project_info":                  _tool_get_project_info,
+    "set_project_info":                  _tool_set_project_info,
+    "list_phases":                       _tool_list_phases,
+    "create_phase":                      _tool_create_phase,
+    "set_element_phase":                 _tool_set_element_phase,
+    "set_element_demolish_phase":        _tool_set_element_demolish_phase,
+    "list_phase_filters":                _tool_list_phase_filters,
+    "set_view_phase_filter":             _tool_set_view_phase_filter,
+    "list_worksets":                     _tool_list_worksets,
+    "create_workset":                    _tool_create_workset,
+    "get_element_workset":               _tool_get_element_workset,
+    "change_element_workset":            _tool_change_element_workset,
+    # Imports, links, coordination (v4.10)
+    "list_imports":                      _tool_list_imports,
+    "link_cad":                          _tool_link_cad,
+    "import_cad_as_drafting":            _tool_import_cad_as_drafting,
+    "link_revit":                        _tool_link_revit,
+    "link_ifc":                          _tool_link_ifc,
+    "link_point_cloud":                  _tool_link_point_cloud,
+    "reload_link":                       _tool_reload_link,
+    "unload_link":                       _tool_unload_link,
+    "set_link_pinned":                   _tool_set_link_pinned,
+    "list_cad_layers":                   _tool_list_cad_layers,
+    "hide_cad_layer":                    _tool_hide_cad_layer,
+    "get_warnings_list":                 _tool_get_warnings_list,
+    # View & visibility deep cuts (v4.11)
+    "set_view_range":                    _tool_set_view_range,
+    "set_view_discipline":               _tool_set_view_discipline,
+    "set_view_detail_level":             _tool_set_view_detail_level,
+    "set_view_visual_style":             _tool_set_view_visual_style,
+    "set_element_overrides_in_view":     _tool_set_element_overrides_in_view,
+    "set_category_overrides_in_view":    _tool_set_category_overrides_in_view,
+    "create_section_view":               _tool_create_section_view,
+    "create_elevation_marker":           _tool_create_elevation_marker,
+    "create_callout":                    _tool_create_callout,
+    "create_drafting_view":              _tool_create_drafting_view,
+    "set_crop_region":                   _tool_set_crop_region,
+    "match_view_properties":             _tool_match_view_properties,
+    "create_view_template_from_view":    _tool_create_view_template_from_view,
+    "create_dependent_view":             _tool_create_dependent_view,
 }
 
 
@@ -11527,11 +14473,18 @@ def estimate_request_cost(messages, system_prompt, tools, max_output_tokens, mod
     back to full price.
     """
     # System prompt + tools size (these always get cache_control).
+    # Tools get compacted at send time so the estimator uses the SAME
+    # compaction - otherwise the estimate would overshoot dramatically
+    # and trip the soft cap for requests that are actually small.
     sys_chars  = len(system_prompt or "")
     try:
-        tools_chars = len(json.dumps(tools, ensure_ascii=False))
+        compacted = [_compact_tool_for_api(t) for t in (tools or [])]
+        tools_chars = len(json.dumps(compacted, ensure_ascii=False))
     except Exception:
-        tools_chars = 0
+        try:
+            tools_chars = len(json.dumps(tools, ensure_ascii=False))
+        except Exception:
+            tools_chars = 0
 
     # Split messages into "cacheable prefix" and "fresh suffix". The
     # prefix is everything UP TO but not including the last two messages
@@ -11881,6 +14834,13 @@ def summarize_tool_result(result):
             return "{} connector{}".format(
                 result["connector_count"],
                 "" if result["connector_count"] == 1 else "s")
+        # v4.8 - family + type management
+        if "loaded" in result and "path" in result:
+            return "{} family".format("loaded" if result["loaded"] else "load failed")
+        if "unloaded" in result:
+            return "unloaded family"
+        if "new_type_id" in result:
+            return "duplicated type '{}'".format(result.get("new_type_name") or "?")
 
         # Read tools
         if "count" in result:
@@ -11890,7 +14850,11 @@ def summarize_tool_result(result):
                       "links", "rooms", "tag_types", "filters",
                       "revisions", "filled_region_types",
                       "spaces", "zones", "loads",
-                      "systems", "connectors"):
+                      "systems", "connectors",
+                      "insulation_types", "lining_types",
+                      "families", "types", "parameters", "paths",
+                      "phases", "phase_filters", "worksets",
+                      "imports", "layers", "warnings"):
                 if k in result:
                     label = k
                     break
@@ -11908,6 +14872,40 @@ def summarize_tool_result(result):
 
 class StreamCancelled(Exception):
     pass
+
+
+def _compact_tool_for_api(tool_def, max_description_chars=240):
+    """Return a stripped-down copy of a tool definition for the API.
+    - Top-level `description` is truncated to `max_description_chars`.
+    - All `description` fields inside `input_schema` (per-property) are
+      removed - Claude infers meaning from name + type + enum, and
+      these descriptions were paraphrasing the param name in most
+      cases anyway.
+    - All other schema structure (type, properties, required, enum,
+      items) is preserved exactly so tool calls still validate."""
+    out = {
+        "name":        tool_def.get("name", ""),
+        "description": (tool_def.get("description") or "")[:max_description_chars],
+    }
+    schema = tool_def.get("input_schema")
+    if schema is not None:
+        out["input_schema"] = _strip_schema_descriptions(schema)
+    return out
+
+
+def _strip_schema_descriptions(node):
+    """Recursively drop `description` fields from a JSON schema dict.
+    Preserves type / enum / required / items / properties structure."""
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k == "description":
+                continue
+            out[k] = _strip_schema_descriptions(v)
+        return out
+    if isinstance(node, list):
+        return [_strip_schema_descriptions(item) for item in node]
+    return node
 
 
 def _find_clean_trim_start(history_messages, default_start):
@@ -12284,14 +15282,19 @@ def _post_stream_round(api_key, model_id, system_prompt, tools, messages,
         "cache_control": {"type": "ephemeral"},
     }]
 
+    # Compact every tool def before shipping. The source defs are
+    # written verbose-for-readability (long descriptions, per-property
+    # `description` fields) but those bloat each request's token count
+    # against the 30k tokens/min rate limit AND every cached read.
+    # Stripping schema descriptions + truncating tool-level descriptions
+    # cuts the tools payload roughly in half without losing Claude's
+    # ability to call them correctly (name + type + enum + required is
+    # enough; property descriptions just paraphrased the name).
+    tools_for_api = [_compact_tool_for_api(t) for t in (tools or [])]
     # Caching at the tool boundary: marker on the LAST tool tells the
-    # API "cache everything up through here." We copy the last tool
-    # rather than mutating TOOL_DEFS in place.
-    tools_for_api = list(tools or [])
+    # API "cache everything up through here."
     if tools_for_api:
-        last_tool = dict(tools_for_api[-1])
-        last_tool["cache_control"] = {"type": "ephemeral"}
-        tools_for_api[-1] = last_tool
+        tools_for_api[-1]["cache_control"] = {"type": "ephemeral"}
 
     body = json.dumps({
         "model":      model_id,

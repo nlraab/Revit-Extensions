@@ -54,6 +54,7 @@ class ExtensionIntegrityTests(unittest.TestCase):
         expected = {
             "AlignViews.pushbutton",
             "Chatbot.pushbutton",
+            "Parameters Management.pushbutton",
             "Revisions Manager.pushbutton",
             "Sheet Manager.pushbutton",
             "SheetSetup.pushbutton",
@@ -71,6 +72,7 @@ class ExtensionIntegrityTests(unittest.TestCase):
             "Reports.pushbutton",
             "Settings.pushbutton",
             "Walkthrough.pushbutton",
+            "3D Viewer.pushbutton",
         }
         actual = {p.name for p in CLASH_PANEL.glob("*.pushbutton")}
         self.assertTrue(
