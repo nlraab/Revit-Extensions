@@ -8,14 +8,19 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1A202C; }
   #c { width: 100%; height: 100%; display: block; cursor: grab; }
   #c:active { cursor: grabbing; }
-  #badge {
-    position: fixed; left: 12px; bottom: 10px;
-    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 12px;
-    color: #CBD5E0; background: rgba(45, 55, 72, 0.65);
-    padding: 6px 11px; border-radius: 4px; user-select: none; pointer-events: none;
+  .panel {
+    position: fixed; font-family: 'Segoe UI', system-ui, sans-serif; font-size: 12px;
+    color: #CBD5E0; background: rgba(45, 55, 72, 0.72);
+    padding: 6px 11px; border-radius: 4px; user-select: none;
   }
-  #badge .db { color: #00BFFF; font-weight: 700; }
-  #badge .sep { color: #7A8FA6; font-weight: 300; }
+  #badge { left: 12px; bottom: 10px; pointer-events: none; }
+  #badge .db { color: #00BFFF; font-weight: 700; } #badge .sep { color: #7A8FA6; }
+  #controls { left: 12px; top: 10px; display: none; pointer-events: none; }
+  #controls b { color: #00BFFF; }
+  #tuner { right: 12px; top: 10px; display: none; }
+  #tuner div { display: flex; align-items: center; margin: 2px 0; }
+  #tuner label { width: 46px; } #tuner input { width: 120px; }
+  #tuner span { width: 52px; text-align: right; color: #00BFFF; font-variant-numeric: tabular-nums; }
   #hint {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
     font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px;
@@ -25,8 +30,13 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">Click <b>Export &amp; Load Model</b> to load the model here.</div>
-<div id="badge"><span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span>&nbsp;&nbsp;3D Viewer</div>
+<div id="hint">Click <b>Export &amp; Load Model</b> or <b>Load Last Export</b> to begin.</div>
+<div id="controls" class="panel"><b>F</b> mouselook &middot; <b>WASD</b> fly &middot; <b>Q/E</b> down/up &middot; drag to look &middot; <b>Shift</b> faster</div>
+<div id="tuner" class="panel">
+  <div><label>Speed</label><input id="sp_speed" type="range" min="0.3" max="30" step="0.1" value="2.5"><span id="sp_speed_v"></span></div>
+  <div><label>Look</label><input id="sp_look" type="range" min="0.02" max="0.40" step="0.01" value="0.10"><span id="sp_look_v"></span></div>
+</div>
+<div id="badge" class="panel"><span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span>&nbsp;&nbsp;3D Viewer</div>
 
 <script>
 "use strict";
@@ -34,38 +44,51 @@
 var canvas = document.getElementById("c");
 var badge = document.getElementById("badge");
 var hint = document.getElementById("hint");
+var controls = document.getElementById("controls");
+var tuner = document.getElementById("tuner");
+var spSpeed = document.getElementById("sp_speed");
+var spLook = document.getElementById("sp_look");
+var spSpeedV = document.getElementById("sp_speed_v");
+var spLookV = document.getElementById("sp_look_v");
 var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
 
-// Per-fragment flat shading via screen-space derivatives + 32-bit indices so
-// big indexed meshes stay compact on the GPU (no normal attribute, no
-// expansion to non-indexed).
+// Free-fly camera: position + yaw/pitch, with eased velocity for smooth
+// starts/stops. This mirrors the Walkthrough tool's feel.
+var cam = { pos: [0, 0, 0], yaw: 0, pitch: 0 };
+var vel = [0, 0, 0];
+var keys = {};
+var dragging = false, lastX = 0, lastY = 0, locked = false;
+var prevT = 0;
+var PITCH_LIMIT = Math.PI / 2 - 0.02;
+
+function moveSpeed() { return parseFloat(spSpeed.value); }              // metres/sec
+function lookRad() { return parseFloat(spLook.value) * Math.PI / 180; }  // rad per pixel
+function forwardVec() {
+  var cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  return [cp * Math.sin(cam.yaw), sp, -cp * Math.cos(cam.yaw)];
+}
+function rightVec() { return [Math.cos(cam.yaw), 0, Math.sin(cam.yaw)]; }
+
+// ---- shaders: per-fragment flat shading via screen-space derivatives ----
 var VS = [
-  "attribute vec3 aPos;",
-  "uniform mat4 uMVP;",
-  "varying vec3 vWorld;",
+  "attribute vec3 aPos;", "uniform mat4 uMVP;", "varying vec3 vWorld;",
   "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vWorld = aPos; }"
 ].join("\n");
-
 var FS = [
   "#extension GL_OES_standard_derivatives : enable",
   "precision mediump float;",
-  "varying vec3 vWorld;",
-  "uniform vec3 uColor;",
-  "uniform vec3 uCameraPos;",
+  "varying vec3 vWorld;", "uniform vec3 uColor; uniform vec3 uCameraPos;",
   "void main() {",
   "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
   "  vec3 L = normalize(uCameraPos - vWorld);",
   "  float d = abs(dot(N, L));",
-  "  float lit = 0.35 + 0.65 * d;",
-  "  gl_FragColor = vec4(uColor * lit, 1.0);",
+  "  gl_FragColor = vec4(uColor * (0.35 + 0.65 * d), 1.0);",
   "}"
 ].join("\n");
 
 var program = null, loc = {};
-var groups = [];                  // {posBuf, idxBuf, count, color}
+var groups = [];
 var bounds = null;
-var cam = { az: 0.9, el: 0.5, dist: 20, target: [0, 0, 0] };
-var dragging = false, lastX = 0, lastY = 0;
 
 // ---------------------------------------------------------------- matrices
 function perspective(fovy, aspect, near, far) {
@@ -87,37 +110,28 @@ function lookAt(eye, center, up) {
   var xx = up[1] * z[2] - up[2] * z[1], xy = up[2] * z[0] - up[0] * z[2],
       xz = up[0] * z[1] - up[1] * z[0];
   var xl = Math.hypot(xx, xy, xz) || 1; var x = [xx / xl, xy / xl, xz / xl];
-  var y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2],
-           z[0] * x[1] - z[1] * x[0]];
+  var y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
   return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
-          -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]),
-          -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
-          -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
-}
-function cameraPos() {
-  var ce = Math.cos(cam.el), se = Math.sin(cam.el);
-  var ca = Math.cos(cam.az), sa = Math.sin(cam.az);
-  return [cam.target[0] + cam.dist * ce * sa, cam.target[1] + cam.dist * se,
-          cam.target[2] + cam.dist * ce * ca];
+          -(x[0]*eye[0]+x[1]*eye[1]+x[2]*eye[2]),
+          -(y[0]*eye[0]+y[1]*eye[1]+y[2]*eye[2]),
+          -(z[0]*eye[0]+z[1]*eye[1]+z[2]*eye[2]), 1];
 }
 
 // ---------------------------------------------------------------- gl setup
 function compile(type, src) {
   var s = gl.createShader(type);
   gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-    throw new Error(gl.getShaderInfoLog(s));
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
   return s;
 }
 function setupGL() {
-  gl.getExtension("OES_standard_derivatives");   // flat normals in the shader
-  gl.getExtension("OES_element_index_uint");      // 32-bit indices
+  gl.getExtension("OES_standard_derivatives");
+  gl.getExtension("OES_element_index_uint");
   program = gl.createProgram();
   gl.attachShader(program, compile(gl.VERTEX_SHADER, VS));
   gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FS));
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS))
-    throw new Error(gl.getProgramInfoLog(program));
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
   gl.useProgram(program);
   loc.aPos = gl.getAttribLocation(program, "aPos");
   loc.uMVP = gl.getUniformLocation(program, "uMVP");
@@ -129,37 +143,29 @@ function setupGL() {
 
 // ---------------------------------------------------------------- glb parse
 function parseGlb(buffer) {
-  var dv = new DataView(buffer);
-  var length = dv.getUint32(8, true);
+  var dv = new DataView(buffer), length = dv.getUint32(8, true);
   var off = 12, json = null, bin = null;
   while (off < length) {
     var clen = dv.getUint32(off, true); off += 4;
     var ctype = dv.getUint32(off, true); off += 4;
-    if (ctype === 0x4E4F534A) {
-      json = JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(buffer, off, clen)));
-    } else if (ctype === 0x004E4942) {
-      bin = new Uint8Array(buffer, off, clen);
-    }
+    if (ctype === 0x4E4F534A) json = JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(buffer, off, clen)));
+    else if (ctype === 0x004E4942) bin = new Uint8Array(buffer, off, clen);
     off += clen;
   }
   return { json: json, bin: bin };
 }
-
 function buildPrimitives(gltf, bin) {
-  var binBuf = bin.buffer, base = bin.byteOffset, prims = [];
-  var nodes = gltf.nodes || [];
+  var binBuf = bin.buffer, base = bin.byteOffset, prims = [], nodes = gltf.nodes || [];
   for (var n = 0; n < nodes.length; n++) {
     if (nodes[n].mesh === undefined) continue;
     var mesh = gltf.meshes[nodes[n].mesh];
     for (var p = 0; p < mesh.primitives.length; p++) {
       var prim = mesh.primitives[p];
-      var pacc = gltf.accessors[prim.attributes.POSITION];
-      var pbv = gltf.bufferViews[pacc.bufferView];
+      var pacc = gltf.accessors[prim.attributes.POSITION], pbv = gltf.bufferViews[pacc.bufferView];
       var positions = new Float32Array(binBuf, base + (pbv.byteOffset || 0), pacc.count * 3);
       var indices = null;
       if (prim.indices !== undefined) {
-        var iacc = gltf.accessors[prim.indices];
-        var ibv = gltf.bufferViews[iacc.bufferView];
+        var iacc = gltf.accessors[prim.indices], ibv = gltf.bufferViews[iacc.bufferView];
         indices = new Uint32Array(binBuf, base + (ibv.byteOffset || 0), iacc.count);
       }
       var color = [0.7, 0.72, 0.74];
@@ -172,15 +178,11 @@ function buildPrimitives(gltf, bin) {
   }
   return prims;
 }
-
-// Merge primitives that share a color into one buffer each, so the whole
-// model draws in a handful of GL calls instead of one per element.
 function mergeByColor(prims) {
   var byKey = {};
   for (var i = 0; i < prims.length; i++) {
     var p = prims[i];
-    var key = Math.round(p.color[0] * 255) + "," + Math.round(p.color[1] * 255) +
-              "," + Math.round(p.color[2] * 255);
+    var key = Math.round(p.color[0]*255)+","+Math.round(p.color[1]*255)+","+Math.round(p.color[2]*255);
     if (!byKey[key]) byKey[key] = { color: p.color, prims: [] };
     byKey[key].prims.push(p);
   }
@@ -189,66 +191,88 @@ function mergeByColor(prims) {
     var g = byKey[k], totalV = 0, totalI = 0, j;
     for (j = 0; j < g.prims.length; j++) {
       totalV += g.prims[j].positions.length;
-      totalI += g.prims[j].indices ? g.prims[j].indices.length
-                                   : g.prims[j].positions.length / 3;
+      totalI += g.prims[j].indices ? g.prims[j].indices.length : g.prims[j].positions.length / 3;
     }
-    var pos = new Float32Array(totalV), idx = new Uint32Array(totalI);
-    var vo = 0, io = 0, baseVert = 0;
+    var pos = new Float32Array(totalV), idx = new Uint32Array(totalI), vo = 0, io = 0, baseVert = 0;
     for (j = 0; j < g.prims.length; j++) {
       var pr = g.prims[j], nv = pr.positions.length / 3, x;
       pos.set(pr.positions, vo);
-      if (pr.indices) {
-        for (x = 0; x < pr.indices.length; x++) idx[io + x] = pr.indices[x] + baseVert;
-        io += pr.indices.length;
-      } else {
-        for (x = 0; x < nv; x++) idx[io + x] = baseVert + x;
-        io += nv;
-      }
+      if (pr.indices) { for (x = 0; x < pr.indices.length; x++) idx[io + x] = pr.indices[x] + baseVert; io += pr.indices.length; }
+      else { for (x = 0; x < nv; x++) idx[io + x] = baseVert + x; io += nv; }
       vo += pr.positions.length; baseVert += nv;
     }
     out.push({ positions: pos, indices: idx, color: g.color });
   }
   return out;
 }
-
 function loadModel(buffer) {
   var parsed = parseGlb(buffer);
   if (!parsed.json || !parsed.bin) { hint.style.display = "block"; hint.textContent = "Could not read model file."; return; }
   for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); }
   groups = [];
-
   var merged = mergeByColor(buildPrimitives(parsed.json, parsed.bin));
-  var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
-  var totalTris = 0;
+  var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity], totalTris = 0;
   for (var m = 0; m < merged.length; m++) {
     var grp = merged[m];
     if (grp.indices.length === 0) continue;
     var posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, grp.positions, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.positions, gl.STATIC_DRAW);
     var idxBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
     groups.push({ posBuf: posBuf, idxBuf: idxBuf, count: grp.indices.length, color: grp.color });
     totalTris += grp.indices.length / 3;
     var pp = grp.positions;
     for (var v = 0; v < pp.length; v += 3) {
       if (pp[v] < mn[0]) mn[0] = pp[v]; if (pp[v] > mx[0]) mx[0] = pp[v];
-      if (pp[v + 1] < mn[1]) mn[1] = pp[v + 1]; if (pp[v + 1] > mx[1]) mx[1] = pp[v + 1];
-      if (pp[v + 2] < mn[2]) mn[2] = pp[v + 2]; if (pp[v + 2] > mx[2]) mx[2] = pp[v + 2];
+      if (pp[v+1] < mn[1]) mn[1] = pp[v+1]; if (pp[v+1] > mx[1]) mx[1] = pp[v+1];
+      if (pp[v+2] < mn[2]) mn[2] = pp[v+2]; if (pp[v+2] > mx[2]) mx[2] = pp[v+2];
     }
   }
   if (groups.length === 0) { hint.style.display = "block"; hint.textContent = "Model had no geometry."; return; }
-
   bounds = {
-    center: [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2],
-    radius: Math.max(0.001, Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) / 2)
+    center: [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2],
+    radius: Math.max(0.001, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]) / 2)
   };
-  cam.target = bounds.center.slice();
-  cam.dist = bounds.radius * 2.6; cam.az = 0.9; cam.el = 0.5;
+  // place the camera back from the model and aim at its centre
+  var c = bounds.center, R = bounds.radius;
+  cam.pos = [c[0] + R * 0.9, c[1] + R * 0.5, c[2] + R * 1.7];
+  var dir = [c[0]-cam.pos[0], c[1]-cam.pos[1], c[2]-cam.pos[2]];
+  var dl = Math.hypot(dir[0], dir[1], dir[2]) || 1; dir = [dir[0]/dl, dir[1]/dl, dir[2]/dl];
+  cam.yaw = Math.atan2(dir[0], -dir[2]);
+  cam.pitch = Math.asin(Math.max(-1, Math.min(1, dir[1])));
+  vel = [0, 0, 0];
+  // a sensible default speed: cross a room in a second or two
+  spSpeed.value = Math.max(0.3, Math.min(30, (R / 12).toFixed(1)));
+  refreshTuner();
   hint.style.display = "none";
+  controls.style.display = "block";
+  tuner.style.display = "block";
   badge.innerHTML = '<span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span>&nbsp;&nbsp;' +
     Math.round(totalTris).toLocaleString() + ' triangles, ' + groups.length + ' groups';
+}
+
+// ---------------------------------------------------------------- movement
+function applyMovement(dt) {
+  var sp = moveSpeed() * (keys["shift"] ? 3.0 : 1.0);
+  var f = forwardVec(), r = rightVec(), d = [0, 0, 0];
+  if (keys["w"]) { d[0]+=f[0]; d[1]+=f[1]; d[2]+=f[2]; }
+  if (keys["s"]) { d[0]-=f[0]; d[1]-=f[1]; d[2]-=f[2]; }
+  if (keys["d"]) { d[0]+=r[0]; d[2]+=r[2]; }
+  if (keys["a"]) { d[0]-=r[0]; d[2]-=r[2]; }
+  if (keys["e"]) { d[1]+=1; }
+  if (keys["q"]) { d[1]-=1; }
+  var len = Math.hypot(d[0], d[1], d[2]);
+  if (len > 0) { d[0]=d[0]/len*sp; d[1]=d[1]/len*sp; d[2]=d[2]/len*sp; }
+  // ease velocity toward target so starts/stops are smooth, not jerky
+  var k = Math.min(1, dt * 9);
+  vel[0]+=(d[0]-vel[0])*k; vel[1]+=(d[1]-vel[1])*k; vel[2]+=(d[2]-vel[2])*k;
+  cam.pos[0]+=vel[0]*dt; cam.pos[1]+=vel[1]*dt; cam.pos[2]+=vel[2]*dt;
+}
+function applyLook(dx, dy) {
+  cam.yaw += dx * lookRad();
+  cam.pitch -= dy * lookRad();
+  if (cam.pitch > PITCH_LIMIT) cam.pitch = PITCH_LIMIT;
+  if (cam.pitch < -PITCH_LIMIT) cam.pitch = -PITCH_LIMIT;
 }
 
 // ---------------------------------------------------------------- render
@@ -257,16 +281,21 @@ function resize() {
   var w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
 }
-function frame() {
+function frame(now) {
+  var t = (typeof now === "number") ? now : 0;
+  var dt = prevT ? Math.min(0.05, (t - prevT) / 1000) : 0.016;
+  prevT = t;
+  applyMovement(dt);
   resize();
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (groups.length > 0) {
     var aspect = canvas.width / Math.max(1, canvas.height);
-    var eye = cameraPos();
-    var proj = perspective(50 * Math.PI / 180, aspect,
-                           Math.max(0.01, cam.dist * 0.01), cam.dist * 10 + 100);
-    var mvp = multiply(proj, lookAt(eye, cam.target, [0, 1, 0]));
+    var eye = cam.pos, fwd = forwardVec();
+    var near = bounds ? Math.max(0.02, bounds.radius * 0.002) : 0.1;
+    var far = bounds ? bounds.radius * 8 + 100 : 1000;
+    var mvp = multiply(perspective(60 * Math.PI / 180, aspect, near, far),
+                       lookAt(eye, [eye[0]+fwd[0], eye[1]+fwd[1], eye[2]+fwd[2]], [0, 1, 0]));
     gl.uniformMatrix4fv(loc.uMVP, false, new Float32Array(mvp));
     gl.uniform3fv(loc.uCameraPos, new Float32Array(eye));
     for (var i = 0; i < groups.length; i++) {
@@ -282,22 +311,47 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
-// ---------------------------------------------------------------- orbit
-canvas.addEventListener("mousedown", function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+// ---------------------------------------------------------------- input
+function refreshTuner() {
+  spSpeedV.textContent = parseFloat(spSpeed.value).toFixed(1) + " m/s";
+  spLookV.textContent = parseFloat(spLook.value).toFixed(2);
+}
+spSpeed.addEventListener("input", refreshTuner);
+spLook.addEventListener("input", refreshTuner);
+
+canvas.addEventListener("mousedown", function (e) {
+  if (!locked) { dragging = true; lastX = e.clientX; lastY = e.clientY; }
+});
 window.addEventListener("mouseup", function () { dragging = false; });
 window.addEventListener("mousemove", function (e) {
-  if (!dragging) return;
-  cam.az -= (e.clientX - lastX) * 0.01;
-  cam.el += (e.clientY - lastY) * 0.01;
-  var lim = Math.PI / 2 - 0.05;
-  if (cam.el > lim) cam.el = lim; if (cam.el < -lim) cam.el = -lim;
-  lastX = e.clientX; lastY = e.clientY;
+  if (locked) { applyLook(e.movementX || 0, e.movementY || 0); }
+  else if (dragging) { applyLook(e.clientX - lastX, e.clientY - lastY); lastX = e.clientX; lastY = e.clientY; }
 });
 canvas.addEventListener("wheel", function (e) {
   e.preventDefault();
-  cam.dist *= (e.deltaY > 0) ? 1.1 : 0.9;
-  if (bounds && cam.dist < bounds.radius * 0.02) cam.dist = bounds.radius * 0.02;
+  // dolly forward/back along the look direction
+  var f = forwardVec(), step = (bounds ? bounds.radius * 0.04 : 1) * (e.deltaY < 0 ? 1 : -1);
+  cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step;
 }, { passive: false });
+
+document.addEventListener("pointerlockchange", function () {
+  locked = (document.pointerLockElement === canvas);
+});
+window.addEventListener("keydown", function (e) {
+  var k = e.key.toLowerCase();
+  if (k === "f") {
+    if (locked) document.exitPointerLock();
+    else if (canvas.requestPointerLock) canvas.requestPointerLock();
+    e.preventDefault(); return;
+  }
+  if (k === "shift") { keys["shift"] = true; return; }
+  if ("wasdqe".indexOf(k) >= 0) { keys[k] = true; e.preventDefault(); }
+});
+window.addEventListener("keyup", function (e) {
+  var k = e.key.toLowerCase();
+  keys[k === "shift" ? "shift" : k] = false;
+});
+window.addEventListener("blur", function () { keys = {}; dragging = false; });
 
 // ---------------------------------------------------------------- bootstrap
 function b64ToBuffer(b64) {
@@ -309,27 +363,21 @@ function loadModelFromUrl(url) {
   hint.style.display = "block"; hint.textContent = "Loading model...";
   fetch(url).then(function (r) { return r.arrayBuffer(); })
     .then(function (buf) { loadModel(buf); })
-    .catch(function (err) {
-      hint.style.display = "block";
-      hint.textContent = "Failed to load model: " + (err && err.message ? err.message : err);
-    });
+    .catch(function (err) { hint.style.display = "block"; hint.textContent = "Failed to load model: " + (err && err.message ? err.message : err); });
 }
 
 if (!gl) {
   hint.textContent = "WebGL is not available in this panel.";
 } else {
   setupGL();
+  refreshTuner();
   requestAnimationFrame(frame);
   if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener("message", function (e) {
       try {
         var data = e.data;
-        if (typeof data === "string" && data.indexOf("http") === 0) {
-          loadModelFromUrl(data);                 // streamed: a model URL
-        } else {
-          hint.style.display = "block"; hint.textContent = "Loading model...";
-          loadModel(b64ToBuffer(data));           // small: inline base64
-        }
+        if (typeof data === "string" && data.indexOf("http") === 0) loadModelFromUrl(data);
+        else { hint.style.display = "block"; hint.textContent = "Loading model..."; loadModel(b64ToBuffer(data)); }
       } catch (err) {
         hint.style.display = "block";
         hint.textContent = "Failed to load model: " + (err && err.message ? err.message : err);

@@ -149,8 +149,9 @@ class ViewerForm(forms.WPFWindow):
         self._vhost_ok = False     # True once the virtual host is mapped
         self._model_version = 0     # cache-buster for re-exports
 
-        self.btn_close.Click  += self._on_close
-        self.btn_export.Click += self._on_export
+        self.btn_close.Click     += self._on_close
+        self.btn_export.Click    += self._on_export
+        self.btn_load_last.Click += self._on_load_last
 
         # Attach the web panel after the window is laid out, so the host
         # Border has a real size for WebView2 to initialize into.
@@ -347,6 +348,26 @@ class ViewerForm(forms.WPFWindow):
             os.startfile(os.path.dirname(path))
         except Exception:
             pass
+
+    def _on_load_last(self, sender, args):
+        """Load the most recent export for this document without re-exporting."""
+        from pyrevit import revit
+        doc = revit.doc
+        if doc is None:
+            dbhms_ui.info("No active Revit document.", title='3D Viewer')
+            return
+        path = self._export_path(doc)
+        if not os.path.isfile(path):
+            dbhms_ui.info(
+                "No previous export found for this model.\n\nRun "
+                "Export & Load Model first.", title='3D Viewer')
+            return
+        if self._load_into_panel(path):
+            self.txt_status.Text = "Loading last export. Drag to look, WASD to fly."
+        else:
+            dbhms_ui.info(
+                "The 3D panel isn't ready yet. Give it a moment after opening "
+                "the tool, then try again.", title='3D Viewer')
 
     def _load_into_panel(self, path):
         """Tell the panel to load the exported .glb. With the virtual host

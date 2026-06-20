@@ -97,12 +97,16 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Model" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Export the Revit model once, then fly through it here. The export step arrives in the next phase."
+                            <TextBlock Text="Export the Revit model once, then fly through it here. WASD to fly, Q/E down/up, drag to look, scroll to zoom."
                                        Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
                             <Button x:Name="btn_export" Content="Export &amp; Load Model"
                                     Style="{StaticResource PrimaryButton}"
                                     HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0" Padding="14,8"/>
+                                    MinWidth="0" Margin="0,0,0,6" Padding="14,8"/>
+                            <Button x:Name="btn_load_last" Content="Load Last Export"
+                                    Style="{StaticResource SecondaryButton}"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                    MinWidth="0" Margin="0" Padding="12,6"/>
                         </StackPanel>
                     </Border>
 
