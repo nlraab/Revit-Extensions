@@ -42,6 +42,29 @@ _DISCIPLINE_COLOR = {
 }
 _DEFAULT_COLOR = (0.70, 0.72, 0.74)
 
+# Tessellation level of detail per source, 0 (coarsest) .. 1 (finest). The
+# host MEP stays full detail (you need real pipe/duct geometry for clash
+# review); linked arch/structural models are spatial context, so they get
+# medium detail - far fewer triangles, much faster, smaller file.
+_HOST_TRI_LEVEL = 1.0
+_LINK_TRI_LEVEL = 0.5
+
+# Set once on first tessellation: True if MeshTriangle exposes vertex indices
+# (the fast, compact indexed path), False to fall back to non-indexed.
+_TRIANGLE_INDEX_SUPPORTED = None
+
+
+def _make_options(detail):
+    from Autodesk.Revit.DB import Options
+    o = Options()
+    try:
+        o.ComputeReferences = False
+        o.IncludeNonVisibleObjects = False
+        o.DetailLevel = detail
+    except Exception:
+        pass
+    return o
+
 
 def export_model(doc, out_path, view=None, max_elements=120000,
                  max_triangles=8000000, include_links=True):
@@ -55,7 +78,7 @@ def export_model(doc, out_path, view=None, max_elements=120000,
     Returns {"path", "asset_extras", "stats"} where stats includes
     host_elements, link_elements, triangles, models, bytes, capped.
     """
-    from Autodesk.Revit.DB import Options, ViewDetailLevel
+    from Autodesk.Revit.DB import ViewDetailLevel
     from clash_export.gltf import GlbWriter
 
     # Gather elements per source (host + each link), each capped, then
@@ -65,13 +88,9 @@ def export_model(doc, out_path, view=None, max_elements=120000,
     ordered = _round_robin(source_lists)
     offset = _slice_offset(ordered)
 
-    opts = Options()
-    try:
-        opts.ComputeReferences = False
-        opts.IncludeNonVisibleObjects = False
-        opts.DetailLevel = ViewDetailLevel.Fine
-    except Exception:
-        pass
+    # MEP host at fine detail, linked context at medium.
+    opts_host = _make_options(ViewDetailLevel.Fine)
+    opts_link = _make_options(ViewDetailLevel.Medium)
 
     asset_extras = {
         "generator": "dbHMS 3D Viewer",
@@ -92,10 +111,12 @@ def export_model(doc, out_path, view=None, max_elements=120000,
             if total_tris >= max_triangles:
                 capped = True
                 break
-            transform = None
-            if link is not None:
+            if link is None:
+                opts, tri_level, transform = opts_host, _HOST_TRI_LEVEL, None
+            else:
+                opts, tri_level = opts_link, _LINK_TRI_LEVEL
                 transform = _safe(lambda: link.GetTotalTransform(), None)
-            mesh = _element_to_mesh(el, opts, offset, transform)
+            mesh = _element_to_mesh(el, opts, offset, transform, tri_level)
             if mesh is None:
                 continue
             writer.add(mesh)
@@ -239,16 +260,18 @@ def _slice_offset(ordered):
 # Geometry -> Mesh
 # ---------------------------------------------------------------------------
 
-def _element_to_mesh(el, opts, offset, transform=None):
+def _element_to_mesh(el, opts, offset, transform, tri_level):
     solids = _solids_for_element(el, opts)
     if not solids:
         return None
     positions = []
+    indices = []
     for solid in solids:
-        _triangulate_solid_into(solid, offset, positions, transform)
-    if not positions:
+        _triangulate_solid_into(solid, offset, transform, tri_level,
+                                positions, indices)
+    if not positions or not indices:
         return None
-    return Mesh(positions=positions, indices=None,
+    return Mesh(positions=positions, indices=indices,
                 color=_color_for_element(el),
                 metadata=_metadata_for_element(el))
 
@@ -284,10 +307,21 @@ def _collect_solids(geom, out):
                 _collect_solids(inst, out)
 
 
-def _triangulate_solid_into(solid, offset, positions, transform=None):
-    """Triangulate every face of `solid` and append world-space vertices
-    (link-transformed to host coords if `transform` is given, then converted
-    to glTF meters / Y-up) to `positions`."""
+def _triangulate_solid_into(solid, offset, transform, tri_level,
+                            positions, indices):
+    """Triangulate every face of `solid` into INDEXED geometry appended to
+    `positions` + `indices`.
+
+    Each face's unique vertices are transformed once (link -> host if a
+    transform is given, feet -> glTF meters, Z-up -> Y-up) and triangles
+    reference them by index. Indexing both shrinks the file and cuts work
+    (one transform per unique vertex instead of three per triangle).
+
+    Probes once whether MeshTriangle exposes vertex indices; if not, falls
+    back to a non-indexed expansion so the export still succeeds (just
+    larger) on API variants that don't.
+    """
+    global _TRIANGLE_INDEX_SUPPORTED
     try:
         faces = solid.Faces
     except Exception:
@@ -295,7 +329,7 @@ def _triangulate_solid_into(solid, offset, positions, transform=None):
     ox, oy, oz = offset
     for face in faces:
         try:
-            mesh = face.Triangulate()
+            mesh = face.Triangulate(tri_level)
         except Exception:
             continue
         if mesh is None:
@@ -304,15 +338,25 @@ def _triangulate_solid_into(solid, offset, positions, transform=None):
             ntri = mesh.NumTriangles
         except Exception:
             continue
-        for i in range(ntri):
+        if ntri <= 0:
+            continue
+
+        if _TRIANGLE_INDEX_SUPPORTED is None:
             try:
-                tri = mesh.get_Triangle(i)
-                v0 = tri.get_Vertex(0)
-                v1 = tri.get_Vertex(1)
-                v2 = tri.get_Vertex(2)
+                mesh.get_Triangle(0).get_Index(0)
+                _TRIANGLE_INDEX_SUPPORTED = True
+            except Exception:
+                _TRIANGLE_INDEX_SUPPORTED = False
+
+        if _TRIANGLE_INDEX_SUPPORTED:
+            try:
+                verts = mesh.Vertices
+                nverts = verts.Count
             except Exception:
                 continue
-            for v in (v0, v1, v2):
+            base = len(positions) // 3
+            for vi in range(nverts):
+                v = verts[vi]
                 if transform is not None:
                     v = transform.OfPoint(v)   # link-local -> host
                 mx = (v.X - ox) * FT_TO_M
@@ -322,6 +366,32 @@ def _triangulate_solid_into(solid, offset, positions, transform=None):
                 positions.append(mx)
                 positions.append(mz)
                 positions.append(-my)
+            for i in range(ntri):
+                try:
+                    tri = mesh.get_Triangle(i)
+                    indices.append(base + int(tri.get_Index(0)))
+                    indices.append(base + int(tri.get_Index(1)))
+                    indices.append(base + int(tri.get_Index(2)))
+                except Exception:
+                    continue
+        else:
+            for i in range(ntri):
+                try:
+                    tri = mesh.get_Triangle(i)
+                    verts3 = (tri.get_Vertex(0), tri.get_Vertex(1),
+                              tri.get_Vertex(2))
+                except Exception:
+                    continue
+                for v in verts3:
+                    if transform is not None:
+                        v = transform.OfPoint(v)
+                    mx = (v.X - ox) * FT_TO_M
+                    my = (v.Y - oy) * FT_TO_M
+                    mz = (v.Z - oz) * FT_TO_M
+                    indices.append(len(positions) // 3)
+                    positions.append(mx)
+                    positions.append(mz)
+                    positions.append(-my)
 
 
 # ---------------------------------------------------------------------------
