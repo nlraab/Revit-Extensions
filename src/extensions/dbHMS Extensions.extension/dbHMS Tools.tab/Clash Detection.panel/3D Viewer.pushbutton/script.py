@@ -33,6 +33,7 @@ __doc__    = ('dbHMS 3D model viewer. Phase 1: proves the embedded WebGL '
 
 import base64
 import os
+import shutil
 import time
 import traceback
 
@@ -59,21 +60,54 @@ from clash_export import revit_geometry
 
 SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'ViewerForm.xaml')
-WEB_INDEX  = os.path.join(SCRIPT_DIR, 'web', 'index.html')
+WEB_DIR    = os.path.join(SCRIPT_DIR, 'web')
+WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')
+
+# Writable runtime root. We serve the viewer + exported models from here
+# through a WebView2 virtual host so the panel can fetch large model files
+# (the base64 message channel maxes out around 25 MB). The app assets are
+# copied in from WEB_DIR on launch; models are written under models/.
+_DATA_ROOT = os.path.join(
+    os.environ.get('LOCALAPPDATA') or os.environ.get('TEMP') or SCRIPT_DIR,
+    'dbHMS', '3DViewer')
+APP_DIR    = os.path.join(_DATA_ROOT, 'app')
+MODELS_DIR = os.path.join(_DATA_ROOT, 'models')
+VHOST      = 'dbhms.viewer'   # virtual hostname mapped to _DATA_ROOT
 
 # WebView2 assemblies we need from Revit's install directory.
 _WEBVIEW2_WPF  = 'Microsoft.Web.WebView2.Wpf.dll'
 _WEBVIEW2_CORE = 'Microsoft.Web.WebView2.Core.dll'
 
+LOG_PATH = os.path.join(_DATA_ROOT, 'viewer.log')
+
+
+def _log(msg):
+    """Append a timestamped line to the viewer log. Best-effort; never raises."""
+    try:
+        if not os.path.isdir(_DATA_ROOT):
+            os.makedirs(_DATA_ROOT)
+        from datetime import datetime
+        with open(LOG_PATH, 'a') as f:
+            f.write("{0} {1}\n".format(
+                datetime.now().strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
 
 def _safe_title(doc):
-    """Sanitize the document title into a filename-safe stem."""
+    """Sanitize the document title into a filename-safe, URL-safe stem
+    (spaces become underscores so it needs no URL escaping)."""
     try:
         title = doc.Title or 'model'
     except Exception:
         title = 'model'
-    keep = [c for c in title if c.isalnum() or c in (' ', '_', '-')]
-    return ''.join(keep).strip() or 'model'
+    keep = []
+    for c in title:
+        if c.isalnum() or c in ('_', '-'):
+            keep.append(c)
+        elif c == ' ':
+            keep.append('_')
+    return ''.join(keep).strip('_') or 'model'
 
 
 def _revit_dir_with_webview2():
@@ -112,6 +146,8 @@ class ViewerForm(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, FORM_XAML)
         self._webview = None
+        self._vhost_ok = False     # True once the virtual host is mapped
+        self._model_version = 0     # cache-buster for re-exports
 
         self.btn_close.Click  += self._on_close
         self.btn_export.Click += self._on_export
@@ -139,35 +175,75 @@ class ViewerForm(forms.WPFWindow):
             return
         try:
             from Microsoft.Web.WebView2.Wpf import CoreWebView2CreationProperties
+            self._sync_app_assets()
             wv = WebView2()
             # WebView2 writes a cache/user-data folder; default sits next to
             # the host exe (Program Files, read-only). Point it somewhere
             # writable so initialization can't fail on permissions.
             props = CoreWebView2CreationProperties()
-            base = os.environ.get('LOCALAPPDATA') or os.environ.get('TEMP') or SCRIPT_DIR
-            props.UserDataFolder = os.path.join(base, 'dbHMS', '3DViewer', 'WebView2')
+            props.UserDataFolder = os.path.join(_DATA_ROOT, 'WebView2')
             wv.CreationProperties = props
-            # Surface async init failures (missing Evergreen runtime, locked
-            # user-data folder, etc.) instead of leaving a blank panel.
             wv.CoreWebView2InitializationCompleted += self._on_webview_init
             self.brd_viewport.Child = wv
             self._webview = wv
-            # Setting Source kicks off implicit initialization and navigates
-            # to our local page once the core is ready.
+            # Setting Source triggers core init (the proven path); once the
+            # core is ready we upgrade to the virtual host + navigate in
+            # _on_webview_init so large models can be fetched.
             wv.Source = System.Uri(WEB_INDEX)
+            _log("attach_viewer: webview created, Source set (file://)")
         except Exception:
+            _log("attach_viewer: EXCEPTION\n{}".format(traceback.format_exc()))
             self._show_viewport_message(
                 "The 3D panel failed to start:\n\n{}".format(traceback.format_exc()))
 
-    def _on_webview_init(self, sender, args):
-        # args.IsSuccess is False if the WebView2 core couldn't start.
+    def _sync_app_assets(self):
+        """Copy the viewer's web assets into the served app folder so the
+        virtual host can serve them (and models) from one origin."""
         try:
-            if not args.IsSuccess:
+            if not os.path.isdir(APP_DIR):
+                os.makedirs(APP_DIR)
+            n = 0
+            for name in os.listdir(WEB_DIR):
+                src = os.path.join(WEB_DIR, name)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(APP_DIR, name))
+                    n += 1
+            _log("sync_app_assets: copied {0} file(s) to {1}".format(n, APP_DIR))
+        except Exception:
+            _log("sync_app_assets: EXCEPTION\n{}".format(traceback.format_exc()))
+
+    def _on_webview_init(self, sender, args):
+        try:
+            ok = args.IsSuccess
+            _log("init: IsSuccess={0}".format(ok))
+            if not ok:
                 self._show_viewport_message(
                     "WebView2 failed to initialize:\n\n{}".format(
                         args.InitializationException))
+                return
+            core = self._webview.CoreWebView2
+            # Resolve the access-kind enum from the SAME assembly instance the
+            # core object came from. Importing the type directly can bind to a
+            # different loaded copy of WebView2.Core (Revit/Dynamo also load
+            # it), producing the IronPython "expected X, got X" identity error.
+            ak_type = core.GetType().Assembly.GetType(
+                "Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind")
+            allow = System.Enum.Parse(ak_type, "Allow")
+            app_index = os.path.join(APP_DIR, 'index.html')
+            if os.path.isfile(app_index):
+                # Serve _DATA_ROOT (app/ + models/) under one https origin so
+                # the page can fetch large model files past the message limit.
+                core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
+                core.Navigate("https://{0}/app/index.html".format(VHOST))
+                self._vhost_ok = True
+                _log("init: vhost mapped to {0}, navigated".format(_DATA_ROOT))
+            else:
+                _log("init: app index missing at {0}, staying on file://"
+                     .format(app_index))
         except Exception:
-            pass
+            # Virtual host unavailable: stay on the local file. Small models
+            # still load via the base64 path.
+            _log("init: vhost EXCEPTION\n{}".format(traceback.format_exc()))
 
     def _show_viewport_message(self, msg):
         """Replace the viewport content with a readable message (used when
@@ -242,11 +318,13 @@ class ViewerForm(forms.WPFWindow):
         cap = (" Hit the safety ceiling, so this is a partial export."
                if stats.get("capped") else "")
 
-        # The base64 hand-off is fine up to a point; beyond that the model is
-        # saved to disk and streaming it into the panel is the performance
-        # phase. Keep the limit conservative.
-        load_limit = 25 * 1024 * 1024
-        if size_bytes <= load_limit and self._load_into_panel(path):
+        # With the virtual host active the panel fetches the file directly, so
+        # any size can load. Without it (fallback) we're on the base64 message
+        # channel, which maxes out around 25 MB.
+        _log("export done: bytes={0}, vhost_ok={1}".format(
+            size_bytes, self._vhost_ok))
+        can_load = self._vhost_ok or size_bytes <= 25 * 1024 * 1024
+        if can_load and self._load_into_panel(path):
             self.txt_status.Text = (
                 "Loaded {0} host + {1} linked elements, {2:,} triangles, "
                 "{3:.1f} MB in {4:.1f}s. Drag to orbit, scroll to zoom.".format(
@@ -258,12 +336,11 @@ class ViewerForm(forms.WPFWindow):
             "{3:.1f} MB in {4:.1f}s.".format(
                 host_n, link_n, stats["triangles"], size_mb, seconds))
         dbhms_ui.info(
-            "Exported the full model to glTF (.glb).\n\n"
+            "Exported the full model to glTF (.glb), but the 3D panel "
+            "wasn't available to display it (the viewer engine may not have "
+            "started). It's saved to disk.\n\n"
             "Host elements: {0}\nLinked elements: {1}\nTriangles: {2:,}\n"
-            "File size: {3:.1f} MB\nTime: {4:.1f}s{5}\n\n"
-            "This file is larger than the in-panel loader handles today, so "
-            "it's saved to disk. Streaming big models into the panel is the "
-            "performance phase.\n\nFile:\n{6}".format(
+            "File size: {3:.1f} MB\nTime: {4:.1f}s{5}\n\nFile:\n{6}".format(
                 host_n, link_n, stats["triangles"], size_mb, seconds, cap, path),
             title='3D Viewer - exported')
         try:
@@ -272,32 +349,42 @@ class ViewerForm(forms.WPFWindow):
             pass
 
     def _load_into_panel(self, path):
-        """Hand the exported .glb to the WebView2 panel as base64 (the page
-        decodes + renders it). Returns False if the panel isn't ready."""
+        """Tell the panel to load the exported .glb. With the virtual host
+        active, post a model URL the page fetches (handles any size). Without
+        it, fall back to base64 over the message channel (small models only).
+        Returns False if the panel isn't ready."""
         try:
             wv = self._webview
             if wv is None or wv.CoreWebView2 is None:
+                _log("load_into_panel: core not ready (vhost_ok={0})".format(
+                    self._vhost_ok))
                 return False
+            self._model_version += 1
+            if self._vhost_ok:
+                url = "https://{0}/models/{1}?v={2}".format(
+                    VHOST, os.path.basename(path), self._model_version)
+                wv.CoreWebView2.PostWebMessageAsString(url)
+                _log("load_into_panel: posted URL {0}".format(url))
+                return True
             with open(path, 'rb') as f:
                 data = f.read()
             b64 = base64.b64encode(data)
             if isinstance(b64, bytes):
                 b64 = b64.decode('ascii')
             wv.CoreWebView2.PostWebMessageAsString(b64)
+            _log("load_into_panel: posted base64 ({0} bytes)".format(len(data)))
             return True
         except Exception:
+            _log("load_into_panel: EXCEPTION\n{0}".format(traceback.format_exc()))
             return False
 
     def _export_path(self, doc):
-        base = (os.environ.get('LOCALAPPDATA')
-                or os.environ.get('TEMP') or SCRIPT_DIR)
-        out_dir = os.path.join(base, 'dbHMS', '3DViewer', 'models')
         try:
-            if not os.path.isdir(out_dir):
-                os.makedirs(out_dir)
+            if not os.path.isdir(MODELS_DIR):
+                os.makedirs(MODELS_DIR)
         except Exception:
-            out_dir = base
-        return os.path.join(out_dir, _safe_title(doc) + '.glb')
+            pass
+        return os.path.join(MODELS_DIR, _safe_title(doc) + '.glb')
 
     def _on_close(self, sender, args):
         try:
