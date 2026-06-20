@@ -1,8 +1,8 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="dbHMS 3D Viewer"
-        Height="780" Width="1120"
-        MinHeight="640" MinWidth="900"
+        Height="820" Width="1200"
+        MinHeight="640" MinWidth="940"
         WindowStartupLocation="CenterScreen"
         Background="#F7FAFC"
         FontFamily="Segoe UI" FontSize="12"
@@ -45,6 +45,9 @@
         <Style TargetType="CheckBox">
             <Setter Property="Margin" Value="0,3,0,3"/><Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Padding" Value="6,4"/><Setter Property="Height" Value="26"/>
+        </Style>
     </Window.Resources>
 
     <DockPanel>
@@ -64,40 +67,44 @@
             </Grid>
         </Border>
 
-        <!-- Footer: status + actions -->
+        <!-- Footer: status + presentation actions -->
         <Border DockPanel.Dock="Bottom" Background="White"
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
             <Grid>
-                <TextBlock x:Name="txt_status"
-                           Text="Phase 1: proving the 3D panel. You should see a spinning cube on the right."
+                <TextBlock x:Name="txt_status" Text="Open a 3D view, then Export &amp; Load Model."
                            Foreground="#4A5568" VerticalAlignment="Center" FontStyle="Italic"
                            HorizontalAlignment="Left"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_open_browser" Content="Open in Browser"
                             Style="{StaticResource SecondaryButton}" IsEnabled="False"
-                            ToolTip="Coming in a later phase: open this viewer in a plain browser for PMs and contractors."/>
+                            ToolTip="Coming soon: open this viewer in a plain browser to share with PMs / contractors."/>
+                    <Button x:Name="btn_popout" Content="Pop Out Render"
+                            Style="{StaticResource SecondaryButton}"
+                            ToolTip="Move the 3D view into its own window for a second screen."/>
+                    <Button x:Name="btn_fullscreen" Content="Full Screen"
+                            Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                            ToolTip="Make the popped-out render fill the screen for sharing."/>
                     <Button x:Name="btn_close" Content="Close" Style="{StaticResource SecondaryButton}"/>
                 </StackPanel>
             </Grid>
         </Border>
 
-        <!-- Body: controls (left) + 3D panel (right) -->
+        <!-- Body: settings (left) + render host (right) -->
         <Grid Margin="20,16,20,16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="320" MinWidth="280"/>
+                <ColumnDefinition Width="340" MinWidth="300"/>
                 <ColumnDefinition Width="16"/>
                 <ColumnDefinition Width="*" MinWidth="420"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Left column: controls (mostly placeholders this phase) -->
             <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel>
 
-                    <!-- Model -->
+                    <!-- Model & export -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Model" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Export the Revit model once, then fly through it here. WASD to fly, Q/E down/up, drag to look, scroll to zoom."
+                            <TextBlock Text="Export the Revit model once, then fly through it here."
                                        Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
                             <Button x:Name="btn_export" Content="Export &amp; Load Model"
                                     Style="{StaticResource PrimaryButton}"
@@ -106,16 +113,58 @@
                             <Button x:Name="btn_load_last" Content="Load Last Export"
                                     Style="{StaticResource SecondaryButton}"
                                     HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0" Padding="12,6"/>
+                                    MinWidth="0" Margin="0,0,0,8" Padding="12,6"/>
+                            <TextBlock Text="Export scope" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="cmb_scope" IsEnabled="False">
+                                <ComboBoxItem Content="Whole model + links" IsSelected="True"/>
+                                <ComboBoxItem Content="Active view only"/>
+                            </ComboBox>
+                            <TextBlock x:Name="txt_stats" Text="No model loaded yet."
+                                       Style="{StaticResource HelperText}" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
 
-                    <!-- Disciplines (wired in a later phase) -->
+                    <!-- Navigation -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
-                            <TextBlock Text="Disciplines" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Instant show / hide. Activates once a model is loaded."
+                            <TextBlock Text="Navigation" Style="{StaticResource SectionHeader}"/>
+                            <Grid Margin="0,0,0,2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Speed" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                <Slider Grid.Column="1" x:Name="sl_speed" Minimum="0.3" Maximum="30" Value="4"
+                                        TickFrequency="0.1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="2" x:Name="txt_speed_val" Text="4.0 m/s"
+                                           VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
+                            </Grid>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Look" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                <Slider Grid.Column="1" x:Name="sl_look" Minimum="0.02" Maximum="0.40" Value="0.10"
+                                        TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="2" x:Name="txt_look_val" Text="0.10"
+                                           VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
+                            </Grid>
+                            <CheckBox x:Name="chk_invert_look" Content="Invert look (Y)" IsEnabled="False" Margin="0,6,0,0"/>
+                            <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8" Margin="0,8,0,0">
+                                <TextBlock Style="{StaticResource HelperText}">
+                                    <Run Text="Right-drag" FontWeight="Bold"/><Run Text=" look · "/><Run Text="Middle-drag" FontWeight="Bold"/><Run Text=" pan · "/><Run Text="Scroll" FontWeight="Bold"/><Run Text=" zoom · "/><Run Text="F" FontWeight="Bold"/><Run Text=" mouselook · "/><Run Text="WASD" FontWeight="Bold"/><Run Text=" fly · "/><Run Text="Q/E" FontWeight="Bold"/><Run Text=" down/up · "/><Run Text="Shift" FontWeight="Bold"/><Run Text=" faster · "/><Run Text="Left-click" FontWeight="Bold"/><Run Text=" select (soon)"/>
+                                </TextBlock>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Visibility -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Visibility" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Instant show / hide. Wires up in a later phase; everything exports so you toggle here, never re-export."
                                        Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
+                            <TextBlock Text="Disciplines" Style="{StaticResource FieldLabel}"/>
                             <StackPanel IsEnabled="False">
                                 <CheckBox x:Name="chk_vis_mechanical"     Content="Mechanical"      IsChecked="True"/>
                                 <CheckBox x:Name="chk_vis_electrical"     Content="Electrical"      IsChecked="True"/>
@@ -124,28 +173,114 @@
                                 <CheckBox x:Name="chk_vis_architectural"  Content="Architectural"   IsChecked="True"/>
                                 <CheckBox x:Name="chk_vis_structural"     Content="Structural"      IsChecked="True"/>
                             </StackPanel>
+                            <TextBlock Text="Categories" Style="{StaticResource FieldLabel}"/>
+                            <Border x:Name="brd_categories" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads, each with an on/off toggle."/>
+                            </Border>
+                            <TextBlock Text="Worksets" Style="{StaticResource FieldLabel}"/>
+                            <Border x:Name="brd_worksets" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads."/>
+                            </Border>
+                            <TextBlock Text="Linked models" Style="{StaticResource FieldLabel}"/>
+                            <Border x:Name="brd_links" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads."/>
+                            </Border>
+                            <TextBlock Text="Levels" Style="{StaticResource FieldLabel}"/>
+                            <Border x:Name="brd_levels" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads; isolate or hide by level."/>
+                            </Border>
                         </StackPanel>
                     </Border>
 
-                    <!-- Categories / Worksets placeholder -->
+                    <!-- Appearance -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
-                            <TextBlock Text="Categories &amp; Worksets" Style="{StaticResource SectionHeader}"/>
-                            <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}"
-                                           Text="The model's categories and worksets will list here after export, each with an instant on/off toggle. The viewer keeps every element tagged, so toggling never touches Revit."/>
-                            </Border>
+                            <TextBlock Text="Appearance" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Background" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="cmb_background" IsEnabled="False">
+                                <ComboBoxItem Content="Dark" IsSelected="True"/>
+                                <ComboBoxItem Content="Light"/>
+                            </ComboBox>
+                            <TextBlock Text="Color elements by" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="cmb_color_by" IsEnabled="False">
+                                <ComboBoxItem Content="Discipline" IsSelected="True"/>
+                                <ComboBoxItem Content="Category"/>
+                                <ComboBoxItem Content="Material"/>
+                                <ComboBoxItem Content="Clash status"/>
+                            </ComboBox>
+                            <CheckBox x:Name="chk_edges" Content="Show edges" IsEnabled="False" Margin="0,8,0,0"/>
+                            <CheckBox x:Name="chk_section_box" Content="Section box" IsEnabled="False"/>
+                            <TextBlock Text="Environment (coming)" Style="{StaticResource FieldLabel}"/>
+                            <StackPanel IsEnabled="False">
+                                <TextBlock Text="Time of day" Style="{StaticResource HelperText}"/>
+                                <Slider x:Name="sl_time_of_day" Minimum="0" Maximum="24" Value="12"/>
+                                <TextBlock Text="Sun strength" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                <Slider x:Name="sl_sun_strength" Minimum="0" Maximum="100" Value="70"/>
+                                <TextBlock Text="Sun direction" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                <Slider x:Name="sl_sun_direction" Minimum="0" Maximum="360" Value="135"/>
+                                <TextBlock Text="Sky" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                <ComboBox x:Name="cmb_sky">
+                                    <ComboBoxItem Content="Solid" IsSelected="True"/>
+                                    <ComboBoxItem Content="Gradient"/>
+                                    <ComboBoxItem Content="Sky + horizon"/>
+                                </ComboBox>
+                                <TextBlock Text="Ground" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                <ComboBox x:Name="cmb_ground">
+                                    <ComboBoxItem Content="None" IsSelected="True"/>
+                                    <ComboBoxItem Content="Plane"/>
+                                    <ComboBoxItem Content="Grid"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Clashes -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Clashes" Style="{StaticResource SectionHeader}"/>
+                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsEnabled="False"/>
+                            <TextBlock Text="Clash list + jump-to-clash and color-by-status connect to the Clash Browser in a later phase."
+                                       Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Selection -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Selection" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Click an element (when not in F mouselook) to see its properties — id, category, family, type, level, workset, parameters — and choose what to show. Wires up in a later phase."
+                                       Style="{StaticResource HelperText}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Presentation -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Presentation" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Pop Out / Full Screen are in the footer. More below come later."
+                                       Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
+                            <Button x:Name="btn_screenshot" Content="Save Screenshot"
+                                    Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                    MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
+                            <Button x:Name="btn_saved_views" Content="Saved Views / Viewpoints"
+                                    Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                    MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
+                            <CheckBox x:Name="chk_minimap" Content="Floor-plan minimap" IsEnabled="False"/>
                         </StackPanel>
                     </Border>
 
                 </StackPanel>
             </ScrollViewer>
 
-            <!-- Right column: the 3D panel. WebView2 attaches to this Border. -->
+            <!-- Render host: WebView2 attaches here. Kept clean for sharing. -->
             <Border Grid.Column="2" x:Name="brd_viewport"
-                    Background="#1A202C" BorderBrush="#E2E8F0" BorderThickness="1"
-                    CornerRadius="4">
+                    Background="#1A202C" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="4">
                 <TextBlock Text="Loading 3D engine..." Foreground="#A0AEC0"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>

@@ -148,10 +148,17 @@ class ViewerForm(forms.WPFWindow):
         self._webview = None
         self._vhost_ok = False     # True once the virtual host is mapped
         self._model_version = 0     # cache-buster for re-exports
+        self._popout = None         # the pop-out render window, when detached
+        self._fs = False            # pop-out fullscreen state
 
-        self.btn_close.Click     += self._on_close
-        self.btn_export.Click    += self._on_export
-        self.btn_load_last.Click += self._on_load_last
+        self.btn_close.Click      += self._on_close
+        self.btn_export.Click     += self._on_export
+        self.btn_load_last.Click  += self._on_load_last
+        self.btn_popout.Click     += self._on_popout
+        self.btn_fullscreen.Click += self._on_fullscreen
+        self.sl_speed.ValueChanged += self._on_speed_changed
+        self.sl_look.ValueChanged  += self._on_look_changed
+        self._refresh_tuning_labels()
 
         # Attach the web panel after the window is laid out, so the host
         # Border has a real size for WebView2 to initialize into.
@@ -223,6 +230,13 @@ class ViewerForm(forms.WPFWindow):
                         args.InitializationException))
                 return
             core = self._webview.CoreWebView2
+            # Reverse channel: the page posts messages back (e.g. "escape" to
+            # drop full screen, element picks later).
+            try:
+                core.WebMessageReceived += self._on_web_message
+            except Exception:
+                _log("init: WebMessageReceived wire failed\n{0}".format(
+                    traceback.format_exc()))
             # Resolve the access-kind enum from the SAME assembly instance the
             # core object came from. Importing the type directly can bind to a
             # different loaded copy of WebView2.Core (Revit/Dynamo also load
@@ -324,12 +338,13 @@ class ViewerForm(forms.WPFWindow):
         # channel, which maxes out around 25 MB.
         _log("export done: bytes={0}, vhost_ok={1}".format(
             size_bytes, self._vhost_ok))
+        self.txt_stats.Text = (
+            "{0} host + {1} linked elements\n{2:,} triangles  -  {3:.1f} MB  -  "
+            "{4:.0f}s{5}".format(host_n, link_n, stats["triangles"], size_mb,
+                                 seconds, cap))
         can_load = self._vhost_ok or size_bytes <= 25 * 1024 * 1024
         if can_load and self._load_into_panel(path):
-            self.txt_status.Text = (
-                "Loaded {0} host + {1} linked elements, {2:,} triangles, "
-                "{3:.1f} MB in {4:.1f}s. Drag to orbit, scroll to zoom.".format(
-                    host_n, link_n, stats["triangles"], size_mb, seconds))
+            self.txt_status.Text = "Model loaded. Press F to fly, or drag to look."
             return
 
         self.txt_status.Text = (
@@ -363,7 +378,12 @@ class ViewerForm(forms.WPFWindow):
                 "Export & Load Model first.", title='3D Viewer')
             return
         if self._load_into_panel(path):
-            self.txt_status.Text = "Loading last export. Drag to look, WASD to fly."
+            try:
+                mb = os.path.getsize(path) / (1024.0 * 1024.0)
+                self.txt_stats.Text = "Loaded last export ({0:.1f} MB).".format(mb)
+            except Exception:
+                pass
+            self.txt_status.Text = "Model loaded. Press F to fly, or drag to look."
         else:
             dbhms_ui.info(
                 "The 3D panel isn't ready yet. Give it a moment after opening "
@@ -384,20 +404,194 @@ class ViewerForm(forms.WPFWindow):
             if self._vhost_ok:
                 url = "https://{0}/models/{1}?v={2}".format(
                     VHOST, os.path.basename(path), self._model_version)
-                wv.CoreWebView2.PostWebMessageAsString(url)
+                wv.CoreWebView2.PostWebMessageAsString("url:" + url)
                 _log("load_into_panel: posted URL {0}".format(url))
-                return True
-            with open(path, 'rb') as f:
-                data = f.read()
-            b64 = base64.b64encode(data)
-            if isinstance(b64, bytes):
-                b64 = b64.decode('ascii')
-            wv.CoreWebView2.PostWebMessageAsString(b64)
-            _log("load_into_panel: posted base64 ({0} bytes)".format(len(data)))
+            else:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                b64 = base64.b64encode(data)
+                if isinstance(b64, bytes):
+                    b64 = b64.decode('ascii')
+                wv.CoreWebView2.PostWebMessageAsString("b64:" + b64)
+                _log("load_into_panel: posted base64 ({0} bytes)".format(len(data)))
+            self._push_tuning()
             return True
         except Exception:
             _log("load_into_panel: EXCEPTION\n{0}".format(traceback.format_exc()))
             return False
+
+    # --- Navigation tuning (panel -> render) --------------------------
+
+    def _post(self, msg):
+        """Send a control message to the render page. Best-effort."""
+        try:
+            wv = self._webview
+            if wv is not None and wv.CoreWebView2 is not None:
+                wv.CoreWebView2.PostWebMessageAsString(msg)
+        except Exception:
+            pass
+
+    def _push_tuning(self):
+        """Push the current speed/look slider values to the render."""
+        try:
+            self._post("speed:{0:.2f}".format(self.sl_speed.Value))
+            self._post("look:{0:.3f}".format(self.sl_look.Value))
+        except Exception:
+            pass
+
+    def _refresh_tuning_labels(self):
+        try:
+            self.txt_speed_val.Text = "{0:.1f} m/s".format(self.sl_speed.Value)
+            self.txt_look_val.Text = "{0:.2f}".format(self.sl_look.Value)
+        except Exception:
+            pass
+
+    def _on_speed_changed(self, sender, args):
+        self.txt_speed_val.Text = "{0:.1f} m/s".format(self.sl_speed.Value)
+        self._post("speed:{0:.2f}".format(self.sl_speed.Value))
+
+    def _on_look_changed(self, sender, args):
+        self.txt_look_val.Text = "{0:.2f}".format(self.sl_look.Value)
+        self._post("look:{0:.3f}".format(self.sl_look.Value))
+
+    # --- Pop-out / full screen ----------------------------------------
+
+    def _on_popout(self, sender, args):
+        if self._popout is not None:
+            self._dock_render()
+        else:
+            self._pop_out_render()
+
+    def _pop_out_render(self):
+        """Move the render into its own window for a second screen."""
+        if self._webview is None:
+            return
+        from System.Windows import Window, WindowStartupLocation
+        try:
+            self.brd_viewport.Child = None
+            win = Window()
+            win.Title = "dbHMS 3D Viewer"
+            win.Width = 1280
+            win.Height = 800
+            win.WindowStartupLocation = WindowStartupLocation.CenterScreen
+            win.Background = SolidColorBrush(Color.FromRgb(0x1A, 0x20, 0x2C))
+            win.Content = self._webview
+            win.Closed += self._on_popout_closed
+            win.PreviewKeyDown += self._on_popout_key   # Esc backup (WPF focus)
+            self._popout = win
+            win.Show()
+            win.Activate()
+            self._show_viewport_message(
+                "Render is in its own window.\n\nDrag it to your share screen, "
+                "then click Full Screen. Click \"Dock Render\" to bring it back.")
+            self.btn_popout.Content = "Dock Render"
+            self.btn_fullscreen.IsEnabled = True
+        except Exception:
+            _log("pop_out: EXCEPTION\n{0}".format(traceback.format_exc()))
+            self._reclaim_webview()
+
+    def _dock_render(self):
+        win = self._popout
+        if win is None:
+            return
+        self._popout = None
+        try:
+            win.Closed -= self._on_popout_closed
+        except Exception:
+            pass
+        try:
+            win.Content = None
+        except Exception:
+            pass
+        self._reclaim_webview()
+        try:
+            win.Close()
+        except Exception:
+            pass
+        self._fs = False
+        self.btn_popout.Content = "Pop Out Render"
+        self.btn_fullscreen.Content = "Full Screen"
+        self.btn_fullscreen.IsEnabled = False
+
+    def _on_popout_closed(self, sender, args):
+        # User closed the pop-out window directly: bring the render home.
+        if self._popout is None:
+            return
+        try:
+            self._popout.Content = None
+        except Exception:
+            pass
+        self._popout = None
+        self._reclaim_webview()
+        self._fs = False
+        self.btn_popout.Content = "Pop Out Render"
+        self.btn_fullscreen.Content = "Full Screen"
+        self.btn_fullscreen.IsEnabled = False
+
+    def _reclaim_webview(self):
+        try:
+            if self._webview is not None:
+                self.brd_viewport.Child = self._webview
+        except Exception:
+            _log("reclaim_webview: EXCEPTION\n{0}".format(traceback.format_exc()))
+
+    def _on_fullscreen(self, sender, args):
+        if self._fs:
+            self._exit_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self):
+        win = self._popout
+        if win is None or self._fs:
+            return
+        from System.Windows import WindowState, WindowStyle, ResizeMode
+        try:
+            win.WindowStyle = getattr(WindowStyle, 'None')   # borderless
+            win.ResizeMode = ResizeMode.NoResize
+            win.WindowState = WindowState.Maximized
+            self._fs = True
+            self.btn_fullscreen.Content = "Exit Full Screen"
+        except Exception:
+            _log("enter_fullscreen: EXCEPTION\n{0}".format(traceback.format_exc()))
+
+    def _exit_fullscreen(self):
+        """Drop full screen back to the windowed pop-out. Reachable by the
+        button, by Esc inside the render, and by Esc on the window, so a
+        single-screen user is never trapped in a borderless window."""
+        win = self._popout
+        if win is None or not self._fs:
+            return
+        from System.Windows import WindowState, WindowStyle, ResizeMode
+        try:
+            win.WindowState = WindowState.Normal
+            win.WindowStyle = WindowStyle.SingleBorderWindow
+            win.ResizeMode = ResizeMode.CanResize
+            self._fs = False
+            self.btn_fullscreen.Content = "Full Screen"
+            try:
+                win.Activate()
+            except Exception:
+                pass
+        except Exception:
+            _log("exit_fullscreen: EXCEPTION\n{0}".format(traceback.format_exc()))
+
+    def _on_popout_key(self, sender, args):
+        from System.Windows.Input import Key
+        try:
+            if args.Key == Key.Escape and self._fs:
+                self._exit_fullscreen()
+                args.Handled = True
+        except Exception:
+            pass
+
+    def _on_web_message(self, sender, args):
+        try:
+            msg = args.TryGetWebMessageAsString()
+        except Exception:
+            msg = None
+        if msg == "escape" and self._fs:
+            self._exit_fullscreen()
 
     def _export_path(self, doc):
         try:
@@ -408,6 +602,21 @@ class ViewerForm(forms.WPFWindow):
         return os.path.join(MODELS_DIR, _safe_title(doc) + '.glb')
 
     def _on_close(self, sender, args):
+        if self._popout is not None:
+            win = self._popout
+            self._popout = None
+            try:
+                win.Closed -= self._on_popout_closed
+            except Exception:
+                pass
+            try:
+                win.Content = None
+            except Exception:
+                pass
+            try:
+                win.Close()
+            except Exception:
+                pass
         try:
             if self._webview is not None:
                 self._webview.Dispose()
