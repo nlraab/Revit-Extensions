@@ -78,23 +78,23 @@ function rightVec() { return [Math.cos(cam.yaw), 0, Math.sin(cam.yaw)]; }
 //  >0 = Shaded (PBR sun + hemispheric sky ambient + ACES tone map)
 var VS = [
   "#version 300 es",
-  "in vec3 aPos;", "uniform mat4 uMVP;", "uniform vec3 uCameraPos;",
-  "out vec3 vRel;", "out float vFragDepth;",
+  "in vec3 aPos;", "in vec3 aNormal;", "uniform mat4 uMVP;", "uniform vec3 uCameraPos;",
+  "out vec3 vRel;", "out vec3 vNormal;", "out float vFragDepth;",
   // Eye-relative position. Flat normals are derived from screen-space
   // derivatives of THIS in the fragment shader; subtracting the camera at
   // vertex precision keeps the differenced values small even when the model
   // sits far from the origin, avoiding the float32 cancellation that turned
   // flat normals into salt-and-pepper grain on large models.
-  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vRel = aPos - uCameraPos; vFragDepth = 1.0 + gl_Position.w; }"
+  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vRel = aPos - uCameraPos; vNormal = aNormal; vFragDepth = 1.0 + gl_Position.w; }"
 ].join("\n");
 var FS = [
   "#version 300 es",
   "precision highp float;",
-  "in vec3 vRel;", "in float vFragDepth;",
+  "in vec3 vRel;", "in vec3 vNormal;", "in float vFragDepth;",
   "uniform vec3 uBaseColor; uniform float uAlpha; uniform float uRough; uniform float uMetal;",
   "uniform vec3 uSunDir; uniform vec3 uSunColor;",
   "uniform vec3 uSkyColor; uniform vec3 uGroundColor; uniform float uExposure;",
-  "uniform int uMode; uniform float uFlat; uniform float uLogDepthFC;",
+  "uniform int uMode; uniform float uFlat; uniform float uLogDepthFC; uniform float uHasNormals;",
   "out vec4 fragColor;",
   "const float PI = 3.14159265359;",
   "const vec3 CLAY = vec3(0.82, 0.80, 0.76);",       // uniform matte clay for Draft
@@ -110,7 +110,9 @@ var FS = [
   // camera, so a 0.05m..hundreds-of-metres scene stops z-fighting at distance.
   "  gl_FragDepth = log2(max(1e-6, vFragDepth)) * uLogDepthFC * 0.5;",
   "  if (uFlat > 0.5) { fragColor = vec4(uBaseColor, 1.0); return; }",
-  "  vec3 N = normalize(cross(dFdx(vRel), dFdy(vRel)));",
+  // Baked per-vertex normals (smooth curves) when the export provides them,
+  // else flat normals from screen-space derivatives.
+  "  vec3 N = (uHasNormals > 0.5) ? normalize(vNormal) : normalize(cross(dFdx(vRel), dFdy(vRel)));",
   "  vec3 V = normalize(-vRel);",
   "  if (dot(N, V) < 0.0) N = -N;",          // face the camera (double-sided)
   "  if (uMode == 0) {",                      // Draft: clean matte clay (white-model look)
@@ -189,14 +191,28 @@ var SUN_COLOR = [3.0, 2.85, 2.55];
 var SKY_COLOR = [0.34, 0.40, 0.52];
 var GROUND_COLOR = [0.22, 0.20, 0.17];
 var EXPOSURE = 1.0;
-function drawGeomGroup(g) {
+// Only render-time alpha that the geometry should composite with. Slightly
+// transparent Revit materials (frosted, 10-40%) used to vanish into the fragile
+// blended pass; OPAQUE_CUTOFF treats them as solid, and true glass is floored to
+// GLASS_MIN so a window/canopy is always clearly visible rather than disappearing.
+var OPAQUE_CUTOFF = 0.5, GLASS_MIN = 0.45;
+function drawGeomGroup(g, alpha) {
   gl.uniform3fv(loc.uBaseColor, new Float32Array(g.color));
-  gl.uniform1f(loc.uAlpha, g.alpha);
+  gl.uniform1f(loc.uAlpha, alpha === undefined ? g.alpha : alpha);
   gl.uniform1f(loc.uRough, g.rough);
   gl.uniform1f(loc.uMetal, g.metal);
   gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
   gl.enableVertexAttribArray(loc.aPos);
   gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+  if (g.normBuf && loc.aNormal >= 0) {
+    gl.uniform1f(loc.uHasNormals, 1.0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.normBuf);
+    gl.enableVertexAttribArray(loc.aNormal);
+    gl.vertexAttribPointer(loc.aNormal, 3, gl.FLOAT, false, 0, 0);
+  } else {
+    gl.uniform1f(loc.uHasNormals, 0.0);
+    if (loc.aNormal >= 0) gl.disableVertexAttribArray(loc.aNormal);
+  }
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.idxBuf);
   gl.drawElements(gl.TRIANGLES, g.count, gl.UNSIGNED_INT, 0);
 }
@@ -251,7 +267,9 @@ function setupGL() {
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
   gl.useProgram(program);
   loc.aPos = gl.getAttribLocation(program, "aPos");
+  loc.aNormal = gl.getAttribLocation(program, "aNormal");
   loc.uMVP = gl.getUniformLocation(program, "uMVP");
+  loc.uHasNormals = gl.getUniformLocation(program, "uHasNormals");
   loc.uBaseColor = gl.getUniformLocation(program, "uBaseColor");
   loc.uAlpha = gl.getUniformLocation(program, "uAlpha");
   loc.uRough = gl.getUniformLocation(program, "uRough");
@@ -315,6 +333,11 @@ function buildScene(gltf, bin) {
       var prim = mesh.primitives[p];
       var pacc = gltf.accessors[prim.attributes.POSITION], pbv = gltf.bufferViews[pacc.bufferView];
       var positions = new Float32Array(binBuf, base + (pbv.byteOffset || 0), pacc.count * 3);
+      var normals = null;
+      if (prim.attributes.NORMAL !== undefined) {
+        var nacc = gltf.accessors[prim.attributes.NORMAL], nbv = gltf.bufferViews[nacc.bufferView];
+        normals = new Float32Array(binBuf, base + (nbv.byteOffset || 0), nacc.count * 3);
+      }
       var indices = null;
       if (prim.indices !== undefined) {
         var iacc = gltf.accessors[prim.indices], ibv = gltf.bufferViews[iacc.bufferView];
@@ -328,8 +351,8 @@ function buildScene(gltf, bin) {
         if (pm.roughnessFactor !== undefined) rough = pm.roughnessFactor;
         if (pm.metallicFactor !== undefined) metal = pm.metallicFactor;
       }
-      prims.push({ positions: positions, indices: indices, color: color, alpha: alpha,
-                   rough: rough, metal: metal, pickId: pickId,
+      prims.push({ positions: positions, normals: normals, indices: indices,
+                   color: color, alpha: alpha, rough: rough, metal: metal, pickId: pickId,
                    category: extras.category || "Other", model: extras.model || "Model",
                    workset: extras.workset || "" });
       if (pacc.min && pacc.max) {
@@ -369,10 +392,13 @@ function mergeByModelCat(prims) {
     }
     var pos = new Float32Array(totalV), idx = new Uint32Array(totalI);
     var col = new Uint8Array(totalV);   // per-vertex pick-id color (3 bytes/vertex)
+    var hasNrm = !!(g.prims[0] && g.prims[0].normals);
+    var nrm = hasNrm ? new Float32Array(totalV) : null;
     var vo = 0, io = 0, baseVert = 0;
     for (j = 0; j < g.prims.length; j++) {
       var pr = g.prims[j], nv = pr.positions.length / 3, x;
       pos.set(pr.positions, vo);
+      if (nrm) { if (pr.normals) nrm.set(pr.normals, vo); }
       var e = pr.pickId + 1;            // +1 so 0 = background in the pick buffer
       var cr = e & 255, cg = (e >> 8) & 255, cb = (e >> 16) & 255;
       for (x = 0; x < nv; x++) { var bi = vo + x * 3; col[bi] = cr; col[bi+1] = cg; col[bi+2] = cb; }
@@ -380,7 +406,7 @@ function mergeByModelCat(prims) {
       else { for (x = 0; x < nv; x++) idx[io+x] = baseVert + x; io += nv; }
       vo += pr.positions.length; baseVert += nv;
     }
-    out.push({ positions: pos, indices: idx, idColor: col, color: g.color,
+    out.push({ positions: pos, normals: nrm, indices: idx, idColor: col, color: g.color,
                alpha: g.alpha, rough: g.rough, metal: g.metal,
                model: g.model, category: g.category, workset: g.workset });
   }
@@ -389,7 +415,7 @@ function mergeByModelCat(prims) {
 function loadModel(buffer) {
   var parsed = parseGlb(buffer);
   if (!parsed.json || !parsed.bin) { showHint("Could not read model file."); return; }
-  for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); gl.deleteBuffer(groups[i].idBuf); }
+  for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); gl.deleteBuffer(groups[i].idBuf); if (groups[i].normBuf) gl.deleteBuffer(groups[i].normBuf); }
   groups = [];
   hiddenModel = {}; hiddenCat = {}; hiddenWs = {};
   hoverIndex = -1; pinnedIndex = -1; hlIndex = -1; hlVisible = false; props.style.display = "none";
@@ -414,7 +440,12 @@ function loadModel(buffer) {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
     var idBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, idBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.idColor, gl.STATIC_DRAW);
-    var group = { posBuf: posBuf, idxBuf: idxBuf, idBuf: idBuf, count: grp.indices.length,
+    var normBuf = null;
+    if (grp.normals) {
+      normBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, normBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.normals, gl.STATIC_DRAW);
+    }
+    var group = { posBuf: posBuf, idxBuf: idxBuf, idBuf: idBuf, normBuf: normBuf, count: grp.indices.length,
                   color: grp.color, alpha: (grp.alpha === undefined ? 1.0 : grp.alpha),
                   rough: (grp.rough === undefined ? 0.85 : grp.rough),
                   metal: (grp.metal === undefined ? 0.0 : grp.metal),
@@ -758,8 +789,8 @@ function frame(now) {
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
       if (!g.visible) continue;
-      if (g.alpha < 0.999) { transparent.push(g); continue; }
-      drawGeomGroup(g);
+      if (g.alpha < OPAQUE_CUTOFF) { transparent.push(g); continue; }
+      drawGeomGroup(g, 1.0);   // near-opaque -> render fully solid (no vanishing)
     }
     if (transparent.length > 0) {
       for (var ti = 0; ti < transparent.length; ti++) {
@@ -770,7 +801,8 @@ function frame(now) {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
-      for (var tj = 0; tj < transparent.length; tj++) drawGeomGroup(transparent[tj]);
+      for (var tj = 0; tj < transparent.length; tj++)
+        drawGeomGroup(transparent[tj], Math.max(GLASS_MIN, transparent[tj].alpha));
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }

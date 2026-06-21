@@ -21,19 +21,25 @@ class Mesh(object):
         alphaMode=BLEND so glass/transparent materials read through.
     roughness: glTF PBR roughnessFactor 0..1 (1 = fully matte).
     metallic:  glTF PBR metallicFactor 0..1.
+    normals:   optional flat list of floats parallel to positions (one unit
+        normal per vertex, same Y-up meters frame). Lets curved geometry
+        (pipes, ducts, furniture) shade smooth instead of faceted. None ->
+        the viewer falls back to flat screen-space-derived normals.
     metadata:  dict of per-element info (element_id, category, discipline,
         workset, level, name) carried into the glTF node's 'extras' so the
         viewer can filter and identify elements later.
     """
 
     def __init__(self, positions, indices=None, color=(0.7, 0.7, 0.7),
-                 metadata=None, alpha=1.0, roughness=0.85, metallic=0.0):
+                 metadata=None, alpha=1.0, roughness=0.85, metallic=0.0,
+                 normals=None):
         self.positions = positions or []
         self.indices = indices
         self.color = color
         self.alpha = alpha
         self.roughness = roughness
         self.metallic = metallic
+        self.normals = normals
         self.metadata = metadata or {}
 
     @property

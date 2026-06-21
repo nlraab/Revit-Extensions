@@ -66,8 +66,8 @@ def _make_options(detail):
     return o
 
 
-def export_model(doc, out_path, view=None, max_elements=120000,
-                 max_triangles=8000000, include_links=True):
+def export_model(doc, out_path, view=None, max_elements=300000,
+                 max_triangles=30000000, include_links=True):
     """Stream the host model + every loaded link to a .glb at `out_path`.
 
     Memory-safe: geometry is written to disk one element at a time via
@@ -272,9 +272,51 @@ def _element_to_mesh(el, opts, offset, transform, tri_level):
     if not positions or not indices:
         return None
     rgb, alpha, roughness, metallic = _material_for_element(el)
-    return Mesh(positions=positions, indices=indices,
+    normals = _compute_normals(positions, indices)
+    return Mesh(positions=positions, indices=indices, normals=normals,
                 color=rgb, alpha=alpha, roughness=roughness, metallic=metallic,
                 metadata=_metadata_for_element(el))
+
+
+def _compute_normals(positions, indices):
+    """Per-vertex smooth normals, area-weighted by summing each triangle's
+    (un-normalized) face normal into its three vertices, then normalizing.
+
+    Vertices are shared within a single Revit face's triangulation but NOT
+    across faces (each face is triangulated separately and appended), so a
+    curved face (a pipe's barrel) comes out smooth while flat faces stay flat
+    and the edge between two faces stays a hard crease -- exactly right.
+    Returns a flat list parallel to `positions`, or None if it can't.
+    """
+    try:
+        import math
+        n = len(positions)
+        if n == 0 or not indices:
+            return None
+        nrm = [0.0] * n
+        for t in range(0, len(indices) - 2, 3):
+            ia = indices[t] * 3
+            ib = indices[t + 1] * 3
+            ic = indices[t + 2] * 3
+            ax = positions[ia]; ay = positions[ia + 1]; az = positions[ia + 2]
+            ux = positions[ib] - ax; uy = positions[ib + 1] - ay; uz = positions[ib + 2] - az
+            vx = positions[ic] - ax; vy = positions[ic + 1] - ay; vz = positions[ic + 2] - az
+            fx = uy * vz - uz * vy
+            fy = uz * vx - ux * vz
+            fz = ux * vy - uy * vx
+            nrm[ia] += fx; nrm[ia + 1] += fy; nrm[ia + 2] += fz
+            nrm[ib] += fx; nrm[ib + 1] += fy; nrm[ib + 2] += fz
+            nrm[ic] += fx; nrm[ic + 1] += fy; nrm[ic + 2] += fz
+        for i in range(0, n, 3):
+            x = nrm[i]; y = nrm[i + 1]; z = nrm[i + 2]
+            l = math.sqrt(x * x + y * y + z * z)
+            if l > 1e-12:
+                nrm[i] = x / l; nrm[i + 1] = y / l; nrm[i + 2] = z / l
+            else:
+                nrm[i] = 0.0; nrm[i + 1] = 1.0; nrm[i + 2] = 0.0
+        return nrm
+    except Exception:
+        return None
 
 
 def _solids_for_element(el, opts):

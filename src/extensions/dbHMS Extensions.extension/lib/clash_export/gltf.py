@@ -143,6 +143,25 @@ def build_glb(meshes, asset_extras=None):
             "mode": _TRIANGLES,
         }
 
+        # --- normals (optional, for smooth shading) ---
+        nrm = getattr(mesh, "normals", None)
+        if nrm:
+            nrm_offset = len(bin_buf)
+            bin_buf.extend(_pack_floats(nrm))
+            nrm_len = len(bin_buf) - nrm_offset
+            bin_buf.extend(b'\x00' * _pad4(len(bin_buf)))
+            nrm_view = len(buffer_views)
+            buffer_views.append({
+                "buffer": 0, "byteOffset": nrm_offset, "byteLength": nrm_len,
+                "target": _ARRAY_BUFFER,
+            })
+            nrm_accessor = len(accessors)
+            accessors.append({
+                "bufferView": nrm_view, "componentType": _FLOAT,
+                "count": mesh.vertex_count, "type": "VEC3",
+            })
+            primitive["attributes"]["NORMAL"] = nrm_accessor
+
         # --- indices (optional) ---
         if mesh.indices:
             idx_offset = len(bin_buf)
@@ -295,6 +314,24 @@ class GlbWriter(object):
             "count": mesh.vertex_count, "type": "VEC3", "min": mn, "max": mx,
         })
         primitive = {"attributes": {"POSITION": pos_accessor}, "mode": _TRIANGLES}
+
+        nrm = getattr(mesh, "normals", None)
+        if nrm:
+            nrm_offset = self._bin_len
+            self._write_bin(_pack_floats(nrm))
+            nrm_len = self._bin_len - nrm_offset
+            self._pad_bin()
+            nrm_view = len(self._buffer_views)
+            self._buffer_views.append({
+                "buffer": 0, "byteOffset": nrm_offset, "byteLength": nrm_len,
+                "target": _ARRAY_BUFFER,
+            })
+            nrm_accessor = len(self._accessors)
+            self._accessors.append({
+                "bufferView": nrm_view, "componentType": _FLOAT,
+                "count": mesh.vertex_count, "type": "VEC3",
+            })
+            primitive["attributes"]["NORMAL"] = nrm_accessor
 
         if mesh.indices:
             idx_offset = self._bin_len
