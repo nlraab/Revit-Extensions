@@ -23,10 +23,21 @@
     color: #718096; text-align: center; user-select: none; pointer-events: none;
     max-width: 80%;
   }
+  #props {
+    position: fixed; display: none; max-width: 300px;
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 12px;
+    color: #2D3748; background: rgba(255,255,255,0.97);
+    border: 1px solid #CBD5E0; border-radius: 4px; padding: 8px 10px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.30); pointer-events: none; z-index: 10;
+  }
+  #props .t { font-weight: 700; color: #1A202C; margin-bottom: 4px; }
+  #props .r { color: #4A5568; line-height: 1.5; }
+  #props .r b { color: #2D3748; font-weight: 600; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="props"></div>
 <div id="hint">Loading viewer...</div>
 <div id="badge"><span class="db">db</span><span class="sep"> | </span><span class="db">HMS</span></div>
 
@@ -67,15 +78,49 @@ var VS = [
 var FS = [
   "#extension GL_OES_standard_derivatives : enable",
   "precision mediump float;",
-  "varying vec3 vWorld;", "uniform vec3 uColor; uniform vec3 uCameraPos;",
+  "varying vec3 vWorld;", "uniform vec3 uColor; uniform vec3 uCameraPos; uniform float uFlat;",
   "void main() {",
+  "  if (uFlat > 0.5) { gl_FragColor = vec4(uColor, 1.0); return; }",
   "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
   "  vec3 L = normalize(uCameraPos - vWorld);",
   "  gl_FragColor = vec4(uColor * (0.35 + 0.65 * abs(dot(N, L))), 1.0);",
   "}"
 ].join("\n");
 
+// Picking shaders: render each element in a unique id-color to an offscreen
+// buffer; read the pixel under the cursor for pixel-exact selection.
+var PVS = [
+  "attribute vec3 aPos;", "attribute vec3 aId;", "uniform mat4 uMVP;", "varying vec3 vId;",
+  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vId = aId; }"
+].join("\n");
+var PFS = [
+  "precision highp float;", "varying vec3 vId;",
+  "void main() { gl_FragColor = vec4(vId, 1.0); }"
+].join("\n");
+
+// Clash markers: round screen-facing points, drawn over the geometry.
+var MVS = [
+  "attribute vec3 aPos;", "uniform mat4 uMVP;", "uniform float uSize;",
+  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); gl_PointSize = uSize; }"
+].join("\n");
+var MFS = [
+  "precision mediump float;", "uniform vec3 uColor;",
+  "void main() { vec2 c = gl_PointCoord - vec2(0.5); if (dot(c,c) > 0.25) discard; gl_FragColor = vec4(uColor, 1.0); }"
+].join("\n");
+
 var program = null, loc = {}, groups = [], bounds = null;
+var pickProgram = null, pickLoc = {};                 // GPU color-pick program
+var pickFbo = null, pickTex = null, pickDepth = null, pickW = 0, pickH = 0;
+var elementList = [];   // [{min, max, meta}] per element (pickId = index)
+var hoverIndex = -1, pinnedIndex = -1;  // hovered (live) + clicked (sticky)
+var hlIndex = -1, hlVisible = false, selBuf = null;  // highlight box buffer
+var pinnedPx = 0, pinnedPy = 0, cursorPx = 0, cursorPy = 0;
+var props = document.getElementById("props");
+var leftDown = null, lastHoverT = 0;
+var markersProgram = null, markersLoc = {}, markersBuf = null, markerCount = 0, showMarkers = true;
+var assetExtras = {};   // offset_ft / ft_to_m / axis from the loaded glb
+var flying = false, flyFrom = null, flyTo = null, flyStart = 0;
+var FLY_DUR = 600;      // ms
 var SEP = "||";    // model<->category key separator (safe in Revit names)
 var hiddenModel = {};  // model name -> true if the whole model is hidden
 var hiddenCat = {};    // "model<SEP>category" -> true if that category is hidden
@@ -131,6 +176,28 @@ function setupGL() {
   loc.uMVP = gl.getUniformLocation(program, "uMVP");
   loc.uColor = gl.getUniformLocation(program, "uColor");
   loc.uCameraPos = gl.getUniformLocation(program, "uCameraPos");
+  loc.uFlat = gl.getUniformLocation(program, "uFlat");
+  selBuf = gl.createBuffer();
+  // pick program
+  pickProgram = gl.createProgram();
+  gl.attachShader(pickProgram, compile(gl.VERTEX_SHADER, PVS));
+  gl.attachShader(pickProgram, compile(gl.FRAGMENT_SHADER, PFS));
+  gl.linkProgram(pickProgram);
+  if (!gl.getProgramParameter(pickProgram, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pickProgram));
+  pickLoc.aPos = gl.getAttribLocation(pickProgram, "aPos");
+  pickLoc.aId = gl.getAttribLocation(pickProgram, "aId");
+  pickLoc.uMVP = gl.getUniformLocation(pickProgram, "uMVP");
+  // markers program
+  markersProgram = gl.createProgram();
+  gl.attachShader(markersProgram, compile(gl.VERTEX_SHADER, MVS));
+  gl.attachShader(markersProgram, compile(gl.FRAGMENT_SHADER, MFS));
+  gl.linkProgram(markersProgram);
+  if (!gl.getProgramParameter(markersProgram, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(markersProgram));
+  markersLoc.aPos = gl.getAttribLocation(markersProgram, "aPos");
+  markersLoc.uMVP = gl.getUniformLocation(markersProgram, "uMVP");
+  markersLoc.uSize = gl.getUniformLocation(markersProgram, "uSize");
+  markersLoc.uColor = gl.getUniformLocation(markersProgram, "uColor");
+  markersBuf = gl.createBuffer();
   gl.enable(gl.DEPTH_TEST);
   gl.clearColor(0.102, 0.125, 0.157, 1.0);
 }
@@ -146,12 +213,15 @@ function parseGlb(buffer) {
   }
   return { json: json, bin: bin };
 }
-function buildPrimitives(gltf, bin) {
-  var binBuf = bin.buffer, base = bin.byteOffset, prims = [], nodes = gltf.nodes || [];
+// Read the glTF into draw primitives (each tagged with a pickId) and a
+// parallel per-element index (pickId -> {bbox, metadata}) used for picking
+// and the selection highlight box.
+function buildScene(gltf, bin) {
+  var binBuf = bin.buffer, base = bin.byteOffset, prims = [], elements = [], nodes = gltf.nodes || [];
   for (var n = 0; n < nodes.length; n++) {
     if (nodes[n].mesh === undefined) continue;
-    var mesh = gltf.meshes[nodes[n].mesh];
-    var extras = nodes[n].extras || {};
+    var mesh = gltf.meshes[nodes[n].mesh], extras = nodes[n].extras || {};
+    var pickId = elements.length, emin = null, emax = null;
     for (var p = 0; p < mesh.primitives.length; p++) {
       var prim = mesh.primitives[p];
       var pacc = gltf.accessors[prim.attributes.POSITION], pbv = gltf.bufferViews[pacc.bufferView];
@@ -166,13 +236,17 @@ function buildPrimitives(gltf, bin) {
         var bcf = gltf.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
         if (bcf) color = [bcf[0], bcf[1], bcf[2]];
       }
-      prims.push({ positions: positions, indices: indices, color: color,
-                   category: extras.category || "Other",
-                   model: extras.model || "Model",
+      prims.push({ positions: positions, indices: indices, color: color, pickId: pickId,
+                   category: extras.category || "Other", model: extras.model || "Model",
                    workset: extras.workset || "" });
+      if (pacc.min && pacc.max) {
+        if (!emin) { emin = pacc.min.slice(); emax = pacc.max.slice(); }
+        else { for (var k = 0; k < 3; k++) { if (pacc.min[k] < emin[k]) emin[k] = pacc.min[k]; if (pacc.max[k] > emax[k]) emax[k] = pacc.max[k]; } }
+      }
     }
+    elements.push({ meta: extras, min: emin || [0,0,0], max: emax || [0,0,0] });
   }
-  return prims;
+  return { prims: prims, elements: elements };
 }
 // Merge by (model, category, workset) so we can show/hide a whole model, an
 // individual category, or a workset within a model, while keeping draw calls
@@ -192,25 +266,36 @@ function mergeByModelCat(prims) {
       totalV += g.prims[j].positions.length;
       totalI += g.prims[j].indices ? g.prims[j].indices.length : g.prims[j].positions.length / 3;
     }
-    var pos = new Float32Array(totalV), idx = new Uint32Array(totalI), vo = 0, io = 0, baseVert = 0;
+    var pos = new Float32Array(totalV), idx = new Uint32Array(totalI);
+    var col = new Uint8Array(totalV);   // per-vertex pick-id color (3 bytes/vertex)
+    var vo = 0, io = 0, baseVert = 0;
     for (j = 0; j < g.prims.length; j++) {
       var pr = g.prims[j], nv = pr.positions.length / 3, x;
       pos.set(pr.positions, vo);
+      var e = pr.pickId + 1;            // +1 so 0 = background in the pick buffer
+      var cr = e & 255, cg = (e >> 8) & 255, cb = (e >> 16) & 255;
+      for (x = 0; x < nv; x++) { var bi = vo + x * 3; col[bi] = cr; col[bi+1] = cg; col[bi+2] = cb; }
       if (pr.indices) { for (x = 0; x < pr.indices.length; x++) idx[io+x] = pr.indices[x] + baseVert; io += pr.indices.length; }
       else { for (x = 0; x < nv; x++) idx[io+x] = baseVert + x; io += nv; }
       vo += pr.positions.length; baseVert += nv;
     }
-    out.push({ positions: pos, indices: idx, color: g.color, model: g.model, category: g.category, workset: g.workset });
+    out.push({ positions: pos, indices: idx, idColor: col, color: g.color,
+               model: g.model, category: g.category, workset: g.workset });
   }
   return out;
 }
 function loadModel(buffer) {
   var parsed = parseGlb(buffer);
   if (!parsed.json || !parsed.bin) { showHint("Could not read model file."); return; }
-  for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); }
+  for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); gl.deleteBuffer(groups[i].idBuf); }
   groups = [];
   hiddenModel = {}; hiddenCat = {}; hiddenWs = {};
-  var merged = mergeByModelCat(buildPrimitives(parsed.json, parsed.bin));
+  hoverIndex = -1; pinnedIndex = -1; hlIndex = -1; hlVisible = false; props.style.display = "none";
+  markerCount = 0; flying = false;
+  assetExtras = (parsed.json.asset && parsed.json.asset.extras) || {};
+  var scene = buildScene(parsed.json, parsed.bin);
+  elementList = scene.elements;
+  var merged = mergeByModelCat(scene.prims);
   var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
   for (var m = 0; m < merged.length; m++) {
     var grp = merged[m];
@@ -219,7 +304,9 @@ function loadModel(buffer) {
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.positions, gl.STATIC_DRAW);
     var idxBuf = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
-    groups.push({ posBuf: posBuf, idxBuf: idxBuf, count: grp.indices.length, color: grp.color,
+    var idBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, idBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.idColor, gl.STATIC_DRAW);
+    groups.push({ posBuf: posBuf, idxBuf: idxBuf, idBuf: idBuf, count: grp.indices.length, color: grp.color,
                   model: grp.model, category: grp.category, workset: grp.workset, visible: true });
     var pp = grp.positions;
     for (var v = 0; v < pp.length; v += 3) {
@@ -299,6 +386,177 @@ function applyPan(dx, dy) {
   cam.pos[2] += (-r[2]*dx + up[2]*dy) * s;
 }
 
+// --- pixel-exact selection (GPU color picking) ---
+function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+function viewMatrix() {
+  var aspect = canvas.width / Math.max(1, canvas.height);
+  var eye = cam.pos, fwd = forwardVec();
+  var near = bounds ? Math.max(0.02, bounds.radius * 0.002) : 0.1;
+  var far = bounds ? bounds.radius * 8 + 100 : 1000;
+  return multiply(perspective(60 * Math.PI / 180, aspect, near, far),
+                  lookAt(eye, [eye[0]+fwd[0], eye[1]+fwd[1], eye[2]+fwd[2]], [0, 1, 0]));
+}
+function ensurePickTarget(w, h) {
+  if (pickFbo && pickW === w && pickH === h) return;
+  if (!pickFbo) { pickFbo = gl.createFramebuffer(); pickTex = gl.createTexture(); pickDepth = gl.createRenderbuffer(); }
+  pickW = w; pickH = h;
+  gl.bindTexture(gl.TEXTURE_2D, pickTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, pickDepth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepth);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+// Render every visible element in its id-color, read the pixel under the
+// cursor, decode the element index. Returns -1 for empty space.
+function pickAt(px, py) {
+  if (groups.length === 0) return -1;
+  var dpr = window.devicePixelRatio || 1, w = canvas.width, h = canvas.height;
+  ensurePickTarget(w, h);
+  var mvp = viewMatrix();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFbo);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(pickProgram);
+  gl.uniformMatrix4fv(pickLoc.uMVP, false, new Float32Array(mvp));
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i]; if (!g.visible) continue;
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
+    gl.enableVertexAttribArray(pickLoc.aPos); gl.vertexAttribPointer(pickLoc.aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.idBuf);
+    gl.enableVertexAttribArray(pickLoc.aId); gl.vertexAttribPointer(pickLoc.aId, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.idxBuf);
+    gl.drawElements(gl.TRIANGLES, g.count, gl.UNSIGNED_INT, 0);
+  }
+  var data = new Uint8Array(4);
+  gl.readPixels(Math.floor(px * dpr), Math.floor(h - py * dpr), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.clearColor(0.102, 0.125, 0.157, 1.0);
+  gl.useProgram(program);
+  var id = data[0] + data[1] * 256 + data[2] * 65536;
+  return id - 1;   // 0 = background -> -1
+}
+function setHighlight(idx) {
+  if (idx === hlIndex) { hlVisible = idx >= 0; return; }
+  hlIndex = idx; hlVisible = idx >= 0;
+  if (idx < 0) return;
+  var e = elementList[idx], a = e.min, b = e.max;
+  gl.bindBuffer(gl.ARRAY_BUFFER, selBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    a[0],a[1],a[2], b[0],a[1],a[2], b[0],a[1],a[2], b[0],b[1],a[2],
+    b[0],b[1],a[2], a[0],b[1],a[2], a[0],b[1],a[2], a[0],a[1],a[2],
+    a[0],a[1],b[2], b[0],a[1],b[2], b[0],a[1],b[2], b[0],b[1],b[2],
+    b[0],b[1],b[2], a[0],b[1],b[2], a[0],b[1],b[2], a[0],a[1],b[2],
+    a[0],a[1],a[2], a[0],a[1],b[2], b[0],a[1],a[2], b[0],a[1],b[2],
+    b[0],b[1],a[2], b[0],b[1],b[2], a[0],b[1],a[2], a[0],b[1],b[2]
+  ]), gl.DYNAMIC_DRAW);
+}
+function positionProps(px, py) {
+  props.style.display = "block";
+  props.style.left = Math.max(4, Math.min(px + 14, window.innerWidth - 312)) + "px";
+  props.style.top = Math.max(4, Math.min(py + 14, window.innerHeight - 190)) + "px";
+}
+function row(label, val) { return val ? ('<div class="r"><b>' + label + ':</b> ' + esc(val) + '</div>') : ''; }
+function showHover(idx, px, py) {     // hover preview: just name + workset
+  var m = elementList[idx].meta;
+  props.innerHTML = '<div class="t">' + esc(m.name || m.category || "Element") + '</div>' +
+    row("Workset", m.workset) +
+    '<div class="r" style="color:#A0AEC0">click for details</div>';
+  positionProps(px, py);
+}
+function showSelected(idx, px, py) {  // full detail on click
+  var m = elementList[idx].meta;
+  props.innerHTML = '<div class="t">' + esc(m.category || "Element") + '</div>' +
+    row("Family", m.family) + row("Name", m.name) + row("Model", m.model) +
+    row("Level", m.level) + row("Workset", m.workset) +
+    row("Placed by", m.creator) + row("Id", m.element_id) +
+    '<div class="r" style="color:#A0AEC0">Esc to deselect</div>';
+  positionProps(px, py);
+}
+// Hovering a different element previews it (brief); otherwise the pinned
+// (clicked) element shows full detail.
+function refreshSelectionUI() {
+  if (hoverIndex >= 0 && hoverIndex !== pinnedIndex) {
+    setHighlight(hoverIndex); showHover(hoverIndex, cursorPx, cursorPy);
+  } else if (pinnedIndex >= 0) {
+    setHighlight(pinnedIndex);
+    var atCursor = (hoverIndex === pinnedIndex);
+    showSelected(pinnedIndex, atCursor ? cursorPx : pinnedPx, atCursor ? cursorPy : pinnedPy);
+  } else if (hoverIndex >= 0) {
+    setHighlight(hoverIndex); showHover(hoverIndex, cursorPx, cursorPy);
+  } else {
+    setHighlight(-1); props.style.display = "none";
+  }
+}
+function clearSelection() {
+  hoverIndex = -1; pinnedIndex = -1; setHighlight(-1); props.style.display = "none";
+}
+
+// --- clash markers + fly-to ---
+// Convert a Revit host-feet point to viewer coords using the loaded glb's
+// export offset (same transform the exporter used: centre, ft->m, Z-up->Y-up).
+function hostToViewer(p) {
+  var o = assetExtras.offset_ft || [0, 0, 0], s = assetExtras.ft_to_m || 0.3048;
+  var mx = (p[0]-o[0])*s, my = (p[1]-o[1])*s, mz = (p[2]-o[2])*s;
+  return [mx, mz, -my];
+}
+function setClashMarkers(hostPoints) {
+  var arr = new Float32Array(hostPoints.length * 3);
+  for (var i = 0; i < hostPoints.length; i++) {
+    var v = hostToViewer(hostPoints[i]);
+    arr[i*3] = v[0]; arr[i*3+1] = v[1]; arr[i*3+2] = v[2];
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, markersBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+  markerCount = hostPoints.length;
+}
+function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+function startFly(toPos, toYaw, toPitch) {
+  flyFrom = { pos: cam.pos.slice(), yaw: cam.yaw, pitch: cam.pitch };
+  flyTo = { pos: toPos, yaw: toYaw, pitch: toPitch };
+  flyStart = now(); flying = true;
+}
+function flyToPoint(hostPt) {
+  var v = hostToViewer(hostPt), f = forwardVec();
+  var dist = Math.max(2.5, (bounds ? bounds.radius * 0.08 : 6));
+  startFly([v[0]-f[0]*dist, v[1]-f[1]*dist, v[2]-f[2]*dist], cam.yaw, cam.pitch);
+}
+function updateFly() {
+  if (!flying) return;
+  var tt = Math.min(1, (now() - flyStart) / FLY_DUR);
+  var e = tt < 0.5 ? 2*tt*tt : 1 - Math.pow(-2*tt+2, 2)/2;   // ease in-out
+  cam.pos = [flyFrom.pos[0] + (flyTo.pos[0]-flyFrom.pos[0])*e,
+             flyFrom.pos[1] + (flyTo.pos[1]-flyFrom.pos[1])*e,
+             flyFrom.pos[2] + (flyTo.pos[2]-flyFrom.pos[2])*e];
+  var dyaw = flyTo.yaw - flyFrom.yaw;
+  while (dyaw > Math.PI) dyaw -= 2*Math.PI; while (dyaw < -Math.PI) dyaw += 2*Math.PI;
+  cam.yaw = flyFrom.yaw + dyaw*e;
+  cam.pitch = flyFrom.pitch + (flyTo.pitch-flyFrom.pitch)*e;
+  if (tt >= 1) flying = false;
+}
+function isFlying() {
+  return keys["w"] || keys["a"] || keys["s"] || keys["d"] || keys["q"] || keys["e"];
+}
+function hoverMove(px, py) {
+  cursorPx = px; cursorPy = py;
+  if (isFlying()) return;                  // don't pick while flying
+  var now = (window.performance && performance.now) ? performance.now() : Date.now();
+  if (now - lastHoverT < 55) return;        // throttle the pick renders
+  lastHoverT = now;
+  hoverIndex = pickAt(px, py);
+  refreshSelectionUI();
+}
+function clickSelect(px, py) {
+  var id = pickAt(px, py);
+  pinnedIndex = id; hoverIndex = id;
+  pinnedPx = px; pinnedPy = py;
+  refreshSelectionUI();
+}
+
 function resize() {
   var dpr = window.devicePixelRatio || 1;
   var w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
@@ -317,6 +575,7 @@ function frame(now) {
     if (cam.pitch < -PITCH_LIMIT) cam.pitch = -PITCH_LIMIT;
   }
   applyMovement(dt, gp);
+  updateFly();
   resize();
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -329,6 +588,7 @@ function frame(now) {
                        lookAt(eye, [eye[0]+fwd[0], eye[1]+fwd[1], eye[2]+fwd[2]], [0, 1, 0]));
     gl.uniformMatrix4fv(loc.uMVP, false, new Float32Array(mvp));
     gl.uniform3fv(loc.uCameraPos, new Float32Array(eye));
+    gl.uniform1f(loc.uFlat, 0.0);
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
       if (!g.visible) continue;
@@ -339,6 +599,33 @@ function frame(now) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.idxBuf);
       gl.drawElements(gl.TRIANGLES, g.count, gl.UNSIGNED_INT, 0);
     }
+    // selection highlight: the picked element's bounding box, flat yellow,
+    // drawn over the geometry (depth test off) so it's always visible.
+    if (hlVisible && selBuf) {
+      gl.disable(gl.DEPTH_TEST);
+      gl.uniform1f(loc.uFlat, 1.0);
+      gl.uniform3fv(loc.uColor, new Float32Array([1.0, 0.85, 0.2]));
+      gl.bindBuffer(gl.ARRAY_BUFFER, selBuf);
+      gl.enableVertexAttribArray(loc.aPos);
+      gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.LINES, 0, 24);
+      gl.uniform1f(loc.uFlat, 0.0);
+      gl.enable(gl.DEPTH_TEST);
+    }
+    // clash markers: round points, drawn over the geometry so they're visible
+    if (showMarkers && markerCount > 0) {
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(markersProgram);
+      gl.uniformMatrix4fv(markersLoc.uMVP, false, new Float32Array(mvp));
+      gl.uniform1f(markersLoc.uSize, 13.0 * (window.devicePixelRatio || 1));
+      gl.uniform3fv(markersLoc.uColor, new Float32Array([1.0, 0.45, 0.1]));
+      gl.bindBuffer(gl.ARRAY_BUFFER, markersBuf);
+      gl.enableVertexAttribArray(markersLoc.aPos);
+      gl.vertexAttribPointer(markersLoc.aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.POINTS, 0, markerCount);
+      gl.useProgram(program);
+      gl.enable(gl.DEPTH_TEST);
+    }
   }
   requestAnimationFrame(frame);
 }
@@ -347,6 +634,7 @@ function frame(now) {
 // Left = select (reserved, not wired). Right-drag = look. Middle-drag = pan.
 // Scroll = zoom. F = mouselook. WASD always flies, including while dragging.
 canvas.addEventListener("mousedown", function (e) {
+  flying = false;   // any navigation cancels an in-progress fly-to
   if (e.button === 2) {
     // Right-drag look. Pointer-lock so the cursor never stops at a screen
     // edge — keep turning indefinitely. Released on right mouseup.
@@ -356,10 +644,15 @@ canvas.addEventListener("mousedown", function (e) {
   }
   if (locked) return;
   if (e.button === 1) { dragMode = "pan"; canvas.style.cursor = "move"; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
-  // left button (0): reserved for element selection (not wired)
+  else if (e.button === 0) { leftDown = { x: e.clientX, y: e.clientY }; }
 });
 window.addEventListener("mouseup", function (e) {
   if (rightLook && e.button === 2) { rightLook = false; if (document.exitPointerLock) document.exitPointerLock(); }
+  if (e.button === 0 && leftDown && !locked) {
+    // a click (not a drag) selects the element under the cursor
+    if (Math.hypot(e.clientX - leftDown.x, e.clientY - leftDown.y) < 5) clickSelect(e.clientX, e.clientY);
+    leftDown = null;
+  }
   dragMode = null; canvas.style.cursor = "default";
 });
 window.addEventListener("mousemove", function (e) {
@@ -368,12 +661,15 @@ window.addEventListener("mousemove", function (e) {
     var dx = e.clientX - lastX, dy = e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     applyPan(dx, dy);
+    return;
   }
+  hoverMove(e.clientX, e.clientY);   // hover to identify (throttled, idle only)
 });
 // Right-drag looks, so suppress the context menu over the canvas.
 canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 canvas.addEventListener("wheel", function (e) {
   e.preventDefault();
+  flying = false;
   var f = forwardVec(), step = (bounds ? bounds.radius * 0.012 : 0.3) * (e.deltaY < 0 ? 1 : -1);
   cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step;
 }, { passive: false });
@@ -384,14 +680,19 @@ document.addEventListener("pointerlockchange", function () {
 window.addEventListener("keydown", function (e) {
   var k = e.key.toLowerCase();
   if (k === "escape") {
+    clearSelection();   // Esc deselects
     // Tell the tool to drop full screen (so a single-screen user is never
     // trapped). Pointer lock also releases on Escape automatically.
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("escape");
     return;
   }
-  if (k === "f") { if (locked) document.exitPointerLock(); else if (canvas.requestPointerLock) canvas.requestPointerLock(); e.preventDefault(); return; }
+  if (k === "f") {
+    if (locked) { document.exitPointerLock(); }
+    else if (canvas.requestPointerLock) { clearSelection(); canvas.requestPointerLock(); }  // fly mode hides any selection
+    e.preventDefault(); return;
+  }
   if (k === "shift") { keys["shift"] = true; return; }
-  if ("wasdqe".indexOf(k) >= 0) { keys[k] = true; e.preventDefault(); }
+  if ("wasdqe".indexOf(k) >= 0) { keys[k] = true; flying = false; e.preventDefault(); }
 });
 window.addEventListener("keyup", function (e) { var k = e.key.toLowerCase(); keys[k === "shift" ? "shift" : k] = false; });
 window.addEventListener("blur", function () { keys = {}; dragMode = null; canvas.style.cursor = "default"; });
@@ -451,6 +752,12 @@ function handleMessage(data) {
       var set = (kind === "model") ? hiddenModel : (kind === "cat") ? hiddenCat
                 : (kind === "ws") ? hiddenWs : null;
       if (set) { if (shown) delete set[value]; else set[value] = true; recomputeVisibility(); }
+    }
+    else if (cmd === "clashes") { setClashMarkers(JSON.parse(arg)); }          // arg = [[hx,hy,hz], ...]
+    else if (cmd === "showmarkers") { showMarkers = (arg === "1"); }
+    else if (cmd === "flytopoint") { var p = arg.split(",").map(parseFloat); if (p.length === 3) flyToPoint(p); }
+    else if (cmd === "viewpose") {                                              // saved viewpoint (phase next step)
+      var vp = JSON.parse(arg); startFly(vp.pos, vp.yaw, vp.pitch);
     }
   } catch (err) { showHint("Error: " + (err && err.message ? err.message : err)); }
 }

@@ -220,9 +220,13 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Clashes" Style="{StaticResource SectionHeader}"/>
-                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsEnabled="False"/>
-                            <TextBlock Text="Clash list + jump-to-clash and color-by-status connect to the Clash Browser in a later phase."
-                                       Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsChecked="True"/>
+                            <TextBlock Text="Click a clash to fly to it. Markers come from this project's clash database."
+                                       Style="{StaticResource HelperText}" Margin="0,4,0,6"/>
+                            <Border x:Name="brd_clashes" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Clashes list here after a model loads."/>
+                            </Border>
                         </StackPanel>
                     </Border>
 
@@ -230,7 +234,7 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Selection" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Click an element (when not in F mouselook) to see its properties — id, category, family, type, level, workset, parameters — and choose what to show. Wires up in a later phase."
+                            <TextBlock Text="Click an element (when not in F mouselook) to highlight it and see its details — category, name, model, level, workset — right in the view. Full parameter list and pick-what-to-show come later."
                                        Style="{StaticResource HelperText}"/>
                         </StackPanel>
                     </Border>

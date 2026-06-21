@@ -429,7 +429,41 @@ def _metadata_for_element(el):
     md["workset"] = _workset_name(src_doc, el)
     md["name"] = _safe(lambda: el.Name, None)
     md["model"] = _safe(lambda: src_doc.Title, None)
+    md["family"] = _family_name(src_doc, el)
+    md["creator"] = _creator_name(src_doc, el)   # who placed it (workshared models)
     return dict((k, v) for k, v in md.items() if v is not None)
+
+
+def _family_name(src_doc, el):
+    """The element type's family name (e.g. 'Round Duct')."""
+    if src_doc is None:
+        return None
+    try:
+        tid = el.GetTypeId()
+        if tid is None or eid_int(tid) <= 0:
+            return None
+        et = src_doc.GetElement(tid)
+        if et is None:
+            return None
+        return getattr(et, "FamilyName", None) or None
+    except Exception:
+        return None
+
+
+def _creator_name(src_doc, el):
+    """Who placed the element, from worksharing info. Only available in a
+    workshared model; None otherwise. One worksharing query per element, so
+    it's the priciest tag -- if export gets slow, make this lazy/host-only."""
+    if src_doc is None:
+        return None
+    try:
+        if not src_doc.IsWorkshared:
+            return None
+        from Autodesk.Revit.DB import WorksharingUtils
+        info = WorksharingUtils.GetWorksharingTooltipInfo(src_doc, el.Id)
+        return info.Creator if info is not None else None
+    except Exception:
+        return None
 
 
 def _level_name(src_doc, el):

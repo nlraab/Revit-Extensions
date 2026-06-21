@@ -49,6 +49,7 @@ from System.Windows import (
 )
 from System.Windows.Controls import (
     TextBlock, StackPanel, CheckBox, Border, Button, Grid as WpfGrid,
+    ScrollViewer, ScrollBarVisibility,
 )
 from System.Windows.Input import Mouse, Cursors
 from System.Windows.Media import SolidColorBrush, Color
@@ -161,6 +162,8 @@ class ViewerForm(forms.WPFWindow):
         self.btn_fullscreen.Click += self._on_fullscreen
         self.sl_speed.ValueChanged += self._on_speed_changed
         self.sl_look.ValueChanged  += self._on_look_changed
+        self.chk_clash_markers.Checked   += (lambda s, a: self._post("showmarkers:1"))
+        self.chk_clash_markers.Unchecked += (lambda s, a: self._post("showmarkers:0"))
         self._refresh_tuning_labels()
 
         # Attach the web panel after the window is laid out, so the host
@@ -600,7 +603,92 @@ class ViewerForm(forms.WPFWindow):
                 self._exit_fullscreen()
             return
         if msg.startswith("filters:"):
+            # Model finished loading (offset is known); build the tree and load
+            # the project's clashes (markers + list) now that transforms work.
             self._build_filter_ui(msg[len("filters:"):])
+            self._load_clashes()
+            return
+
+    # --- clashes ------------------------------------------------------
+
+    def _load_clashes(self):
+        """Read the project's clashes, send their host-coord midpoints to the
+        viewer for markers, and build the clickable clash list."""
+        rows, points = [], []
+        try:
+            from pyrevit import revit
+            from clash_core import persistence, project
+            doc = revit.doc
+            ph = project.project_hash_for(doc) if doc is not None else None
+            data = persistence.read_clashes(ph) if ph else {"clashes": []}
+            for c in (data.get("clashes") or []):
+                mp = c.get("midpoint")
+                if not mp or len(mp) < 3:
+                    continue
+                a = (c.get("ref_a") or {}).get("category") or "?"
+                b = (c.get("ref_b") or {}).get("category") or "?"
+                status = c.get("status") or ""
+                label = "#{0}  {1} x {2}".format(len(points) + 1, a, b)
+                if status:
+                    label += "  ({0})".format(status)
+                pt = [float(mp[0]), float(mp[1]), float(mp[2])]
+                points.append(pt)
+                rows.append({"label": label, "point": pt})
+        except persistence.SharedFolderNotConfigured:
+            rows = None   # signal "shared folder not set"
+        except Exception:
+            _log("load_clashes: {0}".format(traceback.format_exc()))
+            rows = []
+        try:
+            import json as _json
+            self._post("clashes:" + _json.dumps(points))
+        except Exception:
+            pass
+        self._build_clash_list(rows)
+
+    def _build_clash_list(self, rows):
+        panel = StackPanel()
+        if rows is None:
+            tb = TextBlock()
+            tb.Text = ("Set the shared clash folder in Settings to see this "
+                       "project's clashes here.")
+            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+            tb.FontSize = 11
+            tb.TextWrapping = TextWrapping.Wrap
+            panel.Children.Add(tb)
+        elif not rows:
+            tb = TextBlock()
+            tb.Text = "No clashes for this project yet (run a clash test)."
+            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+            tb.FontSize = 11
+            tb.TextWrapping = TextWrapping.Wrap
+            panel.Children.Add(tb)
+        else:
+            for r in rows:
+                btn = Button()
+                btn.Content = r["label"]
+                btn.HorizontalAlignment = HorizontalAlignment.Stretch
+                btn.HorizontalContentAlignment = HorizontalAlignment.Left
+                btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
+                btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
+                btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
+                btn.BorderThickness = Thickness(1)
+                btn.Padding = Thickness(8, 4, 8, 4)
+                btn.Margin = Thickness(0, 0, 0, 3)
+                btn.FontSize = 11
+                btn.Cursor = Cursors.Hand
+                p = r["point"]
+                btn.Click += (lambda s, a, pt=p:
+                              self._post("flytopoint:{0},{1},{2}".format(pt[0], pt[1], pt[2])))
+                panel.Children.Add(btn)
+        sv = ScrollViewer()
+        sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        sv.MaxHeight = 240
+        sv.Content = panel
+        try:
+            self.brd_clashes.Child = sv
+        except Exception:
+            _log("build_clash_list: {0}".format(traceback.format_exc()))
 
     def _build_filter_ui(self, json_text):
         """Build the model -> categories visibility tree from what the render
