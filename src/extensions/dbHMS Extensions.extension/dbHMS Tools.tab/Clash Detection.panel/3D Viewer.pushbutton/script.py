@@ -209,11 +209,19 @@ class ViewerForm(forms.WPFWindow):
             wv.CoreWebView2InitializationCompleted += self._on_webview_init
             self.brd_viewport.Child = wv
             self._webview = wv
-            # Setting Source triggers core init (the proven path); once the
-            # core is ready we upgrade to the virtual host + navigate in
-            # _on_webview_init so large models can be fetched.
-            wv.Source = System.Uri(WEB_INDEX)
-            _log("attach_viewer: webview created, Source set (file://)")
+            # Init the core WITHOUT navigating anywhere. Previously we set Source
+            # to a file:// page to trigger init, but that file:// navigation fired
+            # late and ABORTED our virtual-host navigation to viewer3
+            # (ConnectionAborted), leaving the old page on screen. EnsureCoreWebView2Async
+            # starts the core with no competing navigation; _on_webview_init then
+            # maps the vhost and navigates to viewer3 exactly once.
+            try:
+                wv.EnsureCoreWebView2Async(None)
+                _log("attach_viewer: webview created, EnsureCoreWebView2Async called")
+            except Exception:
+                _log("attach_viewer: EnsureCoreWebView2Async failed; falling back to Source\n{0}"
+                     .format(traceback.format_exc()))
+                wv.Source = System.Uri(WEB_INDEX)
         except Exception:
             _log("attach_viewer: EXCEPTION\n{}".format(traceback.format_exc()))
             self._show_viewport_message(
