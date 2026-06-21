@@ -277,9 +277,15 @@ class ViewerForm(forms.WPFWindow):
                 # Serve _DATA_ROOT (app/ + models/) under one https origin so
                 # the page can fetch large model files past the message limit.
                 core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
-                core.Navigate("https://{0}/app/{1}".format(VHOST, APP_PAGE))
+                # Cache-bust by the page's mtime so WebView2 never serves a stale
+                # viewer after an update (Chromium caches the vhost aggressively).
+                try:
+                    ver = int(os.path.getmtime(app_index))
+                except Exception:
+                    ver = 0
+                core.Navigate("https://{0}/app/{1}?v={2}".format(VHOST, APP_PAGE, ver))
                 self._vhost_ok = True
-                _log("init: vhost mapped, navigated to app/{0}".format(APP_PAGE))
+                _log("init: vhost mapped, navigated to app/{0}?v={1}".format(APP_PAGE, ver))
             else:
                 _log("init: app index missing at {0}, staying on file://"
                      .format(app_index))
