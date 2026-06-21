@@ -76,6 +76,7 @@ class GltfExportContext(_CONTEXT_BASE):
         self.ox, self.oy, self.oz = offset
         self.lod = lod                      # 0.0..1.0 -> Revit 0..15
         self._xf = []                       # Transform stack (instances + links)
+        self._docs = []                     # document stack (host -> link docs)
         self._meta = None
         self._color = (0.70, 0.72, 0.74)
         self._alpha = 1.0
@@ -88,10 +89,15 @@ class GltfExportContext(_CONTEXT_BASE):
         self.polymeshes = 0
         self.normals_dist = {}
 
-    # ---- transform stack -------------------------------------------------
+    # ---- transform + document stacks -------------------------------------
     def _topxf(self):
         from Autodesk.Revit.DB import Transform
         return self._xf[-1] if self._xf else Transform.Identity
+
+    def _curdoc(self):
+        # the document we're currently traversing (host, or a link's doc) so
+        # element metadata (model/workset/level) resolves against the right file
+        return self._docs[-1] if self._docs else self.doc
 
     # ---- lifecycle -------------------------------------------------------
     def Start(self):
@@ -123,12 +129,16 @@ class GltfExportContext(_CONTEXT_BASE):
         self._idx = []
         self._color = (0.70, 0.72, 0.74)
         self._alpha = 1.0
-        self._meta = None
+        # Always carry at least the element id so the viewer can select it, even
+        # if the richer metadata lookup below fails.
+        self._meta = {"element_id": eid_int(element_id)}
         try:
             import clash_export.revit_geometry as rg
-            el = self.doc.GetElement(element_id)
+            el = self._curdoc().GetElement(element_id)   # right doc for links
             if el is not None:
-                self._meta = rg._metadata_for_element(el)
+                md = rg._metadata_for_element(el)         # uses el.Document internally
+                if md:
+                    self._meta = md
                 rgb, alpha, _rough, _metal = rg._material_for_element(el)
                 self._color = rgb
                 self._alpha = alpha
@@ -169,11 +179,18 @@ class GltfExportContext(_CONTEXT_BASE):
             self._xf.append(self._topxf().Multiply(node.GetTransform()))
         except Exception:
             self._xf.append(self._topxf())
+        # enter the link's document so its elements' metadata resolves correctly
+        try:
+            self._docs.append(node.GetDocument())
+        except Exception:
+            self._docs.append(self._curdoc())
         return RenderNodeAction.Proceed
 
     def OnLinkEnd(self, node):
         if self._xf:
             self._xf.pop()
+        if self._docs:
+            self._docs.pop()
 
     # ---- skip the per-face callbacks (big speed win) ---------------------
     def OnFaceBegin(self, node):
@@ -291,16 +308,48 @@ def _view_offset(doc, view):
     return ((mnx + mxx) / 2.0, (mny + mxy) / 2.0, (mnz + mxz) / 2.0)
 
 
-def export_view(doc, out_path, view, lod=0.65, asset_extras=None):
+def export_view(doc, out_path, view, lod=0.9, asset_extras=None):
     """Export `view` (a 3D view) to a .glb via CustomExporter. Returns a stats
-    dict. Raises on hard failure so the caller can fall back to the old path."""
+    dict. Raises on hard failure so the caller can fall back to the old path.
+
+    Exports a Fine-detail DUPLICATE of the view (not the user's own view): at
+    coarser detail Revit draws thin elements like pipes as centerlines with no
+    solid, so they wouldn't export at all; Fine also tessellates curves smoothly.
+    The duplicate inherits the view's visibility, so what shows still matches
+    what the user set up."""
     if not _HAVE_REVIT:
         raise RuntimeError("CustomExporter unavailable (no Revit API)")
-    from Autodesk.Revit.DB import CustomExporter, View3D
+    from Autodesk.Revit.DB import (CustomExporter, View3D, ViewDetailLevel,
+                                   Transaction, ViewDuplicateOption)
     if not isinstance(view, View3D) or view.IsTemplate:
         raise RuntimeError("CustomExporter needs a non-template 3D view")
 
-    offset = _view_offset(doc, view)
+    temp_view = None
+    src = view
+    t = None
+    try:
+        t = Transaction(doc, "dbHMS: export view")
+        t.Start()
+        dup_id = view.Duplicate(ViewDuplicateOption.Duplicate)
+        tv = doc.GetElement(dup_id)
+        try:
+            tv.DetailLevel = ViewDetailLevel.Fine
+        except Exception:
+            pass
+        t.Commit()
+        temp_view = tv
+        src = tv
+        _log("export: using Fine-detail duplicate view")
+    except Exception:
+        try:
+            if t is not None:
+                t.RollBack()
+        except Exception:
+            pass
+        src = view
+        _log("export: duplicate view failed, using active view ({0})".format(_exc_last()))
+
+    offset = _view_offset(doc, src)
     extras = dict(asset_extras or {})
     extras.update({
         "generator": "dbHMS 3D Viewer (CustomExporter)",
@@ -321,15 +370,16 @@ def export_view(doc, out_path, view, lod=0.65, asset_extras=None):
             exporter.ShouldStopOnError = False
         except Exception:
             pass
-        _log("export start: view={0} lod={1}".format(
-            getattr(view, "Name", "?"), lod))
-        exporter.Export(view)
+        _log("export start: view={0} lod={1}".format(getattr(src, "Name", "?"), lod))
+        exporter.Export(src)
         size = writer.finalize()
     except Exception:
         writer.close()
         _log("export FAILED: {0}".format(_exc_last()))
+        _delete_view(doc, temp_view)
         raise
     secs = time.time() - t0
+    _delete_view(doc, temp_view)
     stats = {
         "elements": ctx.elements, "triangles": ctx.triangles,
         "polymeshes": ctx.polymeshes, "bytes": size, "seconds": secs,
@@ -338,6 +388,20 @@ def export_view(doc, out_path, view, lod=0.65, asset_extras=None):
     _log("export done: {0} elements, {1:,} tris, {2:,} bytes, {3:.0f}s, normals={4}".format(
         ctx.elements, ctx.triangles, size, secs, ctx.normals_dist))
     return stats
+
+
+def _delete_view(doc, view):
+    """Best-effort delete of the temporary export view."""
+    if view is None:
+        return
+    try:
+        from Autodesk.Revit.DB import Transaction
+        t = Transaction(doc, "dbHMS: cleanup export view")
+        t.Start()
+        doc.Delete(view.Id)
+        t.Commit()
+    except Exception:
+        _log("cleanup view failed: {0}".format(_exc_last()))
 
 
 def _exc_last():
