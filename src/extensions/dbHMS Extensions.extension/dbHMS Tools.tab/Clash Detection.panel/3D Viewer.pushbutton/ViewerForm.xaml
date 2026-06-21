@@ -239,17 +239,21 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Presentation -->
+                    <!-- Viewpoints -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
-                            <TextBlock Text="Presentation" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Pop Out / Full Screen are in the footer. More below come later."
+                            <TextBlock Text="Viewpoints" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Save the current view to jump back to it later. Click a saved view to fly there. (Pop Out / Full Screen are in the footer.)"
                                        Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
-                            <Button x:Name="btn_screenshot" Content="Save Screenshot"
-                                    Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                            <Button x:Name="btn_saved_views" Content="Save Current View"
+                                    Style="{StaticResource SecondaryButton}"
                                     HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                     MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
-                            <Button x:Name="btn_saved_views" Content="Saved Views / Viewpoints"
+                            <Border x:Name="brd_viewpoints" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                    CornerRadius="3" Padding="8" Margin="0,0,0,8">
+                                <TextBlock Style="{StaticResource HelperText}" Text="Saved viewpoints list here."/>
+                            </Border>
+                            <Button x:Name="btn_screenshot" Content="Save Screenshot"
                                     Style="{StaticResource SecondaryButton}" IsEnabled="False"
                                     HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                     MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>

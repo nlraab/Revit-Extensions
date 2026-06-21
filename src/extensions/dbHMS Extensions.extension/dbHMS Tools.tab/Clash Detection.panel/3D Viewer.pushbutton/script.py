@@ -164,6 +164,8 @@ class ViewerForm(forms.WPFWindow):
         self.sl_look.ValueChanged  += self._on_look_changed
         self.chk_clash_markers.Checked   += (lambda s, a: self._post("showmarkers:1"))
         self.chk_clash_markers.Unchecked += (lambda s, a: self._post("showmarkers:0"))
+        self.btn_saved_views.Click += self._on_save_viewpoint
+        self._last_cam = None    # latest camera reported by the viewer
         self._refresh_tuning_labels()
 
         # Attach the web panel after the window is laid out, so the host
@@ -602,11 +604,19 @@ class ViewerForm(forms.WPFWindow):
             if self._fs:
                 self._exit_fullscreen()
             return
+        if msg.startswith("cam:"):
+            try:
+                import json
+                self._last_cam = json.loads(msg[len("cam:"):])
+            except Exception:
+                pass
+            return
         if msg.startswith("filters:"):
             # Model finished loading (offset is known); build the tree and load
-            # the project's clashes (markers + list) now that transforms work.
+            # the project's clashes + saved viewpoints now that transforms work.
             self._build_filter_ui(msg[len("filters:"):])
             self._load_clashes()
+            self._build_viewpoints_list()
             return
 
     # --- clashes ------------------------------------------------------
@@ -689,6 +699,91 @@ class ViewerForm(forms.WPFWindow):
             self.brd_clashes.Child = sv
         except Exception:
             _log("build_clash_list: {0}".format(traceback.format_exc()))
+
+    # --- saved viewpoints ---------------------------------------------
+
+    def _viewpoints_path(self):
+        try:
+            from pyrevit import revit
+            title = _safe_title(revit.doc) if revit.doc is not None else "model"
+        except Exception:
+            title = "model"
+        d = os.path.join(_DATA_ROOT, "viewpoints")
+        try:
+            if not os.path.isdir(d):
+                os.makedirs(d)
+        except Exception:
+            pass
+        return os.path.join(d, title + ".json")
+
+    def _read_viewpoints(self):
+        import json
+        p = self._viewpoints_path()
+        if not os.path.isfile(p):
+            return []
+        try:
+            with open(p, 'r') as f:
+                return (json.load(f) or {}).get("viewpoints") or []
+        except Exception:
+            return []
+
+    def _write_viewpoints(self, vps):
+        import json
+        try:
+            with open(self._viewpoints_path(), 'w') as f:
+                json.dump({"viewpoints": vps}, f, indent=2)
+        except Exception:
+            _log("write_viewpoints: {0}".format(traceback.format_exc()))
+
+    def _on_save_viewpoint(self, sender, args):
+        if self._last_cam is None:
+            dbhms_ui.info("Load a model and move the view a moment first, "
+                          "then save.", title='Viewpoints')
+            return
+        vps = self._read_viewpoints()
+        name = forms.ask_for_string(
+            default='View {0}'.format(len(vps) + 1),
+            prompt='Name this viewpoint:', title='Save viewpoint')
+        if not name:
+            return
+        vps.append({"name": name, "pos": self._last_cam.get("pos"),
+                    "yaw": self._last_cam.get("yaw"),
+                    "pitch": self._last_cam.get("pitch")})
+        self._write_viewpoints(vps)
+        self._build_viewpoints_list()
+
+    def _build_viewpoints_list(self):
+        import json
+        vps = self._read_viewpoints()
+        panel = StackPanel()
+        if not vps:
+            tb = TextBlock()
+            tb.Text = "No saved viewpoints yet."
+            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+            tb.FontSize = 11
+            panel.Children.Add(tb)
+        else:
+            for vp in vps:
+                btn = Button()
+                btn.Content = vp.get("name") or "View"
+                btn.HorizontalAlignment = HorizontalAlignment.Stretch
+                btn.HorizontalContentAlignment = HorizontalAlignment.Left
+                btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
+                btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
+                btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
+                btn.BorderThickness = Thickness(1)
+                btn.Padding = Thickness(8, 4, 8, 4)
+                btn.Margin = Thickness(0, 0, 0, 3)
+                btn.FontSize = 11
+                btn.Cursor = Cursors.Hand
+                payload = json.dumps({"pos": vp.get("pos"), "yaw": vp.get("yaw"),
+                                      "pitch": vp.get("pitch")})
+                btn.Click += (lambda s, a, pl=payload: self._post("viewpose:" + pl))
+                panel.Children.Add(btn)
+        try:
+            self.brd_viewpoints.Child = panel
+        except Exception:
+            _log("build_viewpoints_list: {0}".format(traceback.format_exc()))
 
     def _build_filter_ui(self, json_text):
         """Build the model -> categories visibility tree from what the render

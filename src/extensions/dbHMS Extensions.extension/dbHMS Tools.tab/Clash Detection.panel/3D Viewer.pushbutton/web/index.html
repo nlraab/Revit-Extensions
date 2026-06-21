@@ -121,6 +121,7 @@ var markersProgram = null, markersLoc = {}, markersBuf = null, markerCount = 0, 
 var assetExtras = {};   // offset_ft / ft_to_m / axis from the loaded glb
 var flying = false, flyFrom = null, flyTo = null, flyStart = 0;
 var FLY_DUR = 600;      // ms
+var lastCamReport = 0, lastCam = null;   // throttled camera report for saved views
 var SEP = "||";    // model<->category key separator (safe in Revit names)
 var hiddenModel = {};  // model name -> true if the whole model is hidden
 var hiddenCat = {};    // "model<SEP>category" -> true if that category is hidden
@@ -576,6 +577,15 @@ function frame(now) {
   }
   applyMovement(dt, gp);
   updateFly();
+  // report the camera to the panel (throttled) so it can save viewpoints
+  if (window.chrome && window.chrome.webview && t - lastCamReport > 300) {
+    if (!lastCam || lastCam.yaw !== cam.yaw || lastCam.pitch !== cam.pitch ||
+        lastCam.pos[0] !== cam.pos[0] || lastCam.pos[1] !== cam.pos[1] || lastCam.pos[2] !== cam.pos[2]) {
+      lastCam = { pos: cam.pos.slice(), yaw: cam.yaw, pitch: cam.pitch };
+      window.chrome.webview.postMessage("cam:" + JSON.stringify(lastCam));
+      lastCamReport = t;
+    }
+  }
   resize();
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
