@@ -234,9 +234,17 @@ class ViewerForm(forms.WPFWindow):
                 if not os.path.isdir(dst_dir):
                     os.makedirs(dst_dir)
                 for name in files:
-                    shutil.copy2(os.path.join(dirpath, name), os.path.join(dst_dir, name))
-                    n += 1
-            _log("sync_app_assets: copied {0} file(s) to {1}".format(n, APP_DIR))
+                    # Per-file guard: a file locked by a still-alive WebView2
+                    # (e.g. a prior session serving index.html) must not abort the
+                    # whole sync and leave viewer3.html / lib uncopied.
+                    try:
+                        shutil.copy2(os.path.join(dirpath, name), os.path.join(dst_dir, name))
+                        n += 1
+                    except Exception:
+                        _log("sync_app_assets: skip {0} ({1})".format(
+                            name, traceback.format_exc().splitlines()[-1]))
+            _log("sync_app_assets: copied {0} file(s); {1} present={2}".format(
+                n, APP_PAGE, os.path.isfile(os.path.join(APP_DIR, APP_PAGE))))
         except Exception:
             _log("sync_app_assets: EXCEPTION\n{}".format(traceback.format_exc()))
 
@@ -271,7 +279,7 @@ class ViewerForm(forms.WPFWindow):
                 core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
                 core.Navigate("https://{0}/app/{1}".format(VHOST, APP_PAGE))
                 self._vhost_ok = True
-                _log("init: vhost mapped to {0}, navigated".format(_DATA_ROOT))
+                _log("init: vhost mapped, navigated to app/{0}".format(APP_PAGE))
             else:
                 _log("init: app index missing at {0}, staying on file://"
                      .format(app_index))
