@@ -44,10 +44,12 @@ clr.AddReference("WindowsBase")
 
 import System
 from System.Windows import (
-    TextWrapping, TextAlignment, Thickness,
-    HorizontalAlignment, VerticalAlignment,
+    TextWrapping, TextAlignment, Thickness, CornerRadius,
+    HorizontalAlignment, VerticalAlignment, FontWeights,
 )
-from System.Windows.Controls import TextBlock
+from System.Windows.Controls import (
+    TextBlock, StackPanel, CheckBox, Border, Button, Grid as WpfGrid,
+)
 from System.Windows.Input import Mouse, Cursors
 from System.Windows.Media import SolidColorBrush, Color
 
@@ -60,6 +62,7 @@ from clash_export import revit_geometry
 
 SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'ViewerForm.xaml')
+MODEL_VIS_XAML = os.path.join(SCRIPT_DIR, 'ModelVisibilityForm.xaml')
 WEB_DIR    = os.path.join(SCRIPT_DIR, 'web')
 WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')
 
@@ -590,8 +593,158 @@ class ViewerForm(forms.WPFWindow):
             msg = args.TryGetWebMessageAsString()
         except Exception:
             msg = None
-        if msg == "escape" and self._fs:
-            self._exit_fullscreen()
+        if not msg:
+            return
+        if msg == "escape":
+            if self._fs:
+                self._exit_fullscreen()
+            return
+        if msg.startswith("filters:"):
+            self._build_filter_ui(msg[len("filters:"):])
+
+    def _build_filter_ui(self, json_text):
+        """Build the model -> categories visibility tree from what the render
+        reports after a model loads. Runs on the UI thread."""
+        import json
+        try:
+            data = json.loads(json_text)
+        except Exception:
+            _log("build_filter_ui: bad json\n{0}".format(traceback.format_exc()))
+            return
+        self._build_models_tree(data.get("models") or [])
+
+    def _build_models_tree(self, models):
+        """models = [{"name", "categories":[...], "worksets":[...]}, ...].
+        Each model gets its own blue box: a whole-model on/off checkbox plus
+        an Edit button that opens a popup to toggle that model's categories
+        and worksets. The host model is marked '(this model)'."""
+        self._models = {}
+        self._hidden_models = set()
+        self._hidden_cats = set()
+        self._hidden_ws = set()
+
+        host_title = None
+        try:
+            from pyrevit import revit
+            host_title = revit.doc.Title if revit.doc is not None else None
+        except Exception:
+            host_title = None
+
+        panel = StackPanel()
+        if not models:
+            tb = TextBlock()
+            tb.Text = "No models reported."
+            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+            tb.FontSize = 11
+            panel.Children.Add(tb)
+        for entry in models:
+            name = entry.get("name") or "Model"
+            self._models[name] = {
+                "categories": entry.get("categories") or [],
+                "worksets": entry.get("worksets") or [],
+            }
+            panel.Children.Add(self._model_box(name, name == host_title))
+        try:
+            self.brd_models.Child = panel
+        except Exception:
+            _log("build_models_tree: failed\n{0}".format(traceback.format_exc()))
+
+    def _model_box(self, name, is_host):
+        """One per-model blue box: [on/off checkbox] [name]  [Edit...]."""
+        box = Border()
+        # dbHMS highlight blue (matches the multi-select highlight used elsewhere)
+        box.Background = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
+        box.BorderBrush = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
+        box.BorderThickness = Thickness(1)
+        box.CornerRadius = CornerRadius(4)
+        box.Padding = Thickness(8)
+        box.Margin = Thickness(0, 0, 0, 6)
+
+        grid = WpfGrid()
+        from System.Windows.Controls import ColumnDefinition
+        from System.Windows import GridLength
+        c0 = ColumnDefinition(); c0.Width = self._star_width()
+        c1 = ColumnDefinition(); c1.Width = GridLength(72)
+        grid.ColumnDefinitions.Add(c0)
+        grid.ColumnDefinitions.Add(c1)
+
+        chk = CheckBox()
+        chk.Content = name + (" (this model)" if is_host else "")
+        chk.IsChecked = True
+        chk.FontWeight = FontWeights.SemiBold
+        chk.VerticalAlignment = VerticalAlignment.Center
+        chk.Checked   += (lambda s, a, n=name: self._on_model_toggle(n, True))
+        chk.Unchecked += (lambda s, a, n=name: self._on_model_toggle(n, False))
+        WpfGrid.SetColumn(chk, 0)
+        grid.Children.Add(chk)
+
+        edit = Button()
+        edit.Content = "Edit..."
+        edit.Padding = Thickness(8, 2, 8, 2)
+        edit.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
+        edit.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
+        edit.Cursor = self._hand_cursor()
+        edit.VerticalAlignment = VerticalAlignment.Center
+        edit.Click += (lambda s, a, n=name: self._open_model_dialog(n))
+        WpfGrid.SetColumn(edit, 1)
+        grid.Children.Add(edit)
+
+        box.Child = grid
+        return box
+
+    @staticmethod
+    def _star_width():
+        from System.Windows import GridLength, GridUnitType
+        return GridLength(1, GridUnitType.Star)
+
+    @staticmethod
+    def _hand_cursor():
+        try:
+            from System.Windows.Input import Cursors as _C
+            return _C.Hand
+        except Exception:
+            return None
+
+    def _on_model_toggle(self, name, shown):
+        if shown:
+            self._hidden_models.discard(name)
+        else:
+            self._hidden_models.add(name)
+        self._post("vis:model:{0}:{1}".format(1 if shown else 0, name))
+
+    def _open_model_dialog(self, name):
+        info = self._models.get(name)
+        if not info:
+            return
+        cats = info["categories"]
+        ws = info["worksets"]
+        cat_hidden = set(c for c in cats if (name + "||" + c) in self._hidden_cats)
+        ws_hidden = set(w for w in ws if (name + "||" + w) in self._hidden_ws)
+        dlg = ModelVisibilityForm(name, cats, ws, cat_hidden, ws_hidden)
+        try:
+            dlg.Owner = self
+        except Exception:
+            pass
+        if not dlg.ShowDialog():
+            return
+        for cat, checked in dlg.cat_states.items():
+            key = name + "||" + cat
+            hidden = key in self._hidden_cats
+            if checked and hidden:
+                self._hidden_cats.discard(key)
+                self._post("vis:cat:1:" + key)
+            elif (not checked) and (not hidden):
+                self._hidden_cats.add(key)
+                self._post("vis:cat:0:" + key)
+        for w, checked in dlg.ws_states.items():
+            key = name + "||" + w
+            hidden = key in self._hidden_ws
+            if checked and hidden:
+                self._hidden_ws.discard(key)
+                self._post("vis:ws:1:" + key)
+            elif (not checked) and (not hidden):
+                self._hidden_ws.add(key)
+                self._post("vis:ws:0:" + key)
 
     def _export_path(self, doc):
         try:
@@ -622,6 +775,65 @@ class ViewerForm(forms.WPFWindow):
                 self._webview.Dispose()
         except Exception:
             pass
+        self.Close()
+
+
+class ModelVisibilityForm(forms.WPFWindow):
+    """Popup editor for one model's category + workset visibility. Collects
+    checkbox states on Apply; the caller reads cat_states / ws_states and
+    pushes the changes to the render."""
+
+    def __init__(self, model_name, categories, worksets, cat_hidden, ws_hidden):
+        forms.WPFWindow.__init__(self, MODEL_VIS_XAML)
+        self.cat_states = {}
+        self.ws_states = {}
+        self._cat_checks = {}
+        self._ws_checks = {}
+        try:
+            self.txt_title.Text = model_name
+        except Exception:
+            pass
+        self._populate(self.sp_cats, categories, cat_hidden, self._cat_checks,
+                       "No model categories.")
+        self._populate(self.sp_ws, worksets, ws_hidden, self._ws_checks,
+                       "No worksets (model not workshared).")
+        self.btn_cats_all.Click  += (lambda s, a: self._set_all(self._cat_checks, True))
+        self.btn_cats_none.Click += (lambda s, a: self._set_all(self._cat_checks, False))
+        self.btn_ws_all.Click    += (lambda s, a: self._set_all(self._ws_checks, True))
+        self.btn_ws_none.Click   += (lambda s, a: self._set_all(self._ws_checks, False))
+        self.btn_apply.Click  += self._on_apply
+        self.btn_cancel.Click += self._on_cancel
+
+    def _populate(self, panel, items, hidden, store, empty_msg):
+        if not items:
+            tb = TextBlock()
+            tb.Text = empty_msg
+            tb.Foreground = SolidColorBrush(Color.FromRgb(0xA0, 0xAE, 0xC0))
+            tb.FontSize = 11
+            panel.Children.Add(tb)
+            return
+        for name in items:
+            chk = CheckBox()
+            chk.Content = name
+            chk.IsChecked = (name not in hidden)
+            panel.Children.Add(chk)
+            store[name] = chk
+
+    @staticmethod
+    def _set_all(store, state):
+        for chk in store.values():
+            chk.IsChecked = state
+
+    def _on_apply(self, sender, args):
+        self.cat_states = dict((n, bool(c.IsChecked))
+                               for n, c in self._cat_checks.items())
+        self.ws_states = dict((n, bool(c.IsChecked))
+                              for n, c in self._ws_checks.items())
+        self.DialogResult = True
+        self.Close()
+
+    def _on_cancel(self, sender, args):
+        self.DialogResult = False
         self.Close()
 
 

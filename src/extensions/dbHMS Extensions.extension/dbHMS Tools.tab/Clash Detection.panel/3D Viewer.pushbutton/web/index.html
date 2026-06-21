@@ -76,6 +76,18 @@ var FS = [
 ].join("\n");
 
 var program = null, loc = {}, groups = [], bounds = null;
+var SEP = "||";    // model<->category key separator (safe in Revit names)
+var hiddenModel = {};  // model name -> true if the whole model is hidden
+var hiddenCat = {};    // "model<SEP>category" -> true if that category is hidden
+var hiddenWs = {};     // "model<SEP>workset"  -> true if that workset is hidden
+function catKey(g) { return g.model + SEP + g.category; }
+function wsKey(g) { return g.model + SEP + g.workset; }
+function recomputeVisibility() {
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i];
+    g.visible = !(hiddenModel[g.model] || hiddenCat[catKey(g)] || hiddenWs[wsKey(g)]);
+  }
+}
 
 function perspective(fovy, aspect, near, far) {
   var f = 1.0 / Math.tan(fovy / 2), nf = 1 / (near - far);
@@ -139,6 +151,7 @@ function buildPrimitives(gltf, bin) {
   for (var n = 0; n < nodes.length; n++) {
     if (nodes[n].mesh === undefined) continue;
     var mesh = gltf.meshes[nodes[n].mesh];
+    var extras = nodes[n].extras || {};
     for (var p = 0; p < mesh.primitives.length; p++) {
       var prim = mesh.primitives[p];
       var pacc = gltf.accessors[prim.attributes.POSITION], pbv = gltf.bufferViews[pacc.bufferView];
@@ -153,17 +166,23 @@ function buildPrimitives(gltf, bin) {
         var bcf = gltf.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
         if (bcf) color = [bcf[0], bcf[1], bcf[2]];
       }
-      prims.push({ positions: positions, indices: indices, color: color });
+      prims.push({ positions: positions, indices: indices, color: color,
+                   category: extras.category || "Other",
+                   model: extras.model || "Model",
+                   workset: extras.workset || "" });
     }
   }
   return prims;
 }
-function mergeByColor(prims) {
+// Merge by (model, category, workset) so we can show/hide a whole model, an
+// individual category, or a workset within a model, while keeping draw calls
+// low.
+function mergeByModelCat(prims) {
   var byKey = {};
   for (var i = 0; i < prims.length; i++) {
     var p = prims[i];
-    var key = Math.round(p.color[0]*255)+","+Math.round(p.color[1]*255)+","+Math.round(p.color[2]*255);
-    if (!byKey[key]) byKey[key] = { color: p.color, prims: [] };
+    var key = p.model + SEP + p.category + SEP + p.workset;
+    if (!byKey[key]) byKey[key] = { color: p.color, model: p.model, category: p.category, workset: p.workset, prims: [] };
     byKey[key].prims.push(p);
   }
   var out = [];
@@ -181,7 +200,7 @@ function mergeByColor(prims) {
       else { for (x = 0; x < nv; x++) idx[io+x] = baseVert + x; io += nv; }
       vo += pr.positions.length; baseVert += nv;
     }
-    out.push({ positions: pos, indices: idx, color: g.color });
+    out.push({ positions: pos, indices: idx, color: g.color, model: g.model, category: g.category, workset: g.workset });
   }
   return out;
 }
@@ -190,7 +209,8 @@ function loadModel(buffer) {
   if (!parsed.json || !parsed.bin) { showHint("Could not read model file."); return; }
   for (var i = 0; i < groups.length; i++) { gl.deleteBuffer(groups[i].posBuf); gl.deleteBuffer(groups[i].idxBuf); }
   groups = [];
-  var merged = mergeByColor(buildPrimitives(parsed.json, parsed.bin));
+  hiddenModel = {}; hiddenCat = {}; hiddenWs = {};
+  var merged = mergeByModelCat(buildPrimitives(parsed.json, parsed.bin));
   var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
   for (var m = 0; m < merged.length; m++) {
     var grp = merged[m];
@@ -199,7 +219,8 @@ function loadModel(buffer) {
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.positions, gl.STATIC_DRAW);
     var idxBuf = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
-    groups.push({ posBuf: posBuf, idxBuf: idxBuf, count: grp.indices.length, color: grp.color });
+    groups.push({ posBuf: posBuf, idxBuf: idxBuf, count: grp.indices.length, color: grp.color,
+                  model: grp.model, category: grp.category, workset: grp.workset, visible: true });
     var pp = grp.positions;
     for (var v = 0; v < pp.length; v += 3) {
       if (pp[v] < mn[0]) mn[0] = pp[v]; if (pp[v] > mx[0]) mx[0] = pp[v];
@@ -208,6 +229,7 @@ function loadModel(buffer) {
     }
   }
   if (groups.length === 0) { showHint("Model had no geometry."); return; }
+  reportFilters();
   bounds = {
     center: [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2],
     radius: Math.max(0.001, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]) / 2)
@@ -277,6 +299,7 @@ function frame(now) {
     gl.uniform3fv(loc.uCameraPos, new Float32Array(eye));
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
+      if (!g.visible) continue;
       gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
       gl.enableVertexAttribArray(loc.aPos);
       gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
@@ -354,8 +377,31 @@ function loadModelFromUrl(url) {
   fetch(url).then(function (r) { return r.arrayBuffer(); }).then(function (buf) { loadModel(buf); })
     .catch(function (err) { showHint("Failed to load model: " + (err && err.message ? err.message : err)); });
 }
-// Messages from the WPF control panel: "url:<href>", "b64:<data>",
-// "speed:<m/s>", "look:<deg/px>".
+// After a model loads, tell the control panel which models are present and
+// the categories within each, so it can build the model -> categories tree.
+function reportFilters() {
+  if (!(window.chrome && window.chrome.webview)) return;
+  var byModel = {};
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i], m = g.model || "Model";
+    if (!byModel[m]) byModel[m] = { cats: {}, ws: {} };
+    byModel[m].cats[g.category || "Other"] = true;
+    if (g.workset) byModel[m].ws[g.workset] = true;
+  }
+  var models = Object.keys(byModel).sort().map(function (m) {
+    return { name: m,
+             categories: Object.keys(byModel[m].cats).sort(),
+             worksets: Object.keys(byModel[m].ws).sort() };
+  });
+  window.chrome.webview.postMessage("filters:" + JSON.stringify({ models: models }));
+}
+
+// Messages from the WPF control panel:
+//   "url:<href>" / "b64:<data>"     -> load model
+//   "speed:<m/s>" / "look:<deg/px>" -> nav tuning
+//   "vis:model:<0|1>:<model>"               -> show/hide a whole model
+//   "vis:cat:<0|1>:<model>||<category>"     -> show/hide a category in a model
+//   "vis:ws:<0|1>:<model>||<workset>"       -> show/hide a workset in a model
 function handleMessage(data) {
   if (typeof data !== "string") return;
   var i = data.indexOf(":"); if (i < 0) return;
@@ -365,6 +411,15 @@ function handleMessage(data) {
     else if (cmd === "b64") { showLoading(); loadModel(b64ToBuffer(arg)); }
     else if (cmd === "speed") { var s = parseFloat(arg); if (!isNaN(s)) userSpeed = s; }
     else if (cmd === "look") { var l = parseFloat(arg); if (!isNaN(l)) userLook = l; }
+    else if (cmd === "vis") {
+      // arg = "<kind>:<0|1>:<value>"  (value may contain colons / the || sep)
+      var d1 = arg.indexOf(":"), kind = arg.slice(0, d1);
+      var rest = arg.slice(d1 + 1), d2 = rest.indexOf(":");
+      var shown = rest.slice(0, d2) === "1", value = rest.slice(d2 + 1);
+      var set = (kind === "model") ? hiddenModel : (kind === "cat") ? hiddenCat
+                : (kind === "ws") ? hiddenWs : null;
+      if (set) { if (shown) delete set[value]; else set[value] = true; recomputeVisibility(); }
+    }
   } catch (err) { showHint("Error: " + (err && err.message ? err.message : err)); }
 }
 

@@ -162,37 +162,15 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Visibility" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Instant show / hide. Wires up in a later phase; everything exports so you toggle here, never re-export."
+                            <TextBlock Text="Turn whole models off, or individual categories within each model. Instant — nothing re-exports."
                                        Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
-                            <TextBlock Text="Disciplines" Style="{StaticResource FieldLabel}"/>
-                            <StackPanel IsEnabled="False">
-                                <CheckBox x:Name="chk_vis_mechanical"     Content="Mechanical"      IsChecked="True"/>
-                                <CheckBox x:Name="chk_vis_electrical"     Content="Electrical"      IsChecked="True"/>
-                                <CheckBox x:Name="chk_vis_plumbing"       Content="Plumbing"        IsChecked="True"/>
-                                <CheckBox x:Name="chk_vis_fireprotection" Content="Fire Protection" IsChecked="True"/>
-                                <CheckBox x:Name="chk_vis_architectural"  Content="Architectural"   IsChecked="True"/>
-                                <CheckBox x:Name="chk_vis_structural"     Content="Structural"      IsChecked="True"/>
-                            </StackPanel>
-                            <TextBlock Text="Categories" Style="{StaticResource FieldLabel}"/>
-                            <Border x:Name="brd_categories" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                            <Border x:Name="brd_models" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads, each with an on/off toggle."/>
+                                <TextBlock Style="{StaticResource HelperText}" Text="Your model and each linked model — with their categories — list here after a model loads."/>
                             </Border>
-                            <TextBlock Text="Worksets" Style="{StaticResource FieldLabel}"/>
-                            <Border x:Name="brd_worksets" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads."/>
-                            </Border>
-                            <TextBlock Text="Linked models" Style="{StaticResource FieldLabel}"/>
-                            <Border x:Name="brd_links" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads."/>
-                            </Border>
-                            <TextBlock Text="Levels" Style="{StaticResource FieldLabel}"/>
-                            <Border x:Name="brd_levels" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Lists after a model loads; isolate or hide by level."/>
-                            </Border>
+                            <TextBlock Text="Worksets &amp; Levels (coming)" Style="{StaticResource FieldLabel}"/>
+                            <TextBlock Style="{StaticResource HelperText}"
+                                       Text="Per-model workset and level toggles are the next step in this phase."/>
                         </StackPanel>
                     </Border>
 
