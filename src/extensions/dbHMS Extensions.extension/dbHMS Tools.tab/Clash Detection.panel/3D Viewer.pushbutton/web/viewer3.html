@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dbHMS 3D Viewer (three.js)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a3340; }
+  #c { width: 100vw; height: 100vh; display: block; }
+  #badge { position: fixed; left: 10px; bottom: 8px; font: 700 13px Segoe UI, sans-serif;
+           color: #9fb4c8; background: rgba(20,26,33,0.55); padding: 2px 8px; border-radius: 4px;
+           user-select: none; pointer-events: none; }
+  #badge b { color: #00BFFF; }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+          font: 14px Segoe UI, sans-serif; color: #cbd5e0; text-align: center; }
+</style>
+<!-- Offline ES module resolution: "three" and "three/addons/..." map to vendored files. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./lib/three/three.module.js",
+    "three/addons/": "./lib/three/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="badge">db<b> | </b>HMS</div>
+<div id="hint">Loading viewer…</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const canvas = document.getElementById('c');
+const hint = document.getElementById('hint');
+function showHint(t) { hint.textContent = t; hint.style.display = t ? 'block' : 'none'; }
+
+// --- renderer: linear workflow, ACES tone mapping, soft shadows, log depth ---
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a3340);
+
+// --- image-based lighting from a procedural room (soft, even ambient + reflections) ---
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// --- sun (the key light + shadows) + a gentle fill ---
+const sun = new THREE.DirectionalLight(0xfff4e6, 2.6);
+sun.position.set(0.5, 1.0, 0.35);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+scene.add(sun.target);
+scene.add(new THREE.HemisphereLight(0xbcd0e6, 0x6b6256, 0.35));
+
+const camera = new THREE.PerspectiveCamera(60, 2, 0.05, 50000);
+camera.position.set(10, 8, 12);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+const loader = new GLTFLoader();
+let currentRoot = null;
+
+function clearModel() {
+  if (currentRoot) {
+    scene.remove(currentRoot);
+    currentRoot.traverse(o => {
+      if (o.isMesh) { o.geometry.dispose(); if (o.material.map) o.material.map.dispose(); o.material.dispose(); }
+    });
+    currentRoot = null;
+  }
+}
+
+function frameToObject(root) {
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+  controls.target.copy(center);
+  camera.position.set(center.x + radius * 1.4, center.y + radius * 0.9, center.z + radius * 1.8);
+  // fit near/far to the model so depth precision stays tight (log depth handles the rest)
+  camera.near = Math.max(0.02, radius * 0.002);
+  camera.far = radius * 40 + 100;
+  camera.updateProjectionMatrix();
+  // size the sun's shadow frustum to the model
+  const d = radius * 2.2;
+  sun.position.copy(center).add(new THREE.Vector3(0.5, 1.0, 0.35).normalize().multiplyScalar(radius * 3));
+  sun.target.position.copy(center);
+  const sc = sun.shadow.camera;
+  sc.left = -d; sc.right = d; sc.top = d; sc.bottom = -d;
+  sc.near = 0.1; sc.far = radius * 8 + 50;
+  sc.updateProjectionMatrix();
+  controls.update();
+}
+
+function onLoaded(gltf) {
+  clearModel();
+  currentRoot = gltf.scene;
+  currentRoot.traverse(o => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      // Revit exports are double-sided; make sure thin faces don't drop out.
+      if (o.material) o.material.side = THREE.DoubleSide;
+    }
+  });
+  scene.add(currentRoot);
+  frameToObject(currentRoot);
+  showHint('');
+}
+
+function loadFromArrayBuffer(buf) {
+  showHint('Parsing model…');
+  try {
+    loader.parse(buf, '', onLoaded, err => showHint('Load error: ' + (err && err.message ? err.message : err)));
+  } catch (e) { showHint('Load error: ' + e.message); }
+}
+function loadFromUrl(url) {
+  showHint('Loading model…');
+  loader.load(url, onLoaded, undefined, err => showHint('Load error: ' + (err && err.message ? err.message : err)));
+}
+function b64ToBuffer(b64) {
+  const bin = atob(b64); const len = bin.length; const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// --- panel <-> viewer messages (same protocol shape as the old viewer) ---
+function handleMessage(data) {
+  if (typeof data !== 'string') return;
+  const i = data.indexOf(':'); if (i < 0) return;
+  const cmd = data.slice(0, i), arg = data.slice(i + 1);
+  if (cmd === 'url') loadFromUrl(arg);
+  else if (cmd === 'b64') loadFromArrayBuffer(b64ToBuffer(arg));
+}
+if (window.chrome && window.chrome.webview) {
+  window.chrome.webview.addEventListener('message', e => handleMessage(e.data));
+}
+// preview/testing hooks
+window.dbhmsLoadB64 = b64 => loadFromArrayBuffer(b64ToBuffer(b64));
+window.dbhmsLoadUrl = loadFromUrl;
+window.THREE = THREE; window.__scene = scene; window.__camera = camera; window.__renderer = renderer;
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / Math.max(1, h);
+    camera.updateProjectionMatrix();
+  }
+}
+function animate() {
+  requestAnimationFrame(animate);
+  resize();
+  controls.update();
+  renderer.render(scene, camera);
+}
+showHint('Ready. Export & load a model to begin.');
+animate();
+</script>
+</body>
+</html>
