@@ -265,6 +265,13 @@ class ViewerForm(forms.WPFWindow):
             except Exception:
                 _log("init: WebMessageReceived wire failed\n{0}".format(
                     traceback.format_exc()))
+            # Navigation tracing: log every page load + its outcome so we can see
+            # exactly which page ends up displayed and why a navigation failed.
+            try:
+                core.NavigationStarting += self._on_nav_starting
+                core.NavigationCompleted += self._on_nav_completed
+            except Exception:
+                _log("init: nav-trace wire failed\n{0}".format(traceback.format_exc()))
             # Resolve the access-kind enum from the SAME assembly instance the
             # core object came from. Importing the type directly can bind to a
             # different loaded copy of WebView2.Core (Revit/Dynamo also load
@@ -277,15 +284,13 @@ class ViewerForm(forms.WPFWindow):
                 # Serve _DATA_ROOT (app/ + models/) under one https origin so
                 # the page can fetch large model files past the message limit.
                 core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
-                # Cache-bust by the page's mtime so WebView2 never serves a stale
-                # viewer after an update (Chromium caches the vhost aggressively).
-                try:
-                    ver = int(os.path.getmtime(app_index))
-                except Exception:
-                    ver = 0
-                core.Navigate("https://{0}/app/{1}?v={2}".format(VHOST, APP_PAGE, ver))
+                # Defeat WebView2's aggressive vhost cache with a versioned
+                # FILENAME (a real file -> no query string for the host to choke
+                # on, and a fresh name each update so a stale copy can't be served).
+                page = self._versioned_page(app_index)
+                core.Navigate("https://{0}/app/{1}".format(VHOST, page))
                 self._vhost_ok = True
-                _log("init: vhost mapped, navigated to app/{0}?v={1}".format(APP_PAGE, ver))
+                _log("init: vhost mapped, navigated to app/{0}".format(page))
             else:
                 _log("init: app index missing at {0}, staying on file://"
                      .format(app_index))
@@ -293,6 +298,41 @@ class ViewerForm(forms.WPFWindow):
             # Virtual host unavailable: stay on the local file. Small models
             # still load via the base64 path.
             _log("init: vhost EXCEPTION\n{}".format(traceback.format_exc()))
+
+    def _versioned_page(self, app_index):
+        """Copy the served page to a per-version filename (viewer3.<mtime>.html)
+        and return that name, so each update navigates to a brand-new URL that no
+        WebView2 cache can satisfy with a stale copy. Relative imports in the page
+        resolve against /app/ regardless of the filename. Falls back to the plain
+        page name if the copy fails."""
+        try:
+            stem = APP_PAGE.rsplit('.', 1)[0]
+            ver = int(os.path.getmtime(app_index))
+            for f in os.listdir(APP_DIR):   # drop older versioned copies
+                if f.startswith(stem + '.') and f.endswith('.html') and f != APP_PAGE:
+                    try:
+                        os.remove(os.path.join(APP_DIR, f))
+                    except Exception:
+                        pass
+            versioned = "{0}.{1}.html".format(stem, ver)
+            shutil.copy2(app_index, os.path.join(APP_DIR, versioned))
+            return versioned
+        except Exception:
+            _log("versioned_page: {0}".format(traceback.format_exc().splitlines()[-1]))
+            return APP_PAGE
+
+    def _on_nav_starting(self, sender, args):
+        try:
+            _log("nav start: {0}".format(args.Uri))
+        except Exception:
+            pass
+
+    def _on_nav_completed(self, sender, args):
+        try:
+            _log("nav done: success={0} err={1}".format(
+                args.IsSuccess, args.WebErrorStatus))
+        except Exception:
+            pass
 
     def _show_viewport_message(self, msg):
         """Replace the viewport content with a readable message (used when
