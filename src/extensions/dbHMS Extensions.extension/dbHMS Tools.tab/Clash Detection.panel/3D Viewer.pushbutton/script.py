@@ -362,6 +362,24 @@ class ViewerForm(forms.WPFWindow):
 
     # --- Actions ------------------------------------------------------
 
+    def _active_3d_view(self, doc, view):
+        """A non-template 3D view for CustomExporter: the active view if it's 3D,
+        else the first usable 3D view in the document, else None (-> caller falls
+        back to the geometry-API exporter)."""
+        from Autodesk.Revit.DB import View3D, FilteredElementCollector
+        try:
+            if isinstance(view, View3D) and not view.IsTemplate:
+                return view
+        except Exception:
+            pass
+        try:
+            for v in FilteredElementCollector(doc).OfClass(View3D):
+                if v is not None and not v.IsTemplate:
+                    return v
+        except Exception:
+            pass
+        return None
+
     def _on_export(self, sender, args):
         """Export the whole model (host + linked) to a .glb and load it into
         the panel. Streams to disk so large models stay memory-safe; models
@@ -388,7 +406,30 @@ class ViewerForm(forms.WPFWindow):
         t0 = time.time()
         try:
             path = self._export_path(doc)
-            result = revit_geometry.export_model(doc, path, view=view)
+            # Prefer the high-fidelity CustomExporter (smooth curves, view-faithful
+            # geometry, per-vertex normals); fall back to the geometry-API exporter
+            # on ANY failure so an export always succeeds.
+            view3d = self._active_3d_view(doc, view)
+            if view3d is not None:
+                try:
+                    from clash_export import custom_export
+                    ce = custom_export.export_view(doc, path, view3d)
+                    if ce.get("elements", 0) > 0 and ce.get("bytes", 0) > 0:
+                        result = {"path": path, "asset_extras": None, "stats": {
+                            "elements": ce["elements"], "host_elements": ce["elements"],
+                            "link_elements": 0, "triangles": ce["triangles"],
+                            "models": 1, "bytes": ce["bytes"], "capped": False}}
+                        _log("export: used CustomExporter ({0} elements)".format(ce["elements"]))
+                    else:
+                        _log("export: CustomExporter produced no geometry, falling back")
+                        result = None
+                except Exception:
+                    _log("export: CustomExporter failed, falling back to geometry API\n{0}"
+                         .format(traceback.format_exc()))
+                    result = None
+            if result is None:
+                result = revit_geometry.export_model(doc, path, view=view)
+                _log("export: used geometry-API exporter")
         except Exception:
             error = traceback.format_exc()
         finally:
