@@ -65,7 +65,8 @@ SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'ViewerForm.xaml')
 MODEL_VIS_XAML = os.path.join(SCRIPT_DIR, 'ModelVisibilityForm.xaml')
 WEB_DIR    = os.path.join(SCRIPT_DIR, 'web')
-WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')
+WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')   # file:// init trigger + fallback
+APP_PAGE   = 'viewer3.html'                          # the page served over the virtual host (three.js)
 
 # Writable runtime root. We serve the viewer + exported models from here
 # through a WebView2 virtual host so the panel can fetch large model files
@@ -224,11 +225,16 @@ class ViewerForm(forms.WPFWindow):
         try:
             if not os.path.isdir(APP_DIR):
                 os.makedirs(APP_DIR)
+            # Recursive copy so subfolders (e.g. the vendored three.js under
+            # lib/three/) reach the served app folder, not just top-level files.
             n = 0
-            for name in os.listdir(WEB_DIR):
-                src = os.path.join(WEB_DIR, name)
-                if os.path.isfile(src):
-                    shutil.copy2(src, os.path.join(APP_DIR, name))
+            for dirpath, _dirs, files in os.walk(WEB_DIR):
+                rel = os.path.relpath(dirpath, WEB_DIR)
+                dst_dir = APP_DIR if rel == "." else os.path.join(APP_DIR, rel)
+                if not os.path.isdir(dst_dir):
+                    os.makedirs(dst_dir)
+                for name in files:
+                    shutil.copy2(os.path.join(dirpath, name), os.path.join(dst_dir, name))
                     n += 1
             _log("sync_app_assets: copied {0} file(s) to {1}".format(n, APP_DIR))
         except Exception:
@@ -258,12 +264,12 @@ class ViewerForm(forms.WPFWindow):
             ak_type = core.GetType().Assembly.GetType(
                 "Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind")
             allow = System.Enum.Parse(ak_type, "Allow")
-            app_index = os.path.join(APP_DIR, 'index.html')
+            app_index = os.path.join(APP_DIR, APP_PAGE)
             if os.path.isfile(app_index):
                 # Serve _DATA_ROOT (app/ + models/) under one https origin so
                 # the page can fetch large model files past the message limit.
                 core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
-                core.Navigate("https://{0}/app/index.html".format(VHOST))
+                core.Navigate("https://{0}/app/{1}".format(VHOST, APP_PAGE))
                 self._vhost_ok = True
                 _log("init: vhost mapped to {0}, navigated".format(_DATA_ROOT))
             else:

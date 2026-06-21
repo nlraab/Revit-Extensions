@@ -6,40 +6,42 @@
 <title>dbHMS 3D Viewer (three.js)</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #2a3340; }
-  #c { width: 100vw; height: 100vh; display: block; }
+  #c { width: 100vw; height: 100vh; display: block; outline: none; }
   #badge { position: fixed; left: 10px; bottom: 8px; font: 700 13px Segoe UI, sans-serif;
            color: #9fb4c8; background: rgba(20,26,33,0.55); padding: 2px 8px; border-radius: 4px;
            user-select: none; pointer-events: none; }
   #badge b { color: #00BFFF; }
   #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
-          font: 14px Segoe UI, sans-serif; color: #cbd5e0; text-align: center; }
+          font: 14px Segoe UI, sans-serif; color: #cbd5e0; text-align: center; pointer-events: none; }
+  #props { position: fixed; display: none; max-width: 300px; background: rgba(255,255,255,0.97);
+           border: 1px solid #cbd5e0; border-radius: 4px; padding: 6px 12px; font: 12px Segoe UI, sans-serif;
+           box-shadow: 0 3px 10px rgba(0,0,0,0.30); z-index: 10; pointer-events: none; }
+  #props .t { font-weight: 700; color: #1A202C; margin-bottom: 4px; }
+  #props .r { color: #4A5568; line-height: 1.5; }
+  #props .r b { color: #2D3748; font-weight: 600; }
 </style>
-<!-- Offline ES module resolution: "three" and "three/addons/..." map to vendored files. -->
 <script type="importmap">
-{
-  "imports": {
-    "three": "./lib/three/three.module.js",
-    "three/addons/": "./lib/three/addons/"
-  }
-}
+{ "imports": { "three": "./lib/three/three.module.js", "three/addons/": "./lib/three/addons/" } }
 </script>
 </head>
 <body>
-<canvas id="c"></canvas>
+<canvas id="c" tabindex="0"></canvas>
 <div id="badge">db<b> | </b>HMS</div>
 <div id="hint">Loading viewer…</div>
+<div id="props"></div>
 
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const canvas = document.getElementById('c');
 const hint = document.getElementById('hint');
-function showHint(t) { hint.textContent = t; hint.style.display = t ? 'block' : 'none'; }
+const props = document.getElementById('props');
+function showHint(t) { hint.textContent = t || ''; hint.style.display = t ? 'block' : 'none'; }
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-// --- renderer: linear workflow, ACES tone mapping, soft shadows, log depth ---
+// ---------- renderer ----------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -50,128 +52,358 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2a3340);
-
-// --- image-based lighting from a procedural room (soft, even ambient + reflections) ---
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
-// --- sun (the key light + shadows) + a gentle fill ---
 const sun = new THREE.DirectionalLight(0xfff4e6, 2.6);
-sun.position.set(0.5, 1.0, 0.35);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.bias = -0.0004;
-sun.shadow.normalBias = 0.02;
-scene.add(sun);
-scene.add(sun.target);
+sun.shadow.normalBias = 0.04;
+scene.add(sun, sun.target);
 scene.add(new THREE.HemisphereLight(0xbcd0e6, 0x6b6256, 0.35));
 
 const camera = new THREE.PerspectiveCamera(60, 2, 0.05, 50000);
-camera.position.set(10, 8, 12);
 
-const controls = new OrbitControls(camera, canvas);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+// ---------- free-fly camera (ported from the WebGL viewer) ----------
+const cam = { pos: [0, 0, 0], yaw: 0, pitch: 0 };
+let vel = [0, 0, 0], keys = {}, dragMode = null, rightLook = false, locked = false;
+let lastX = 0, lastY = 0, prevT = 0;
+let userSpeed = 4.0, userLook = 0.10;
+const PITCH_LIMIT = Math.PI / 2 - 0.02;
+function lookRad(){ return userLook * Math.PI / 180; }
+function forwardVec(){ const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  return [cp * Math.sin(cam.yaw), sp, -cp * Math.cos(cam.yaw)]; }
+function rightVec(){ return [Math.cos(cam.yaw), 0, Math.sin(cam.yaw)]; }
+function applyCameraToThree(){
+  const f = forwardVec();
+  camera.position.set(cam.pos[0], cam.pos[1], cam.pos[2]);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(cam.pos[0] + f[0], cam.pos[1] + f[1], cam.pos[2] + f[2]);
+}
 
+// ---------- model state ----------
 const loader = new GLTFLoader();
-let currentRoot = null;
+let root = null;                 // loaded glTF scene
+let elements = [];               // [{obj, meta, model, category, workset, center, box}]
+let pickables = [];              // meshes for raycasting
+let bounds = null;               // {center:THREE.Vector3, radius}
+let assetExtras = {};
+const hiddenModel = {}, hiddenCat = {}, hiddenWs = {};
+const SEP = '||';
+function catKey(e){ return e.model + SEP + e.category; }
+function wsKey(e){ return e.model + SEP + e.workset; }
 
-function clearModel() {
-  if (currentRoot) {
-    scene.remove(currentRoot);
-    currentRoot.traverse(o => {
-      if (o.isMesh) { o.geometry.dispose(); if (o.material.map) o.material.map.dispose(); o.material.dispose(); }
-    });
-    currentRoot = null;
-  }
+function disposeModel(){
+  if (!root) return;
+  scene.remove(root);
+  root.traverse(o => { if (o.isMesh){ o.geometry.dispose(); if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+  root = null; elements = []; pickables = [];
+  clearSelection(); clearMarkers();
 }
 
-function frameToObject(root) {
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
-  controls.target.copy(center);
-  camera.position.set(center.x + radius * 1.4, center.y + radius * 0.9, center.z + radius * 1.8);
-  // fit near/far to the model so depth precision stays tight (log depth handles the rest)
-  camera.near = Math.max(0.02, radius * 0.002);
-  camera.far = radius * 40 + 100;
-  camera.updateProjectionMatrix();
-  // size the sun's shadow frustum to the model
-  const d = radius * 2.2;
-  sun.position.copy(center).add(new THREE.Vector3(0.5, 1.0, 0.35).normalize().multiplyScalar(radius * 3));
-  sun.target.position.copy(center);
-  const sc = sun.shadow.camera;
-  sc.left = -d; sc.right = d; sc.top = d; sc.bottom = -d;
-  sc.near = 0.1; sc.far = radius * 8 + 50;
-  sc.updateProjectionMatrix();
-  controls.update();
+// element metadata lives in node.userData (glTF node extras). Walk up from a hit
+// mesh to the nearest ancestor carrying element_id.
+function elementOf(obj){
+  let o = obj;
+  while (o){ if (o.userData && o.userData.element_id !== undefined) return o; o = o.parent; }
+  return null;
 }
 
-function onLoaded(gltf) {
-  clearModel();
-  currentRoot = gltf.scene;
-  currentRoot.traverse(o => {
-    if (o.isMesh) {
-      o.castShadow = true;
-      o.receiveShadow = true;
-      // Revit exports are double-sided; make sure thin faces don't drop out.
+function onLoaded(gltf){
+  disposeModel();
+  root = gltf.scene;
+  assetExtras = (gltf.parser && gltf.parser.json.asset && gltf.parser.json.asset.extras) || {};
+  const ctrs = [];
+  root.traverse(o => {
+    if (o.userData && o.userData.element_id !== undefined){
+      const box = new THREE.Box3().setFromObject(o);
+      const center = box.getCenter(new THREE.Vector3());
+      const e = { obj: o, meta: o.userData, model: o.userData.model || 'Model',
+                  category: o.userData.category || 'Other', workset: o.userData.workset || '',
+                  center: center, box: box };
+      elements.push(e); ctrs.push(center);
+    }
+    if (o.isMesh){
+      o.castShadow = true; o.receiveShadow = true;
       if (o.material) o.material.side = THREE.DoubleSide;
+      pickables.push(o);
     }
   });
-  scene.add(currentRoot);
-  frameToObject(currentRoot);
+  scene.add(root);
+  computeBounds(ctrs);
+  frameCamera();
+  recomputeVisibility();
+  reportFilters();
   showHint('');
 }
 
-function loadFromArrayBuffer(buf) {
-  showHint('Parsing model…');
-  try {
-    loader.parse(buf, '', onLoaded, err => showHint('Load error: ' + (err && err.message ? err.message : err)));
-  } catch (e) { showHint('Load error: ' + e.message); }
-}
-function loadFromUrl(url) {
-  showHint('Loading model…');
-  loader.load(url, onLoaded, undefined, err => showHint('Load error: ' + (err && err.message ? err.message : err)));
-}
-function b64ToBuffer(b64) {
-  const bin = atob(b64); const len = bin.length; const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
+// Robust bounds from element centers (a few stray elements can't hijack it).
+function computeBounds(ctrs){
+  if (!ctrs.length){ bounds = { center: new THREE.Vector3(), radius: 10 }; return; }
+  let sx=0,sy=0,sz=0,sq=0;
+  for (const c of ctrs){ sx+=c.x; sy+=c.y; sz+=c.z; sq+=c.x*c.x+c.y*c.y+c.z*c.z; }
+  const n = ctrs.length, cx=sx/n, cy=sy/n, cz=sz/n;
+  const rms = Math.sqrt(Math.max(0, sq/n - (cx*cx+cy*cy+cz*cz)));
+  const full = new THREE.Box3().setFromObject(root);
+  const fr = full.getSize(new THREE.Vector3()).length() / 2 || 10;
+  bounds = { center: new THREE.Vector3(cx,cy,cz), radius: Math.min(fr, Math.max(2, rms*2.5)) };
 }
 
-// --- panel <-> viewer messages (same protocol shape as the old viewer) ---
-function handleMessage(data) {
-  if (typeof data !== 'string') return;
-  const i = data.indexOf(':'); if (i < 0) return;
-  const cmd = data.slice(0, i), arg = data.slice(i + 1);
-  if (cmd === 'url') loadFromUrl(arg);
-  else if (cmd === 'b64') loadFromArrayBuffer(b64ToBuffer(arg));
+function frameCamera(){
+  const c = bounds.center, R = bounds.radius;
+  cam.pos = [c.x + R*0.9, c.y + R*0.5, c.z + R*1.7];
+  const dir = [c.x-cam.pos[0], c.y-cam.pos[1], c.z-cam.pos[2]];
+  const dl = Math.hypot(dir[0],dir[1],dir[2]) || 1;
+  cam.yaw = Math.atan2(dir[0]/dl, -dir[2]/dl);
+  cam.pitch = Math.asin(Math.max(-1, Math.min(1, dir[1]/dl)));
+  vel = [0,0,0];
+  updateClip();
 }
-if (window.chrome && window.chrome.webview) {
-  window.chrome.webview.addEventListener('message', e => handleMessage(e.data));
+function updateClip(){
+  if (!bounds) return;
+  const d = Math.hypot(cam.pos[0]-bounds.center.x, cam.pos[1]-bounds.center.y, cam.pos[2]-bounds.center.z);
+  camera.near = 0.05;
+  camera.far = d + bounds.radius * 3 + 50;          // log depth keeps precision across this
+  camera.updateProjectionMatrix();
+  const r = bounds.radius;
+  sun.position.copy(bounds.center).add(new THREE.Vector3(0.5,1.0,0.35).normalize().multiplyScalar(r*3));
+  sun.target.position.copy(bounds.center);
+  const sc = sun.shadow.camera;
+  sc.left=-r; sc.right=r; sc.top=r; sc.bottom=-r; sc.near=0.1; sc.far=r*8+50; sc.updateProjectionMatrix();
 }
-// preview/testing hooks
-window.dbhmsLoadB64 = b64 => loadFromArrayBuffer(b64ToBuffer(b64));
-window.dbhmsLoadUrl = loadFromUrl;
-window.THREE = THREE; window.__scene = scene; window.__camera = camera; window.__renderer = renderer;
 
-function resize() {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== w || canvas.height !== h) {
-    renderer.setSize(w, h, false);
-    camera.aspect = w / Math.max(1, h);
-    camera.updateProjectionMatrix();
+// ---------- visibility ----------
+function recomputeVisibility(){
+  for (const e of elements){
+    e.obj.visible = !(hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)]);
   }
 }
-function animate() {
-  requestAnimationFrame(animate);
+function reportFilters(){
+  const byModel = {};
+  for (const e of elements){
+    const m = byModel[e.model] || (byModel[e.model] = { cats:{}, ws:{} });
+    m.cats[e.category] = true; if (e.workset) m.ws[e.workset] = true;
+  }
+  // Match the WebGL viewer's exact shape so the WPF panel parses it unchanged.
+  const models = Object.keys(byModel).sort().map(m => ({ name:m,
+    categories:Object.keys(byModel[m].cats).sort(),
+    worksets:Object.keys(byModel[m].ws).sort() }));
+  post('filters:' + JSON.stringify({ models: models }));
+}
+
+// ---------- selection (raycasting) ----------
+const raycaster = new THREE.Raycaster();
+let hoverEl = null, pinnedEl = null, hlBox = null;
+function ensureHlBox(){
+  if (!hlBox){ hlBox = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(0xffd633));
+    hlBox.material.depthTest = false; hlBox.renderOrder = 999; scene.add(hlBox); }
+  return hlBox;
+}
+function setHighlight(e){
+  if (!e){ if (hlBox) hlBox.visible = false; return; }
+  ensureHlBox(); hlBox.box.copy(e.box); hlBox.visible = true;
+}
+function pickAt(px, py){
+  if (!pickables.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((px-rect.left)/rect.width)*2-1, -(((py-rect.top)/rect.height)*2-1));
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(pickables, false);
+  for (const h of hits){ if (h.object.visible){ const e = elementOf(h.object); if (e) return e; } }
+  return null;
+}
+function posProps(px, py){ props.style.display='block';
+  props.style.left = Math.max(4, Math.min(px+14, window.innerWidth-312))+'px';
+  props.style.top  = Math.max(4, Math.min(py+14, window.innerHeight-190))+'px'; }
+function row(l,v){ return v ? ('<div class="r"><b>'+l+':</b> '+esc(v)+'</div>') : ''; }
+function showHover(e, px, py){ const m=e.meta;
+  props.innerHTML = '<div class="t">'+esc(m.name||m.category||'Element')+'</div>'+row('Workset',m.workset)+
+    '<div class="r" style="color:#A0AEC0">click for details</div>'; posProps(px,py); }
+function showSelected(e, px, py){ const m=e.meta;
+  props.innerHTML = '<div class="t">'+esc(m.category||'Element')+'</div>'+row('Family',m.family)+row('Name',m.name)+
+    row('Model',m.model)+row('Level',m.level)+row('Workset',m.workset)+row('Placed by',m.creator)+
+    row('Id',m.element_id)+'<div class="r" style="color:#A0AEC0">Esc to deselect</div>'; posProps(px,py); }
+function refreshSel(px, py){
+  if (pinnedEl){ setHighlight(pinnedEl); showSelected(pinnedEl, px, py); }
+  else if (hoverEl){ setHighlight(hoverEl); showHover(hoverEl, px, py); }
+  else { setHighlight(null); props.style.display='none'; }
+}
+function clearHover(){ hoverEl = null; if (!pinnedEl){ setHighlight(null); props.style.display='none'; } }
+function clearSelection(){ hoverEl = null; pinnedEl = null; setHighlight(null); props.style.display='none'; }
+
+// ---------- clash markers + fly-to ----------
+let markers = null;
+function hostToViewer(p){ const o=assetExtras.offset_ft||[0,0,0], s=assetExtras.ft_to_m||0.3048;
+  return [ (p[0]-o[0])*s, (p[2]-o[2])*s, -(p[1]-o[1])*s ]; }
+let markerTex = null;
+function circleTexture(){ if (markerTex) return markerTex;
+  const cv=document.createElement('canvas'); cv.width=cv.height=64; const g=cv.getContext('2d');
+  g.beginPath(); g.arc(32,32,28,0,Math.PI*2); g.fillStyle='#fff'; g.fill();
+  markerTex=new THREE.CanvasTexture(cv); return markerTex; }
+function clearMarkers(){ if (markers){ scene.remove(markers); markers.geometry.dispose(); markers.material.dispose(); markers=null; } }
+function setClashMarkers(hostPts){
+  clearMarkers();
+  if (!hostPts || !hostPts.length) return;
+  const arr = new Float32Array(hostPts.length*3);
+  for (let i=0;i<hostPts.length;i++){ const v=hostToViewer(hostPts[i]); arr[i*3]=v[0]; arr[i*3+1]=v[1]; arr[i*3+2]=v[2]; }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(arr,3));
+  const m = new THREE.PointsMaterial({ size: 16, sizeAttenuation:false, map:circleTexture(),
+    transparent:true, alphaTest:0.5, depthTest:false, color:0xff6a1a });
+  markers = new THREE.Points(g, m); markers.renderOrder = 998; scene.add(markers);
+}
+let showMarkers = false;
+function applyMarkerVisibility(){ if (markers) markers.visible = showMarkers; }
+
+// eased fly-to
+let flying=false, flyFrom=null, flyTo=null, flyStart=0; const FLY_DUR=600;
+function nowMs(){ return (window.performance&&performance.now)?performance.now():Date.now(); }
+function startFly(toPos, toYaw, toPitch){ flyFrom={pos:cam.pos.slice(),yaw:cam.yaw,pitch:cam.pitch};
+  flyTo={pos:toPos,yaw:toYaw,pitch:toPitch}; flyStart=nowMs(); flying=true; }
+function flyToPoint(hostPt){ const v=hostToViewer(hostPt), f=forwardVec();
+  const dist=Math.max(2.5,(bounds?bounds.radius*0.08:6));
+  startFly([v[0]-f[0]*dist, v[1]-f[1]*dist, v[2]-f[2]*dist], cam.yaw, cam.pitch); }
+function updateFly(){ if (!flying) return; const tt=Math.min(1,(nowMs()-flyStart)/FLY_DUR);
+  const e = tt<0.5 ? 2*tt*tt : 1-Math.pow(-2*tt+2,2)/2;
+  cam.pos=[flyFrom.pos[0]+(flyTo.pos[0]-flyFrom.pos[0])*e, flyFrom.pos[1]+(flyTo.pos[1]-flyFrom.pos[1])*e, flyFrom.pos[2]+(flyTo.pos[2]-flyFrom.pos[2])*e];
+  let dy=flyTo.yaw-flyFrom.yaw; while(dy>Math.PI)dy-=2*Math.PI; while(dy<-Math.PI)dy+=2*Math.PI;
+  cam.yaw=flyFrom.yaw+dy*e; cam.pitch=flyFrom.pitch+(flyTo.pitch-flyFrom.pitch)*e;
+  if (tt>=1) flying=false; }
+
+// ---------- input ----------
+function isFlying(){ return keys.w||keys.a||keys.s||keys.d||keys.q||keys.e; }
+function applyMovement(dt, gp){
+  let sp=userSpeed; const f=forwardVec(), r=rightVec(), d=[0,0,0];
+  if(keys.w){d[0]+=f[0];d[1]+=f[1];d[2]+=f[2];} if(keys.s){d[0]-=f[0];d[1]-=f[1];d[2]-=f[2];}
+  if(keys.d){d[0]+=r[0];d[2]+=r[2];} if(keys.a){d[0]-=r[0];d[2]-=r[2];}
+  if(keys.e){d[1]+=1;} if(keys.q){d[1]-=1;}
+  let boost = keys.shift?3.0:1.0;
+  if (gp){ const dz=v=>Math.abs(v)<0.16?0:v; const lx=dz(gp.axes[0]||0), ly=dz(gp.axes[1]||0);
+    d[0]+=f[0]*(-ly)+r[0]*lx; d[1]+=f[1]*(-ly); d[2]+=f[2]*(-ly)+r[2]*lx;
+    d[1]+=((gp.buttons[5]&&gp.buttons[5].pressed)?1:0)-((gp.buttons[4]&&gp.buttons[4].pressed)?1:0);
+    if (gp.buttons[7]&&gp.buttons[7].value>0.5) boost=3.0; }
+  sp*=boost;
+  const mag=Math.hypot(d[0],d[1],d[2]); let target=[0,0,0];
+  if (mag>0){ const s=Math.min(mag,1)*sp/mag; target=[d[0]*s,d[1]*s,d[2]*s]; }
+  const k=Math.min(1,dt*9);
+  vel[0]+=(target[0]-vel[0])*k; vel[1]+=(target[1]-vel[1])*k; vel[2]+=(target[2]-vel[2])*k;
+  cam.pos[0]+=vel[0]*dt; cam.pos[1]+=vel[1]*dt; cam.pos[2]+=vel[2]*dt;
+}
+function applyLook(dx,dy){ cam.yaw+=dx*lookRad(); cam.pitch-=dy*lookRad();
+  cam.pitch=Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, cam.pitch)); }
+function applyPan(dx,dy){ const f=forwardVec(), r=rightVec();
+  const up=[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]];
+  const s=(bounds?bounds.radius:10)*0.0005;
+  cam.pos[0]+=(-r[0]*dx+up[0]*dy)*s; cam.pos[1]+=(-r[1]*dx+up[1]*dy)*s; cam.pos[2]+=(-r[2]*dx+up[2]*dy)*s; }
+
+let leftDown=null;
+canvas.addEventListener('mousedown', e => {
+  flying=false; canvas.focus();
+  if (e.button===2){ clearHover(); if(!locked && canvas.requestPointerLock){ rightLook=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
+  if (locked) return;
+  if (e.button===1){ clearHover(); dragMode='pan'; lastX=e.clientX; lastY=e.clientY; e.preventDefault(); }
+  else if (e.button===0){ leftDown={x:e.clientX,y:e.clientY}; }
+});
+window.addEventListener('mouseup', e => {
+  if (rightLook && e.button===2){ rightLook=false; if(document.exitPointerLock) document.exitPointerLock(); }
+  if (e.button===0 && leftDown && !locked){
+    if (Math.hypot(e.clientX-leftDown.x, e.clientY-leftDown.y) < 5){ const el=pickAt(e.clientX,e.clientY); pinnedEl=el; hoverEl=el; refreshSel(e.clientX,e.clientY); }
+    leftDown=null;
+  }
+  dragMode=null;
+});
+window.addEventListener('mousemove', e => {
+  if (locked){ applyLook(e.movementX||0, e.movementY||0); return; }
+  if (dragMode==='pan'){ applyPan(e.clientX-lastX, e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; return; }
+  if (isFlying()) return;
+  if (!pinnedEl){ hoverEl = pickAt(e.clientX, e.clientY); refreshSel(e.clientX, e.clientY); }
+});
+canvas.addEventListener('mouseleave', clearHover);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => { e.preventDefault(); flying=false;
+  const f=forwardVec(), step=(bounds?bounds.radius*0.012:0.3)*(e.deltaY<0?1:-1);
+  cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step; }, { passive:false });
+document.addEventListener('pointerlockchange', () => { locked=(document.pointerLockElement===canvas); if(!locked) rightLook=false; });
+window.addEventListener('keydown', e => { const k=e.key.toLowerCase();
+  if (k==='escape'){ clearSelection(); post('escape'); return; }
+  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); canvas.requestPointerLock(); } e.preventDefault(); return; }
+  if (k==='shift'){ keys.shift=true; return; }
+  if ('wasdqe'.indexOf(k)>=0){ keys[k]=true; flying=false; e.preventDefault(); } });
+window.addEventListener('keyup', e => { const k=e.key.toLowerCase(); keys[k==='shift'?'shift':k]=false; });
+window.addEventListener('blur', () => { keys={}; dragMode=null; clearHover(); });
+
+// ---------- panel <-> viewer messages ----------
+function post(msg){ if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg); }
+function b64ToBuffer(b64){ const bin=atob(b64), n=bin.length, a=new Uint8Array(n); for(let i=0;i<n;i++)a[i]=bin.charCodeAt(i); return a.buffer; }
+function loadFromUrl(url){ showHint('Loading model…'); loader.load(url, onLoaded, undefined, err=>showHint('Load error: '+(err&&err.message?err.message:err))); }
+function loadFromBuffer(buf){ showHint('Parsing model…'); try{ loader.parse(buf,'',onLoaded, err=>showHint('Load error: '+(err&&err.message?err.message:err))); }catch(e){ showHint('Load error: '+e.message); } }
+function handleMessage(data){
+  if (typeof data !== 'string') return;
+  const i=data.indexOf(':'); if(i<0) return;
+  const cmd=data.slice(0,i), arg=data.slice(i+1);
+  try {
+    if (cmd==='url') loadFromUrl(arg);
+    else if (cmd==='b64'){ loadFromBuffer(b64ToBuffer(arg)); }
+    else if (cmd==='speed'){ const s=parseFloat(arg); if(!isNaN(s)) userSpeed=s; }
+    else if (cmd==='look'){ const l=parseFloat(arg); if(!isNaN(l)) userLook=l; }
+    else if (cmd==='vis'){
+      const d1=arg.indexOf(':'), kind=arg.slice(0,d1), rest=arg.slice(d1+1), d2=rest.indexOf(':');
+      const shown=rest.slice(0,d2)==='1', value=rest.slice(d2+1);
+      const set = kind==='model'?hiddenModel : kind==='cat'?hiddenCat : kind==='ws'?hiddenWs : null;
+      if (set){ if(shown) delete set[value]; else set[value]=true; recomputeVisibility(); }
+    }
+    else if (cmd==='clashes'){ setClashMarkers(JSON.parse(arg)); applyMarkerVisibility(); }
+    else if (cmd==='showmarkers'){ showMarkers=(arg==='1'); applyMarkerVisibility(); }
+    else if (cmd==='flytopoint'){ const p=arg.split(',').map(parseFloat); if(p.length===3) flyToPoint(p); }
+    else if (cmd==='viewpose'){ const vp=JSON.parse(arg); startFly(vp.pos, vp.yaw, vp.pitch); }
+    else if (cmd==='quality'){ setQuality(arg); }
+  } catch(err){ showHint('Error: '+(err&&err.message?err.message:err)); }
+}
+if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', e => handleMessage(e.data));
+
+// quality tiers: Draft (no shadows/AO), Shaded (shadows), Realistic/Ultra (shadows; AO added later)
+let renderMode = 1;
+function setQuality(name){ const m={draft:0,shaded:1,realistic:2,ultra:3}; if(name in m){ renderMode=m[name];
+  renderer.shadowMap.enabled = renderMode>=1; scene.traverse(o=>{ if(o.isMesh) o.castShadow=o.receiveShadow=(renderMode>=1); }); } }
+
+// throttled camera report for saved viewpoints
+let lastCamReport=0, lastCam=null;
+function reportCam(t){
+  if (!(window.chrome && window.chrome.webview)) return;
+  if (t-lastCamReport < 300) return;
+  if (lastCam && lastCam.yaw===cam.yaw && lastCam.pitch===cam.pitch &&
+      lastCam.pos[0]===cam.pos[0] && lastCam.pos[1]===cam.pos[1] && lastCam.pos[2]===cam.pos[2]) return;
+  lastCam={pos:cam.pos.slice(),yaw:cam.yaw,pitch:cam.pitch};
+  post('cam:'+JSON.stringify(lastCam)); lastCamReport=t;
+}
+
+// preview/testing hooks
+window.dbhmsLoadUrl = loadFromUrl;
+window.dbhmsLoadB64 = b64 => loadFromBuffer(b64ToBuffer(b64));
+window.__msg = handleMessage; window.THREE=THREE; window.__scene=scene; window.__camera=camera; window.__renderer=renderer;
+window.__state = () => ({ elements: elements.length, pickables: pickables.length, pinned: pinnedEl?pinnedEl.meta:null,
+  hover: hoverEl?hoverEl.category:null, markers: markers?markers.geometry.attributes.position.count:0, showMarkers, flying, bounds });
+
+// ---------- loop ----------
+function resize(){ const w=canvas.clientWidth, h=canvas.clientHeight;
+  if (canvas.width!==w || canvas.height!==h){ renderer.setSize(w,h,false); camera.aspect=w/Math.max(1,h); camera.updateProjectionMatrix(); } }
+function frame(t){
+  requestAnimationFrame(frame);
+  const dt = prevT ? Math.min(0.05, (t-prevT)/1000) : 0.016; prevT=t;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : []; let gp=null;
+  for (const p of pads){ if (p){ gp=p; break; } }
+  if (gp){ const dz=v=>Math.abs(v)<0.16?0:v; cam.yaw+=dz(gp.axes[2]||0)*2.4*dt; cam.pitch-=dz(gp.axes[3]||0)*2.4*dt;
+    cam.pitch=Math.max(-PITCH_LIMIT,Math.min(PITCH_LIMIT,cam.pitch)); }
+  applyMovement(dt, gp);
+  updateFly();
+  updateClip();
+  applyCameraToThree();
+  reportCam(t);
   resize();
-  controls.update();
   renderer.render(scene, camera);
 }
 showHint('Ready. Export & load a model to begin.');
-animate();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
