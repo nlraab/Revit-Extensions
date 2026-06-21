@@ -152,7 +152,7 @@
                             <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
                                     CornerRadius="3" Padding="8" Margin="0,8,0,0">
                                 <TextBlock Style="{StaticResource HelperText}">
-                                    <Run Text="Right-drag" FontWeight="Bold"/><Run Text=" look · "/><Run Text="Middle-drag" FontWeight="Bold"/><Run Text=" pan · "/><Run Text="Scroll" FontWeight="Bold"/><Run Text=" zoom · "/><Run Text="F" FontWeight="Bold"/><Run Text=" mouselook · "/><Run Text="WASD" FontWeight="Bold"/><Run Text=" fly · "/><Run Text="Q/E" FontWeight="Bold"/><Run Text=" down/up · "/><Run Text="Shift" FontWeight="Bold"/><Run Text=" faster · "/><Run Text="Left-click" FontWeight="Bold"/><Run Text=" select (soon)"/>
+                                    <Run Text="Right-drag" FontWeight="Bold"/><Run Text=" look · "/><Run Text="Middle-drag" FontWeight="Bold"/><Run Text=" pan · "/><Run Text="Scroll" FontWeight="Bold"/><Run Text=" zoom · "/><Run Text="F" FontWeight="Bold"/><Run Text=" mouselook · "/><Run Text="WASD" FontWeight="Bold"/><Run Text=" fly · "/><Run Text="Q/E" FontWeight="Bold"/><Run Text=" down/up · "/><Run Text="Shift" FontWeight="Bold"/><Run Text=" faster · "/><Run Text="Left-click" FontWeight="Bold"/><Run Text=" select (soon)"/><LineBreak/><Run Text="Xbox controller:" FontWeight="Bold"/><Run Text=" left stick fly, right stick look, LB/RB down/up, RT faster"/>
                                 </TextBlock>
                             </Border>
                         </StackPanel>

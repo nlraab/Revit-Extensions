@@ -244,19 +244,43 @@ function loadModel(buffer) {
   hint.style.display = "none";
 }
 
-function applyMovement(dt) {
-  var sp = moveSpeed() * (keys["shift"] ? 3.0 : 1.0);
+// --- gamepad (Xbox) ---
+// Left stick: fly (forward/back + strafe, analog). Right stick: look.
+// RB/LB: up/down. RT: faster. Standard mapping; tune in testing.
+var GP_DEADZONE = 0.16;
+var GP_LOOK = 2.4;   // radians/sec at full right-stick deflection
+function dz(v) { return Math.abs(v) < GP_DEADZONE ? 0 : v; }
+function activeGamepad() {
+  var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (var i = 0; i < pads.length; i++) { if (pads[i]) return pads[i]; }
+  return null;
+}
+function gpButton(gp, i) { return gp.buttons[i] ? gp.buttons[i] : { pressed: false, value: 0 }; }
+
+function applyMovement(dt, gp) {
+  var sp = moveSpeed();
   var f = forwardVec(), r = rightVec(), d = [0, 0, 0];
+  // keyboard (full deflection)
   if (keys["w"]) { d[0]+=f[0]; d[1]+=f[1]; d[2]+=f[2]; }
   if (keys["s"]) { d[0]-=f[0]; d[1]-=f[1]; d[2]-=f[2]; }
   if (keys["d"]) { d[0]+=r[0]; d[2]+=r[2]; }
   if (keys["a"]) { d[0]-=r[0]; d[2]-=r[2]; }
   if (keys["e"]) { d[1]+=1; }
   if (keys["q"]) { d[1]-=1; }
-  var len = Math.hypot(d[0], d[1], d[2]);
-  if (len > 0) { d[0]=d[0]/len*sp; d[1]=d[1]/len*sp; d[2]=d[2]/len*sp; }
+  var boost = keys["shift"] ? 3.0 : 1.0;
+  // gamepad (analog left stick)
+  if (gp) {
+    var lx = dz(gp.axes[0] || 0), ly = dz(gp.axes[1] || 0);
+    d[0] += f[0]*(-ly) + r[0]*lx; d[1] += f[1]*(-ly); d[2] += f[2]*(-ly) + r[2]*lx;
+    d[1] += (gpButton(gp, 5).pressed ? 1 : 0) - (gpButton(gp, 4).pressed ? 1 : 0);
+    if (gpButton(gp, 7).value > 0.5) boost = 3.0;
+  }
+  sp *= boost;
+  // analog-aware target velocity: stick partway = move partway; keys = full.
+  var mag = Math.hypot(d[0], d[1], d[2]), target = [0, 0, 0];
+  if (mag > 0) { var s = Math.min(mag, 1) * sp / mag; target = [d[0]*s, d[1]*s, d[2]*s]; }
   var k = Math.min(1, dt * 9);
-  vel[0]+=(d[0]-vel[0])*k; vel[1]+=(d[1]-vel[1])*k; vel[2]+=(d[2]-vel[2])*k;
+  vel[0]+=(target[0]-vel[0])*k; vel[1]+=(target[1]-vel[1])*k; vel[2]+=(target[2]-vel[2])*k;
   cam.pos[0]+=vel[0]*dt; cam.pos[1]+=vel[1]*dt; cam.pos[2]+=vel[2]*dt;
 }
 function applyLook(dx, dy) {
@@ -284,7 +308,15 @@ function frame(now) {
   var t = (typeof now === "number") ? now : 0;
   var dt = prevT ? Math.min(0.05, (t - prevT) / 1000) : 0.016;
   prevT = t;
-  applyMovement(dt);
+  var gp = activeGamepad();
+  if (gp) {                                  // right stick looks
+    var rx = dz(gp.axes[2] || 0), ry = dz(gp.axes[3] || 0);
+    cam.yaw += rx * GP_LOOK * dt;
+    cam.pitch -= ry * GP_LOOK * dt;
+    if (cam.pitch > PITCH_LIMIT) cam.pitch = PITCH_LIMIT;
+    if (cam.pitch < -PITCH_LIMIT) cam.pitch = -PITCH_LIMIT;
+  }
+  applyMovement(dt, gp);
   resize();
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
