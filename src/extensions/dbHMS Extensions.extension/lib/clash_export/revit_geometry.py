@@ -271,8 +271,9 @@ def _element_to_mesh(el, opts, offset, transform, tri_level):
                                 positions, indices)
     if not positions or not indices:
         return None
+    rgb, alpha, roughness, metallic = _material_for_element(el)
     return Mesh(positions=positions, indices=indices,
-                color=_color_for_element(el),
+                color=rgb, alpha=alpha, roughness=roughness, metallic=metallic,
                 metadata=_metadata_for_element(el))
 
 
@@ -409,6 +410,98 @@ def _color_for_element(el):
     except Exception:
         pass
     return _DEFAULT_COLOR
+
+
+# Appearance-asset base-colour property names, one per Revit asset schema. We
+# try them in order and take the first that resolves; most materials use the
+# Generic schema. Best-effort -- any miss falls back to Material.Color, which
+# falls back to the discipline colour. (Phase 1: colour + transparency only;
+# textures/metalness come with the later textured-export pass.)
+_APPEARANCE_COLOR_PROPS = (
+    "generic_diffuse",
+    "advancedpbr_base_color",
+    "metal_color",
+    "hardwood_color",
+    "masonrycmu_color",
+    "ceramic_color",
+    "concrete_color",
+    "stone_color",
+)
+
+
+def _primary_material(src_doc, el):
+    """The element's main Material (first non-paint material id), or None."""
+    if src_doc is None:
+        return None
+    try:
+        ids = el.GetMaterialIds(False)
+    except Exception:
+        return None
+    for mid in (ids or []):
+        try:
+            if eid_int(mid) > 0:
+                m = src_doc.GetElement(mid)
+                if m is not None:
+                    return m
+        except Exception:
+            continue
+    return None
+
+
+def _appearance_base_color(src_doc, mat):
+    """Base colour (r,g,b 0..1) from the material's rendered Appearance asset,
+    or None. This is closer to what Enscape shows than the shading Color."""
+    try:
+        aid = mat.AppearanceAssetId
+        if aid is None or eid_int(aid) <= 0:
+            return None
+        ae = src_doc.GetElement(aid)
+        if ae is None:
+            return None
+        asset = ae.GetRenderingAsset()
+        if asset is None:
+            return None
+        for name in _APPEARANCE_COLOR_PROPS:
+            prop = _safe(lambda: asset.FindByName(name), None)
+            if prop is None:
+                continue
+            vals = _safe(lambda: list(prop.GetValueAsDoubles()), None)
+            if vals and len(vals) >= 3:
+                return (vals[0], vals[1], vals[2])
+    except Exception:
+        pass
+    return None
+
+
+def _material_for_element(el):
+    """(rgb, alpha, roughness, metallic) for an element from its Revit
+    material, falling back to the discipline colour. Fully defensive -- a bad
+    material never aborts the export.
+
+    Phase 1 of rendering: real base colour + transparency + a roughness guess
+    from Smoothness. metallic stays 0 (the Metal schema + textures come later).
+    """
+    rgb, alpha, roughness, metallic = None, 1.0, 0.85, 0.0
+    try:
+        src_doc = _safe(lambda: el.Document, None)
+        mat = _primary_material(src_doc, el)
+        if mat is not None:
+            rgb = _appearance_base_color(src_doc, mat)
+            if rgb is None:
+                c = _safe(lambda: mat.Color, None)
+                if c is not None and _safe(lambda: c.IsValid, True):
+                    rgb = (c.Red / 255.0, c.Green / 255.0, c.Blue / 255.0)
+            t = _safe(lambda: mat.Transparency, 0) or 0   # 0..100
+            if t > 0:
+                alpha = max(0.0, 1.0 - (t / 100.0))
+            sm = _safe(lambda: mat.Smoothness, None)        # 0..100
+            if sm is not None:
+                roughness = min(1.0, max(0.04, 1.0 - (sm / 100.0)))
+    except Exception:
+        pass
+    if rgb is None:
+        rgb = _color_for_element(el)
+    return rgb, alpha, roughness, metallic
 
 
 def _metadata_for_element(el):

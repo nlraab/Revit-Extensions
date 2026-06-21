@@ -178,6 +178,15 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Appearance" Style="{StaticResource SectionHeader}"/>
+                            <TextBlock Text="Render quality" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="cmb_quality">
+                                <ComboBoxItem Content="Draft"/>
+                                <ComboBoxItem Content="Shaded" IsSelected="True"/>
+                                <ComboBoxItem Content="Realistic"/>
+                                <ComboBoxItem Content="Ultra"/>
+                            </ComboBox>
+                            <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
+                                       Text="Draft = fast flat fly-through. Shaded = lit, real material colors. Realistic / Ultra add sky lighting, shadows and reflections (coming next)."/>
                             <TextBlock Text="Background" Style="{StaticResource FieldLabel}"/>
                             <ComboBox x:Name="cmb_background" IsEnabled="False">
                                 <ComboBoxItem Content="Dark" IsSelected="True"/>
@@ -220,11 +229,25 @@
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Clashes" Style="{StaticResource SectionHeader}"/>
-                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsChecked="True"/>
-                            <TextBlock Text="Click a clash to fly to it. Markers come from this project's clash database."
+                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsChecked="False"/>
+                            <TextBlock Text="Filter the list, then click a clash to fly to it. Turn on markers to drop dots in the view for the filtered clashes."
                                        Style="{StaticResource HelperText}" Margin="0,4,0,6"/>
+
+                            <!-- Filters: built from this project's clashes; hidden until a model loads -->
+                            <StackPanel x:Name="sp_clash_filters" Visibility="Collapsed">
+                                <TextBlock Text="Trade" Style="{StaticResource FieldLabel}"/>
+                                <StackPanel x:Name="sp_clash_trades"/>
+                                <TextBlock Text="Status" Style="{StaticResource FieldLabel}"/>
+                                <StackPanel x:Name="sp_clash_status"/>
+                                <TextBlock Text="Type" Style="{StaticResource FieldLabel}"/>
+                                <StackPanel x:Name="sp_clash_kind"/>
+                                <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="txt_clash_search"/>
+                                <TextBlock x:Name="lbl_clash_count" Style="{StaticResource HelperText}" Margin="0,6,0,2"/>
+                            </StackPanel>
+
                             <Border x:Name="brd_clashes" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
+                                    CornerRadius="3" Padding="8" Margin="0,4,0,0">
                                 <TextBlock Style="{StaticResource HelperText}" Text="Clashes list here after a model loads."/>
                             </Border>
                         </StackPanel>

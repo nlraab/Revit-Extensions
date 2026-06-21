@@ -46,7 +46,7 @@
 
 var canvas = document.getElementById("c");
 var hint = document.getElementById("hint");
-var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+var gl = canvas.getContext("webgl2");
 
 // Navigation tuning is pushed from the control panel (WPF) via messages, so
 // it lives on the user's screen, not on the shared render.
@@ -71,41 +71,94 @@ function forwardVec() {
 }
 function rightVec() { return [Math.cos(cam.yaw), 0, Math.sin(cam.yaw)]; }
 
+// Geometry shaders (WebGL2 / GLSL ES 3.00). Flat normals are derived from
+// screen-space position derivatives (no normal attribute yet — that arrives
+// with the textured-export pass). uMode picks the quality tier:
+//   0 = Draft  (cheap headlight, no tone map — fast fly-through, today's feel)
+//  >0 = Shaded (PBR sun + hemispheric sky ambient + ACES tone map)
 var VS = [
-  "attribute vec3 aPos;", "uniform mat4 uMVP;", "varying vec3 vWorld;",
-  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vWorld = aPos; }"
+  "#version 300 es",
+  "in vec3 aPos;", "uniform mat4 uMVP;", "uniform vec3 uCameraPos;",
+  "out vec3 vRel;", "out float vFragDepth;",
+  // Eye-relative position. Flat normals are derived from screen-space
+  // derivatives of THIS in the fragment shader; subtracting the camera at
+  // vertex precision keeps the differenced values small even when the model
+  // sits far from the origin, avoiding the float32 cancellation that turned
+  // flat normals into salt-and-pepper grain on large models.
+  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vRel = aPos - uCameraPos; vFragDepth = 1.0 + gl_Position.w; }"
 ].join("\n");
 var FS = [
-  "#extension GL_OES_standard_derivatives : enable",
-  "precision mediump float;",
-  "varying vec3 vWorld;", "uniform vec3 uColor; uniform vec3 uCameraPos; uniform float uFlat;",
+  "#version 300 es",
+  "precision highp float;",
+  "in vec3 vRel;", "in float vFragDepth;",
+  "uniform vec3 uBaseColor; uniform float uAlpha; uniform float uRough; uniform float uMetal;",
+  "uniform vec3 uSunDir; uniform vec3 uSunColor;",
+  "uniform vec3 uSkyColor; uniform vec3 uGroundColor; uniform float uExposure;",
+  "uniform int uMode; uniform float uFlat; uniform float uLogDepthFC;",
+  "out vec4 fragColor;",
+  "const float PI = 3.14159265359;",
+  "const vec3 CLAY = vec3(0.82, 0.80, 0.76);",       // uniform matte clay for Draft
+  "float D_GGX(float NoH, float a){ float a2=a*a; float d=(NoH*NoH*(a2-1.0)+1.0); return a2/(PI*d*d); }",
+  "float V_SmithGGX(float NoV, float NoL, float a){ float a2=a*a;",
+  "  float gv=NoL*sqrt(NoV*NoV*(1.0-a2)+a2); float gl=NoV*sqrt(NoL*NoL*(1.0-a2)+a2);",
+  "  return 0.5/max(gv+gl,1e-5); }",
+  "vec3 F_Schlick(float u, vec3 f0){ return f0 + (1.0-f0)*pow(1.0-u,5.0); }",
+  "vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0); }",
   "void main() {",
-  "  if (uFlat > 0.5) { gl_FragColor = vec4(uColor, 1.0); return; }",
-  "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
-  "  vec3 L = normalize(uCameraPos - vWorld);",
-  "  gl_FragColor = vec4(uColor * (0.35 + 0.65 * abs(dot(N, L))), 1.0);",
+  // Logarithmic depth (written for every fragment / every branch): spreads depth
+  // precision across the whole near..far range instead of bunching it at the
+  // camera, so a 0.05m..hundreds-of-metres scene stops z-fighting at distance.
+  "  gl_FragDepth = log2(max(1e-6, vFragDepth)) * uLogDepthFC * 0.5;",
+  "  if (uFlat > 0.5) { fragColor = vec4(uBaseColor, 1.0); return; }",
+  "  vec3 N = normalize(cross(dFdx(vRel), dFdy(vRel)));",
+  "  vec3 V = normalize(-vRel);",
+  "  if (dot(N, V) < 0.0) N = -N;",          // face the camera (double-sided)
+  "  if (uMode == 0) {",                      // Draft: clean matte clay (white-model look)
+  "    float d = 0.40 + 0.60 * abs(dot(N, V));",
+  "    fragColor = vec4(CLAY * d, 1.0); return;",
+  "  }",
+  "  vec3 base = pow(uBaseColor, vec3(2.2));",        // sRGB -> linear
+  "  float rough = clamp(uRough, 0.045, 1.0); float a = rough*rough;",
+  "  vec3 f0 = mix(vec3(0.04), base, uMetal); vec3 albedo = base * (1.0 - uMetal);",
+  "  vec3 L = normalize(uSunDir); vec3 H = normalize(V + L);",
+  "  float NoL = max(dot(N,L),0.0), NoV = max(dot(N,V),1e-4);",
+  "  float NoH = max(dot(N,H),0.0), VoH = max(dot(V,H),0.0);",
+  "  vec3 F = F_Schlick(VoH, f0);",
+  "  vec3 spec = F * D_GGX(NoH,a) * V_SmithGGX(NoV,NoL,a);",
+  "  vec3 kd = (1.0 - F) * (1.0 - uMetal);",
+  "  vec3 direct = (kd * albedo / PI + spec) * uSunColor * NoL;",
+  "  float hemi = 0.5 + 0.5 * N.y;",                  // sky above, ground bounce below
+  "  vec3 ambient = mix(uGroundColor, uSkyColor, hemi) * albedo;",
+  "  vec3 color = aces((direct + ambient) * uExposure);",
+  "  fragColor = vec4(pow(color, vec3(1.0/2.2)), uAlpha);",
   "}"
 ].join("\n");
 
 // Picking shaders: render each element in a unique id-color to an offscreen
 // buffer; read the pixel under the cursor for pixel-exact selection.
 var PVS = [
-  "attribute vec3 aPos;", "attribute vec3 aId;", "uniform mat4 uMVP;", "varying vec3 vId;",
-  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vId = aId; }"
+  "#version 300 es",
+  "in vec3 aPos;", "in vec3 aId;", "uniform mat4 uMVP;", "out vec3 vId;", "out float vFragDepth;",
+  "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vId = aId; vFragDepth = 1.0 + gl_Position.w; }"
 ].join("\n");
 var PFS = [
-  "precision highp float;", "varying vec3 vId;",
-  "void main() { gl_FragColor = vec4(vId, 1.0); }"
+  "#version 300 es",
+  "precision highp float;", "in vec3 vId;", "in float vFragDepth;",
+  "uniform float uLogDepthFC;", "out vec4 fragColor;",
+  // Match the main pass's logarithmic depth so picking occludes identically.
+  "void main() { gl_FragDepth = log2(max(1e-6, vFragDepth)) * uLogDepthFC * 0.5; fragColor = vec4(vId, 1.0); }"
 ].join("\n");
 
 // Clash markers: round screen-facing points, drawn over the geometry.
 var MVS = [
-  "attribute vec3 aPos;", "uniform mat4 uMVP;", "uniform float uSize;",
+  "#version 300 es",
+  "in vec3 aPos;", "uniform mat4 uMVP;", "uniform float uSize;",
   "void main() { gl_Position = uMVP * vec4(aPos, 1.0); gl_PointSize = uSize; }"
 ].join("\n");
 var MFS = [
-  "precision mediump float;", "uniform vec3 uColor;",
-  "void main() { vec2 c = gl_PointCoord - vec2(0.5); if (dot(c,c) > 0.25) discard; gl_FragColor = vec4(uColor, 1.0); }"
+  "#version 300 es",
+  "precision mediump float;", "uniform vec3 uColor;", "out vec4 fragColor;",
+  "void main() { vec2 c = gl_PointCoord - vec2(0.5); if (dot(c,c) > 0.25) discard; fragColor = vec4(uColor, 1.0); }"
 ].join("\n");
 
 var program = null, loc = {}, groups = [], bounds = null;
@@ -122,6 +175,31 @@ var assetExtras = {};   // offset_ft / ft_to_m / axis from the loaded glb
 var flying = false, flyFrom = null, flyTo = null, flyStart = 0;
 var FLY_DUR = 600;      // ms
 var lastCamReport = 0, lastCam = null;   // throttled camera report for saved views
+// Render quality tier: 0 Draft, 1 Shaded, 2 Realistic, 3 Ultra. 2/3 render as
+// Shaded until phases 2-3 add IBL / shadows / AO. Default to Shaded so the model
+// looks lit out of the box; Draft is the fast fly-through fallback.
+var renderMode = 1;
+function setQuality(name) {
+  var m = { draft: 0, shaded: 1, realistic: 2, ultra: 3 };
+  if (name in m) renderMode = m[name];
+}
+// Default sun + sky for the Shaded tier (tuned by eye; time-of-day comes later).
+var SUN_DIR = (function () { var d = [0.38, 0.82, 0.42], l = Math.hypot(d[0], d[1], d[2]); return [d[0]/l, d[1]/l, d[2]/l]; })();
+var SUN_COLOR = [3.0, 2.85, 2.55];
+var SKY_COLOR = [0.34, 0.40, 0.52];
+var GROUND_COLOR = [0.22, 0.20, 0.17];
+var EXPOSURE = 1.0;
+function drawGeomGroup(g) {
+  gl.uniform3fv(loc.uBaseColor, new Float32Array(g.color));
+  gl.uniform1f(loc.uAlpha, g.alpha);
+  gl.uniform1f(loc.uRough, g.rough);
+  gl.uniform1f(loc.uMetal, g.metal);
+  gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
+  gl.enableVertexAttribArray(loc.aPos);
+  gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.idxBuf);
+  gl.drawElements(gl.TRIANGLES, g.count, gl.UNSIGNED_INT, 0);
+}
 var SEP = "||";    // model<->category key separator (safe in Revit names)
 var hiddenModel = {};  // model name -> true if the whole model is hidden
 var hiddenCat = {};    // "model<SEP>category" -> true if that category is hidden
@@ -165,8 +243,7 @@ function compile(type, src) {
   return s;
 }
 function setupGL() {
-  gl.getExtension("OES_standard_derivatives");
-  gl.getExtension("OES_element_index_uint");
+  // WebGL2: 32-bit indices and screen-space derivatives are core (no extensions).
   program = gl.createProgram();
   gl.attachShader(program, compile(gl.VERTEX_SHADER, VS));
   gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FS));
@@ -175,9 +252,19 @@ function setupGL() {
   gl.useProgram(program);
   loc.aPos = gl.getAttribLocation(program, "aPos");
   loc.uMVP = gl.getUniformLocation(program, "uMVP");
-  loc.uColor = gl.getUniformLocation(program, "uColor");
+  loc.uBaseColor = gl.getUniformLocation(program, "uBaseColor");
+  loc.uAlpha = gl.getUniformLocation(program, "uAlpha");
+  loc.uRough = gl.getUniformLocation(program, "uRough");
+  loc.uMetal = gl.getUniformLocation(program, "uMetal");
   loc.uCameraPos = gl.getUniformLocation(program, "uCameraPos");
+  loc.uSunDir = gl.getUniformLocation(program, "uSunDir");
+  loc.uSunColor = gl.getUniformLocation(program, "uSunColor");
+  loc.uSkyColor = gl.getUniformLocation(program, "uSkyColor");
+  loc.uGroundColor = gl.getUniformLocation(program, "uGroundColor");
+  loc.uExposure = gl.getUniformLocation(program, "uExposure");
+  loc.uMode = gl.getUniformLocation(program, "uMode");
   loc.uFlat = gl.getUniformLocation(program, "uFlat");
+  loc.uLogDepthFC = gl.getUniformLocation(program, "uLogDepthFC");
   selBuf = gl.createBuffer();
   // pick program
   pickProgram = gl.createProgram();
@@ -188,6 +275,7 @@ function setupGL() {
   pickLoc.aPos = gl.getAttribLocation(pickProgram, "aPos");
   pickLoc.aId = gl.getAttribLocation(pickProgram, "aId");
   pickLoc.uMVP = gl.getUniformLocation(pickProgram, "uMVP");
+  pickLoc.uLogDepthFC = gl.getUniformLocation(pickProgram, "uLogDepthFC");
   // markers program
   markersProgram = gl.createProgram();
   gl.attachShader(markersProgram, compile(gl.VERTEX_SHADER, MVS));
@@ -232,12 +320,16 @@ function buildScene(gltf, bin) {
         var iacc = gltf.accessors[prim.indices], ibv = gltf.bufferViews[iacc.bufferView];
         indices = new Uint32Array(binBuf, base + (ibv.byteOffset || 0), iacc.count);
       }
-      var color = [0.7, 0.72, 0.74];
-      if (prim.material !== undefined) {
-        var bcf = gltf.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
-        if (bcf) color = [bcf[0], bcf[1], bcf[2]];
+      var color = [0.7, 0.72, 0.74], alpha = 1.0, rough = 0.85, metal = 0.0;
+      if (prim.material !== undefined && gltf.materials[prim.material]) {
+        var pm = gltf.materials[prim.material].pbrMetallicRoughness || {};
+        var bcf = pm.baseColorFactor;
+        if (bcf) { color = [bcf[0], bcf[1], bcf[2]]; if (bcf[3] !== undefined) alpha = bcf[3]; }
+        if (pm.roughnessFactor !== undefined) rough = pm.roughnessFactor;
+        if (pm.metallicFactor !== undefined) metal = pm.metallicFactor;
       }
-      prims.push({ positions: positions, indices: indices, color: color, pickId: pickId,
+      prims.push({ positions: positions, indices: indices, color: color, alpha: alpha,
+                   rough: rough, metal: metal, pickId: pickId,
                    category: extras.category || "Other", model: extras.model || "Model",
                    workset: extras.workset || "" });
       if (pacc.min && pacc.max) {
@@ -256,8 +348,16 @@ function mergeByModelCat(prims) {
   var byKey = {};
   for (var i = 0; i < prims.length; i++) {
     var p = prims[i];
-    var key = p.model + SEP + p.category + SEP + p.workset;
-    if (!byKey[key]) byKey[key] = { color: p.color, model: p.model, category: p.category, workset: p.workset, prims: [] };
+    // Key on the material too, so elements that share a category but differ in
+    // material (e.g. glass vs frame in Windows) keep their own colour instead of
+    // all collapsing onto the first one. Visibility still keys on model/cat/ws.
+    var matKey = Math.round(p.color[0]*255) + "," + Math.round(p.color[1]*255) + "," +
+                 Math.round(p.color[2]*255) + "," + Math.round(p.alpha*255) + "," +
+                 Math.round(p.rough*100) + "," + Math.round(p.metal*100);
+    var key = p.model + SEP + p.category + SEP + p.workset + SEP + matKey;
+    if (!byKey[key]) byKey[key] = { color: p.color, alpha: p.alpha, rough: p.rough,
+                                    metal: p.metal, model: p.model, category: p.category,
+                                    workset: p.workset, prims: [] };
     byKey[key].prims.push(p);
   }
   var out = [];
@@ -281,6 +381,7 @@ function mergeByModelCat(prims) {
       vo += pr.positions.length; baseVert += nv;
     }
     out.push({ positions: pos, indices: idx, idColor: col, color: g.color,
+               alpha: g.alpha, rough: g.rough, metal: g.metal,
                model: g.model, category: g.category, workset: g.workset });
   }
   return out;
@@ -298,6 +399,12 @@ function loadModel(buffer) {
   elementList = scene.elements;
   var merged = mergeByModelCat(scene.prims);
   var mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  // Robust-bounds accumulators: a centroid + RMS spread that a handful of stray
+  // outlier vertices (a pipe mismodeled out to the survey point, a detached
+  // site element) can't hijack the way raw min/max can. Raw min/max gave a
+  // bogus centre way out in empty space and a radius 5x too big, which wrecked
+  // camera framing AND depth precision (near/far is fit to these) -> z-fighting.
+  var sx = 0, sy = 0, sz = 0, sq = 0, nv = 0;
   for (var m = 0; m < merged.length; m++) {
     var grp = merged[m];
     if (grp.indices.length === 0) continue;
@@ -307,21 +414,42 @@ function loadModel(buffer) {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, grp.indices, gl.STATIC_DRAW);
     var idBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, idBuf); gl.bufferData(gl.ARRAY_BUFFER, grp.idColor, gl.STATIC_DRAW);
-    groups.push({ posBuf: posBuf, idxBuf: idxBuf, idBuf: idBuf, count: grp.indices.length, color: grp.color,
-                  model: grp.model, category: grp.category, workset: grp.workset, visible: true });
+    var group = { posBuf: posBuf, idxBuf: idxBuf, idBuf: idBuf, count: grp.indices.length,
+                  color: grp.color, alpha: (grp.alpha === undefined ? 1.0 : grp.alpha),
+                  rough: (grp.rough === undefined ? 0.85 : grp.rough),
+                  metal: (grp.metal === undefined ? 0.0 : grp.metal),
+                  model: grp.model, category: grp.category, workset: grp.workset,
+                  visible: true, center: [0, 0, 0] };
+    groups.push(group);
     var pp = grp.positions;
+    var gmn = [Infinity, Infinity, Infinity], gmx = [-Infinity, -Infinity, -Infinity];
     for (var v = 0; v < pp.length; v += 3) {
-      if (pp[v] < mn[0]) mn[0] = pp[v]; if (pp[v] > mx[0]) mx[0] = pp[v];
-      if (pp[v+1] < mn[1]) mn[1] = pp[v+1]; if (pp[v+1] > mx[1]) mx[1] = pp[v+1];
-      if (pp[v+2] < mn[2]) mn[2] = pp[v+2]; if (pp[v+2] > mx[2]) mx[2] = pp[v+2];
+      var px = pp[v], py = pp[v + 1], pz = pp[v + 2];
+      if (px < gmn[0]) gmn[0] = px; if (px > gmx[0]) gmx[0] = px;
+      if (py < gmn[1]) gmn[1] = py; if (py > gmx[1]) gmx[1] = py;
+      if (pz < gmn[2]) gmn[2] = pz; if (pz > gmx[2]) gmx[2] = pz;
+      if (px < mn[0]) mn[0] = px; if (px > mx[0]) mx[0] = px;
+      if (py < mn[1]) mn[1] = py; if (py > mx[1]) mx[1] = py;
+      if (pz < mn[2]) mn[2] = pz; if (pz > mx[2]) mx[2] = pz;
+      sx += px; sy += py; sz += pz; sq += px*px + py*py + pz*pz; nv++;
     }
+    group.center = [(gmn[0]+gmx[0])/2, (gmn[1]+gmx[1])/2, (gmn[2]+gmx[2])/2];
   }
   if (groups.length === 0) { showHint("Model had no geometry."); return; }
   reportFilters();
-  bounds = {
-    center: [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2],
-    radius: Math.max(0.001, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]) / 2)
-  };
+  // Robust bounds: centroid + ~2.2x RMS spread (encloses a uniform box's far
+  // corner), clamped to the true extent. Falls back to the raw box if empty.
+  var fullR = Math.max(0.001, Math.hypot(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]) / 2);
+  var fullCenter = [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2];
+  if (nv > 0) {
+    var cx = sx/nv, cy = sy/nv, cz = sz/nv;
+    var rms = Math.sqrt(Math.max(0, sq/nv - (cx*cx + cy*cy + cz*cz)));
+    // robust center+radius for framing/pan; full extent kept for the far plane.
+    bounds = { center: [cx, cy, cz], radius: Math.min(fullR, Math.max(1.0, rms * 2.5)),
+               fullCenter: fullCenter, fullRadius: fullR };
+  } else {
+    bounds = { center: fullCenter, radius: fullR, fullCenter: fullCenter, fullRadius: fullR };
+  }
   var c = bounds.center, R = bounds.radius;
   cam.pos = [c[0] + R*0.9, c[1] + R*0.5, c[2] + R*1.7];
   var dir = [c[0]-cam.pos[0], c[1]-cam.pos[1], c[2]-cam.pos[2]];
@@ -389,12 +517,26 @@ function applyPan(dx, dy) {
 
 // --- pixel-exact selection (GPU color picking) ---
 function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+// near/far. With the logarithmic depth buffer doing the precision heavy-lifting,
+// the near plane stays small and FIXED (so it never clips a wall you're standing
+// next to — that was what made walls vanish up close), and far just has to reach
+// the farthest geometry from the current camera (full extent, so the genuinely
+// far-modelled elements still show). Log depth keeps precision good across the
+// whole range regardless of how big the ratio is.
+function nearFar() {
+  if (!bounds) return [0.05, 1000];
+  var c = bounds.fullCenter || bounds.center, R = bounds.fullRadius || bounds.radius;
+  var d = Math.hypot(cam.pos[0]-c[0], cam.pos[1]-c[1], cam.pos[2]-c[2]);
+  return [0.05, d + R + (R * 0.05 + 1.0)];
+}
+// Logarithmic-depth coefficient for a given far plane: gl_FragDepth uses
+// log2(1+w) * FC * 0.5, with FC = 2 / log2(far + 1).
+function logDepthFC(far) { return 2.0 / (Math.log(far + 1.0) / Math.LN2); }
 function viewMatrix() {
   var aspect = canvas.width / Math.max(1, canvas.height);
   var eye = cam.pos, fwd = forwardVec();
-  var near = bounds ? Math.max(0.02, bounds.radius * 0.002) : 0.1;
-  var far = bounds ? bounds.radius * 8 + 100 : 1000;
-  return multiply(perspective(60 * Math.PI / 180, aspect, near, far),
+  var nf = nearFar();
+  return multiply(perspective(60 * Math.PI / 180, aspect, nf[0], nf[1]),
                   lookAt(eye, [eye[0]+fwd[0], eye[1]+fwd[1], eye[2]+fwd[2]], [0, 1, 0]));
 }
 function ensurePickTarget(w, h) {
@@ -424,6 +566,7 @@ function pickAt(px, py) {
   gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.useProgram(pickProgram);
   gl.uniformMatrix4fv(pickLoc.uMVP, false, new Float32Array(mvp));
+  gl.uniform1f(pickLoc.uLogDepthFC, logDepthFC(nearFar()[1]));
   for (var i = 0; i < groups.length; i++) {
     var g = groups[i]; if (!g.visible) continue;
     gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
@@ -496,6 +639,10 @@ function refreshSelectionUI() {
 function clearSelection() {
   hoverIndex = -1; pinnedIndex = -1; setHighlight(-1); props.style.display = "none";
 }
+// Drop the live hover (mouse not directly over an element, left the canvas,
+// or started a look/pan drag). A pinned (clicked) element stays — only Esc/F
+// clears that.
+function clearHover() { hoverIndex = -1; refreshSelectionUI(); }
 
 // --- clash markers + fly-to ---
 // Convert a Revit host-feet point to viewer coords using the loaded glb's
@@ -592,29 +739,47 @@ function frame(now) {
   if (groups.length > 0) {
     var aspect = canvas.width / Math.max(1, canvas.height);
     var eye = cam.pos, fwd = forwardVec();
-    var near = bounds ? Math.max(0.02, bounds.radius * 0.002) : 0.1;
-    var far = bounds ? bounds.radius * 8 + 100 : 1000;
-    var mvp = multiply(perspective(60 * Math.PI / 180, aspect, near, far),
+    var nf = nearFar();
+    var mvp = multiply(perspective(60 * Math.PI / 180, aspect, nf[0], nf[1]),
                        lookAt(eye, [eye[0]+fwd[0], eye[1]+fwd[1], eye[2]+fwd[2]], [0, 1, 0]));
     gl.uniformMatrix4fv(loc.uMVP, false, new Float32Array(mvp));
+    gl.uniform1f(loc.uLogDepthFC, logDepthFC(nf[1]));
     gl.uniform3fv(loc.uCameraPos, new Float32Array(eye));
+    gl.uniform3fv(loc.uSunDir, new Float32Array(SUN_DIR));
+    gl.uniform3fv(loc.uSunColor, new Float32Array(SUN_COLOR));
+    gl.uniform3fv(loc.uSkyColor, new Float32Array(SKY_COLOR));
+    gl.uniform3fv(loc.uGroundColor, new Float32Array(GROUND_COLOR));
+    gl.uniform1f(loc.uExposure, EXPOSURE);
+    gl.uniform1i(loc.uMode, renderMode === 0 ? 0 : 1);
     gl.uniform1f(loc.uFlat, 0.0);
+    // Opaque first (depth write on), then transparent back-to-front (blended,
+    // depth write off) so glass and other see-through materials composite right.
+    var transparent = [];
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
       if (!g.visible) continue;
-      gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuf);
-      gl.enableVertexAttribArray(loc.aPos);
-      gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
-      gl.uniform3fv(loc.uColor, new Float32Array(g.color));
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.idxBuf);
-      gl.drawElements(gl.TRIANGLES, g.count, gl.UNSIGNED_INT, 0);
+      if (g.alpha < 0.999) { transparent.push(g); continue; }
+      drawGeomGroup(g);
+    }
+    if (transparent.length > 0) {
+      for (var ti = 0; ti < transparent.length; ti++) {
+        var tc = transparent[ti].center;
+        transparent[ti]._d = (tc[0]-eye[0])*(tc[0]-eye[0]) + (tc[1]-eye[1])*(tc[1]-eye[1]) + (tc[2]-eye[2])*(tc[2]-eye[2]);
+      }
+      transparent.sort(function (p, q) { return q._d - p._d; });   // far -> near
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      for (var tj = 0; tj < transparent.length; tj++) drawGeomGroup(transparent[tj]);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
     }
     // selection highlight: the picked element's bounding box, flat yellow,
     // drawn over the geometry (depth test off) so it's always visible.
     if (hlVisible && selBuf) {
       gl.disable(gl.DEPTH_TEST);
       gl.uniform1f(loc.uFlat, 1.0);
-      gl.uniform3fv(loc.uColor, new Float32Array([1.0, 0.85, 0.2]));
+      gl.uniform3fv(loc.uBaseColor, new Float32Array([1.0, 0.85, 0.2]));
       gl.bindBuffer(gl.ARRAY_BUFFER, selBuf);
       gl.enableVertexAttribArray(loc.aPos);
       gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
@@ -648,12 +813,13 @@ canvas.addEventListener("mousedown", function (e) {
   if (e.button === 2) {
     // Right-drag look. Pointer-lock so the cursor never stops at a screen
     // edge — keep turning indefinitely. Released on right mouseup.
+    clearHover();   // looking around — drop the hover readout
     if (!locked && canvas.requestPointerLock) { rightLook = true; canvas.requestPointerLock(); }
     e.preventDefault();
     return;
   }
   if (locked) return;
-  if (e.button === 1) { dragMode = "pan"; canvas.style.cursor = "move"; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
+  if (e.button === 1) { clearHover(); dragMode = "pan"; canvas.style.cursor = "move"; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
   else if (e.button === 0) { leftDown = { x: e.clientX, y: e.clientY }; }
 });
 window.addEventListener("mouseup", function (e) {
@@ -675,6 +841,9 @@ window.addEventListener("mousemove", function (e) {
   }
   hoverMove(e.clientX, e.clientY);   // hover to identify (throttled, idle only)
 });
+// Mouse left the canvas (moved to the control panel or off the window) — the
+// hover readout should not linger.
+canvas.addEventListener("mouseleave", clearHover);
 // Right-drag looks, so suppress the context menu over the canvas.
 canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 canvas.addEventListener("wheel", function (e) {
@@ -705,7 +874,7 @@ window.addEventListener("keydown", function (e) {
   if ("wasdqe".indexOf(k) >= 0) { keys[k] = true; flying = false; e.preventDefault(); }
 });
 window.addEventListener("keyup", function (e) { var k = e.key.toLowerCase(); keys[k === "shift" ? "shift" : k] = false; });
-window.addEventListener("blur", function () { keys = {}; dragMode = null; canvas.style.cursor = "default"; });
+window.addEventListener("blur", function () { keys = {}; dragMode = null; canvas.style.cursor = "default"; clearHover(); });
 
 // ---- bootstrap + control-panel messages ----
 function showHint(t) { hint.style.display = "block"; hint.textContent = t; }
@@ -769,11 +938,12 @@ function handleMessage(data) {
     else if (cmd === "viewpose") {                                              // saved viewpoint (phase next step)
       var vp = JSON.parse(arg); startFly(vp.pos, vp.yaw, vp.pitch);
     }
+    else if (cmd === "quality") { setQuality(arg); }                           // draft|shaded|realistic|ultra
   } catch (err) { showHint("Error: " + (err && err.message ? err.message : err)); }
 }
 
 if (!gl) {
-  showHint("WebGL is not available in this panel.");
+  showHint("WebGL2 is not available in this panel.");
 } else {
   setupGL();
   showHint("Use Export & Load Model or Load Last Export to begin.");

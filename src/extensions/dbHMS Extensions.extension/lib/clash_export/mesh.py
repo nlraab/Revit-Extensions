@@ -17,16 +17,23 @@ class Mesh(object):
         positions are already triangle soup (every 3 vertices form one
         triangle).
     color:     (r, g, b) floats 0..1 for the mesh's base color.
+    alpha:     0..1 opacity (1 = opaque). Drives glTF baseColorFactor[3] and
+        alphaMode=BLEND so glass/transparent materials read through.
+    roughness: glTF PBR roughnessFactor 0..1 (1 = fully matte).
+    metallic:  glTF PBR metallicFactor 0..1.
     metadata:  dict of per-element info (element_id, category, discipline,
         workset, level, name) carried into the glTF node's 'extras' so the
         viewer can filter and identify elements later.
     """
 
     def __init__(self, positions, indices=None, color=(0.7, 0.7, 0.7),
-                 metadata=None):
+                 metadata=None, alpha=1.0, roughness=0.85, metallic=0.0):
         self.positions = positions or []
         self.indices = indices
         self.color = color
+        self.alpha = alpha
+        self.roughness = roughness
+        self.metallic = metallic
         self.metadata = metadata or {}
 
     @property

@@ -64,6 +64,37 @@ def _pack_uints(values):
     return out
 
 
+def _mesh_material_attrs(mesh):
+    """(color, alpha, roughness, metallic) for a mesh, defaulting for older
+    Mesh objects that predate the PBR fields."""
+    return (mesh.color,
+            getattr(mesh, "alpha", 1.0),
+            getattr(mesh, "roughness", 0.85),
+            getattr(mesh, "metallic", 0.0))
+
+
+def _material_key(color, alpha, roughness, metallic):
+    r, g, b = color
+    return (round(r, 4), round(g, 4), round(b, 4),
+            round(alpha, 4), round(roughness, 4), round(metallic, 4))
+
+
+def _material_json(color, alpha, roughness, metallic):
+    """A glTF 2.0 metallic-roughness material. Marks BLEND when see-through."""
+    r, g, b = color
+    mat = {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [r, g, b, alpha],
+            "metallicFactor": metallic,
+            "roughnessFactor": roughness,
+        },
+        "doubleSided": True,
+    }
+    if alpha < 0.999:
+        mat["alphaMode"] = "BLEND"
+    return mat
+
+
 def build_glb(meshes, asset_extras=None):
     """Build a complete .glb as a bytearray from a list of Mesh objects.
 
@@ -74,6 +105,7 @@ def build_glb(meshes, asset_extras=None):
     accessors = []
     buffer_views = []
     materials = []
+    mat_cache = {}
     gltf_meshes = []
     nodes = []
     scene_nodes = []
@@ -134,17 +166,14 @@ def build_glb(meshes, asset_extras=None):
             })
             primitive["indices"] = idx_accessor
 
-        # --- material ---
-        r, g, b = mesh.color
-        mat_index = len(materials)
-        materials.append({
-            "pbrMetallicRoughness": {
-                "baseColorFactor": [r, g, b, 1.0],
-                "metallicFactor": 0.0,
-                "roughnessFactor": 0.85,
-            },
-            "doubleSided": True,
-        })
+        # --- material (deduped: many elements share the same material) ---
+        color, alpha, rough, metal = _mesh_material_attrs(mesh)
+        key = _material_key(color, alpha, rough, metal)
+        mat_index = mat_cache.get(key)
+        if mat_index is None:
+            mat_index = len(materials)
+            materials.append(_material_json(color, alpha, rough, metal))
+            mat_cache[key] = mat_index
         primitive["material"] = mat_index
 
         mesh_index = len(gltf_meshes)
@@ -229,6 +258,7 @@ class GlbWriter(object):
         self._accessors = []
         self._buffer_views = []
         self._materials = []
+        self._mat_cache = {}
         self._meshes = []
         self._nodes = []
         self._scene_nodes = []
@@ -283,15 +313,13 @@ class GlbWriter(object):
             })
             primitive["indices"] = idx_accessor
 
-        r, g, b = mesh.color
-        mat_index = len(self._materials)
-        self._materials.append({
-            "pbrMetallicRoughness": {
-                "baseColorFactor": [r, g, b, 1.0],
-                "metallicFactor": 0.0, "roughnessFactor": 0.85,
-            },
-            "doubleSided": True,
-        })
+        color, alpha, rough, metal = _mesh_material_attrs(mesh)
+        key = _material_key(color, alpha, rough, metal)
+        mat_index = self._mat_cache.get(key)
+        if mat_index is None:
+            mat_index = len(self._materials)
+            self._materials.append(_material_json(color, alpha, rough, metal))
+            self._mat_cache[key] = mat_index
         primitive["material"] = mat_index
 
         mesh_index = len(self._meshes)

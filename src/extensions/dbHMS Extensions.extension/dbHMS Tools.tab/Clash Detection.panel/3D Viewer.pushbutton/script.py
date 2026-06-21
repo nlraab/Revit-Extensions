@@ -45,11 +45,11 @@ clr.AddReference("WindowsBase")
 import System
 from System.Windows import (
     TextWrapping, TextAlignment, Thickness, CornerRadius,
-    HorizontalAlignment, VerticalAlignment, FontWeights,
+    HorizontalAlignment, VerticalAlignment, FontWeights, Visibility,
 )
 from System.Windows.Controls import (
     TextBlock, StackPanel, CheckBox, Border, Button, Grid as WpfGrid,
-    ScrollViewer, ScrollBarVisibility,
+    ScrollViewer, ScrollBarVisibility, TextBox,
 )
 from System.Windows.Input import Mouse, Cursors
 from System.Windows.Media import SolidColorBrush, Color
@@ -162,10 +162,16 @@ class ViewerForm(forms.WPFWindow):
         self.btn_fullscreen.Click += self._on_fullscreen
         self.sl_speed.ValueChanged += self._on_speed_changed
         self.sl_look.ValueChanged  += self._on_look_changed
-        self.chk_clash_markers.Checked   += (lambda s, a: self._post("showmarkers:1"))
-        self.chk_clash_markers.Unchecked += (lambda s, a: self._post("showmarkers:0"))
+        self.chk_clash_markers.Checked   += self._on_clash_filter_changed
+        self.chk_clash_markers.Unchecked += self._on_clash_filter_changed
+        self.txt_clash_search.TextChanged += self._on_clash_filter_changed
         self.btn_saved_views.Click += self._on_save_viewpoint
+        self.cmb_quality.SelectionChanged += self._on_quality_changed
         self._last_cam = None    # latest camera reported by the viewer
+        self._clash_rows = []    # every clash for this project (row dicts)
+        self._trade_chks = []    # dynamic filter checkboxes, by dimension
+        self._status_chks = []
+        self._kind_chks = []
         self._refresh_tuning_labels()
 
         # Attach the web panel after the window is laid out, so the host
@@ -617,80 +623,224 @@ class ViewerForm(forms.WPFWindow):
             self._build_filter_ui(msg[len("filters:"):])
             self._load_clashes()
             self._build_viewpoints_list()
+            self._push_quality()   # re-sync the tier in case it changed pre-load
             return
+
+    # --- render quality -----------------------------------------------
+
+    def _quality_name(self):
+        try:
+            item = self.cmb_quality.SelectedItem
+            return str(item.Content).strip().lower() if item is not None else "shaded"
+        except Exception:
+            return "shaded"
+
+    def _push_quality(self):
+        self._post("quality:" + self._quality_name())
+
+    def _on_quality_changed(self, sender, args):
+        self._push_quality()
 
     # --- clashes ------------------------------------------------------
 
+    # Clash kinds in display order (stored lowercase in the data).
+    _KIND_LABELS = [("hard", "Hard"), ("soft", "Soft"), ("clearance", "Clearance")]
+    # Cap on how many list rows we render at once (markers still show all).
+    _CLASH_LIST_CAP = 500
+
     def _load_clashes(self):
-        """Read the project's clashes, send their host-coord midpoints to the
-        viewer for markers, and build the clickable clash list."""
-        rows, points = [], []
+        """Read every clash for this project into memory, build the
+        trade/status/type filter checkboxes, and render the filtered list.
+        Markers are pushed to the viewer only when the user turns them on."""
+        self._clash_rows = []
+        folder_ok = True
         try:
             from pyrevit import revit
-            from clash_core import persistence, project
+            from clash_core import persistence, project, browser_filters
             doc = revit.doc
             ph = project.project_hash_for(doc) if doc is not None else None
             data = persistence.read_clashes(ph) if ph else {"clashes": []}
-            for c in (data.get("clashes") or []):
+            # Test-name lookup so the search box can also match by test name.
+            names = {}
+            try:
+                lib = persistence.read_global_test_library()
+                for t in (lib.get("tests") or []):
+                    if t.get("id"):
+                        names[t["id"]] = t.get("name", "")
+            except Exception:
+                pass
+            for i, c in enumerate(data.get("clashes") or []):
                 mp = c.get("midpoint")
                 if not mp or len(mp) < 3:
                     continue
                 a = (c.get("ref_a") or {}).get("category") or "?"
                 b = (c.get("ref_b") or {}).get("category") or "?"
-                status = c.get("status") or ""
-                label = "#{0}  {1} x {2}".format(len(points) + 1, a, b)
-                if status:
-                    label += "  ({0})".format(status)
-                pt = [float(mp[0]), float(mp[1]), float(mp[2])]
-                points.append(pt)
-                rows.append({"label": label, "point": pt})
+                seq = c.get("seq") or (i + 1)
+                status = c.get("status") or "Open"
+                label = "#{0}  {1} x {2}  -  {3}".format(seq, a, b, status)
+                self._clash_rows.append({
+                    "label":   label,
+                    "point":   [float(mp[0]), float(mp[1]), float(mp[2])],
+                    "trade":   c.get("assignee") or "-",
+                    "status":  status,
+                    "kind":    (c.get("kind") or "hard").lower(),
+                    "haystack": browser_filters.build_search_haystack(
+                        c, names.get(c.get("test_id"), "")),
+                })
         except persistence.SharedFolderNotConfigured:
-            rows = None   # signal "shared folder not set"
+            folder_ok = False
         except Exception:
             _log("load_clashes: {0}".format(traceback.format_exc()))
-            rows = []
+
+        if not folder_ok:
+            self._show_clash_message(
+                "Set the shared clash folder in Settings to see this "
+                "project's clashes here.")
+            return
+        if not self._clash_rows:
+            self._show_clash_message(
+                "No clashes for this project yet (run a clash test).")
+            return
+
+        self._build_clash_filter_checkboxes()
+        self.sp_clash_filters.Visibility = Visibility.Visible
+        self._apply_clash_filters()
+
+    def _show_clash_message(self, text):
+        """Collapse the filters and show one explanatory line in the list box."""
         try:
-            import json as _json
-            self._post("clashes:" + _json.dumps(points))
+            self.sp_clash_filters.Visibility = Visibility.Collapsed
         except Exception:
             pass
-        self._build_clash_list(rows)
+        tb = TextBlock()
+        tb.Text = text
+        tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+        tb.FontSize = 11
+        tb.TextWrapping = TextWrapping.Wrap
+        try:
+            self.brd_clashes.Child = tb
+        except Exception:
+            pass
+
+    def _build_clash_filter_checkboxes(self):
+        """Fill the Trade / Status / Type groups with one (checked) checkbox per
+        value that actually occurs in this project's clashes."""
+        trade_order = ["Mechanical", "Electrical", "Plumbing", "Fire Protection",
+                       "Technology", "Architectural", "Structural", "-"]
+        status_order = ["Open", "Reviewed", "Approved", "Resolved"]
+        present_trades = set(r["trade"] for r in self._clash_rows)
+        present_status = set(r["status"] for r in self._clash_rows)
+        present_kinds  = set(r["kind"] for r in self._clash_rows)
+
+        def ordered(order, present):
+            return ([v for v in order if v in present]
+                    + sorted(v for v in present if v not in order))
+
+        self._trade_chks = self._fill_filter_group(
+            self.sp_clash_trades,
+            [(v, ("Unassigned" if v == "-" else v))
+             for v in ordered(trade_order, present_trades)])
+        self._status_chks = self._fill_filter_group(
+            self.sp_clash_status,
+            [(v, v) for v in ordered(status_order, present_status)])
+        self._kind_chks = self._fill_filter_group(
+            self.sp_clash_kind,
+            [(k, lbl) for k, lbl in self._KIND_LABELS if k in present_kinds])
+
+    def _fill_filter_group(self, container, value_label_pairs):
+        """Reset `container`, add a checked CheckBox per (value, label), wire the
+        re-filter handler, and return the list of checkboxes."""
+        container.Children.Clear()
+        chks = []
+        for value, label in value_label_pairs:
+            chk = CheckBox()
+            chk.Content = label
+            chk.Tag = value
+            chk.IsChecked = True
+            chk.FontSize = 11
+            chk.Margin = Thickness(0, 1, 0, 1)
+            chk.Checked += self._on_clash_filter_changed
+            chk.Unchecked += self._on_clash_filter_changed
+            container.Children.Add(chk)
+            chks.append(chk)
+        return chks
+
+    def _checked_values(self, chks):
+        return set(c.Tag for c in chks if c.IsChecked)
+
+    def _filtered_clashes(self):
+        """Apply the current trade/status/type/search filters (AND across
+        dimensions) to the in-memory clash rows."""
+        trades   = self._checked_values(self._trade_chks)
+        statuses = self._checked_values(self._status_chks)
+        kinds    = self._checked_values(self._kind_chks)
+        try:
+            needle = (self.txt_clash_search.Text or "").lower().strip()
+        except Exception:
+            needle = ""
+        out = []
+        for r in self._clash_rows:
+            if r["trade"] not in trades:
+                continue
+            if r["status"] not in statuses:
+                continue
+            if r["kind"] not in kinds:
+                continue
+            if needle and needle not in r["haystack"]:
+                continue
+            out.append(r)
+        return out
+
+    def _on_clash_filter_changed(self, sender, args):
+        self._apply_clash_filters()
+
+    def _apply_clash_filters(self):
+        """Re-render the list from the current filter state, and (only when the
+        markers checkbox is on) push the filtered midpoints to the viewer."""
+        filtered = self._filtered_clashes()
+        self._build_clash_list(filtered)
+        markers_on = False
+        try:
+            markers_on = bool(self.chk_clash_markers.IsChecked)
+        except Exception:
+            pass
+        if markers_on:
+            try:
+                import json as _json
+                self._post("clashes:" + _json.dumps([r["point"] for r in filtered]))
+                self._post("showmarkers:1")
+            except Exception:
+                _log("apply_clash_filters: {0}".format(traceback.format_exc()))
+        else:
+            self._post("showmarkers:0")
 
     def _build_clash_list(self, rows):
         panel = StackPanel()
-        if rows is None:
+        shown = rows[:self._CLASH_LIST_CAP]
+        for r in shown:
+            btn = Button()
+            btn.Content = r["label"]
+            btn.HorizontalAlignment = HorizontalAlignment.Stretch
+            btn.HorizontalContentAlignment = HorizontalAlignment.Left
+            btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
+            btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
+            btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
+            btn.BorderThickness = Thickness(1)
+            btn.Padding = Thickness(8, 4, 8, 4)
+            btn.Margin = Thickness(0, 0, 0, 3)
+            btn.FontSize = 11
+            btn.Cursor = Cursors.Hand
+            p = r["point"]
+            btn.Click += (lambda s, a, pt=p:
+                          self._post("flytopoint:{0},{1},{2}".format(pt[0], pt[1], pt[2])))
+            panel.Children.Add(btn)
+        if not shown:
             tb = TextBlock()
-            tb.Text = ("Set the shared clash folder in Settings to see this "
-                       "project's clashes here.")
+            tb.Text = "No clashes match the current filters."
             tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
             tb.FontSize = 11
             tb.TextWrapping = TextWrapping.Wrap
             panel.Children.Add(tb)
-        elif not rows:
-            tb = TextBlock()
-            tb.Text = "No clashes for this project yet (run a clash test)."
-            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
-            tb.FontSize = 11
-            tb.TextWrapping = TextWrapping.Wrap
-            panel.Children.Add(tb)
-        else:
-            for r in rows:
-                btn = Button()
-                btn.Content = r["label"]
-                btn.HorizontalAlignment = HorizontalAlignment.Stretch
-                btn.HorizontalContentAlignment = HorizontalAlignment.Left
-                btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
-                btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
-                btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
-                btn.BorderThickness = Thickness(1)
-                btn.Padding = Thickness(8, 4, 8, 4)
-                btn.Margin = Thickness(0, 0, 0, 3)
-                btn.FontSize = 11
-                btn.Cursor = Cursors.Hand
-                p = r["point"]
-                btn.Click += (lambda s, a, pt=p:
-                              self._post("flytopoint:{0},{1},{2}".format(pt[0], pt[1], pt[2])))
-                panel.Children.Add(btn)
         sv = ScrollViewer()
         sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         sv.MaxHeight = 240
@@ -699,6 +849,17 @@ class ViewerForm(forms.WPFWindow):
             self.brd_clashes.Child = sv
         except Exception:
             _log("build_clash_list: {0}".format(traceback.format_exc()))
+        try:
+            total = len(self._clash_rows)
+            n = len(rows)
+            if n > self._CLASH_LIST_CAP:
+                self.lbl_clash_count.Text = (
+                    "Showing first {0} of {1} matching ({2} total) - "
+                    "refine filters to narrow.".format(self._CLASH_LIST_CAP, n, total))
+            else:
+                self.lbl_clash_count.Text = "Showing {0} of {1} clashes.".format(n, total)
+        except Exception:
+            pass
 
     # --- saved viewpoints ---------------------------------------------
 
