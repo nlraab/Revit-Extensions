@@ -7,10 +7,13 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #2a3340; }
   #c { width: 100vw; height: 100vh; display: block; outline: none; }
-  #badge { position: fixed; left: 10px; bottom: 8px; font: 700 13px Segoe UI, sans-serif;
-           color: #9fb4c8; background: rgba(20,26,33,0.55); padding: 2px 8px; border-radius: 4px;
+  #badge { position: fixed; left: 10px; bottom: 34px; font: 700 13px Segoe UI, sans-serif;
+           background: rgba(20,26,33,0.55); padding: 2px 8px; border-radius: 4px;
            user-select: none; pointer-events: none; }
-  #badge b { color: #00BFFF; }
+  #minbtn { position: fixed; left: 10px; bottom: 8px; font: 600 11px Segoe UI, sans-serif;
+            color: #9fb4c8; background: rgba(20,26,33,0.40); padding: 3px 10px; border-radius: 4px;
+            border: 1px solid rgba(159,180,200,0.22); cursor: pointer; user-select: none; }
+  #minbtn:hover { background: rgba(20,26,33,0.78); color: #cbd5e0; }
   #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
           font: 14px Segoe UI, sans-serif; color: #cbd5e0; text-align: center; pointer-events: none; }
   #props { position: fixed; display: none; max-width: 300px; background: rgba(255,255,255,0.97);
@@ -21,28 +24,42 @@
   #props .r b { color: #2D3748; font-weight: 600; }
 </style>
 <script type="importmap">
-{ "imports": { "three": "./lib/three/three.module.js", "three/addons/": "./lib/three/addons/" } }
+{ "imports": {
+  "three": "./lib/three/three.module.js",
+  "three/addons/": "./lib/three/addons/",
+  "three/examples/jsm/": "./lib/three/addons/",
+  "postprocessing": "./lib/three/addons/n8ao_pp_stub.js"
+} }
 </script>
 </head>
 <body>
 <canvas id="c" tabindex="0"></canvas>
-<div id="badge">db<b> | </b>HMS&nbsp;&nbsp;<span style="color:#48d18a;font-weight:400">three.js</span></div>
+<div id="badge"><span style="color:#00BFFF">db</span><span style="color:#7A8FA6"> | </span><span style="color:#00BFFF">HMS</span></div>
+<div id="minbtn" title="Exit the enlarged view">minimize</div>
 <div id="hint">Loading viewer…</div>
 <div id="props"></div>
 
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+// N8AO: a more robust ambient-occlusion pass than three.js GTAO (which renders black on
+// some NVIDIA/ANGLE/Direct3D drivers). N8AOPass REPLACES RenderPass -- it renders the
+// scene AND applies AO in one pass. Vendored offline under lib/three/addons/.
+import { N8AOPass } from 'three/addons/postprocessing/N8AO.js';
 
 const canvas = document.getElementById('c');
 const hint = document.getElementById('hint');
 const props = document.getElementById('props');
-function showHint(t) { hint.textContent = t || ''; hint.style.display = t ? 'block' : 'none'; }
+let _hintTimer = null;
+function showHint(t, fadeMs) {
+  hint.textContent = t || ''; hint.style.display = t ? 'block' : 'none';
+  if (_hintTimer) { clearTimeout(_hintTimer); _hintTimer = null; }
+  // optional auto-dismiss so an informational notice doesn't sit over the model forever
+  if (t && fadeMs) _hintTimer = setTimeout(() => { hint.style.display = 'none'; }, fadeMs);
+}
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 // ---------- renderer ----------
@@ -53,23 +70,154 @@ function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+// Neutral (Khronos PBR-neutral) tone mapping: preserves material colour + contrast while
+// still rolling highlights off. ACES blew out the exterior; AgX fixed that but desaturated
+// everything to a flat grey (uniform in + out -- the "very grey/washed" look). Neutral keeps
+// hues accurate (closer to Revit's Realistic) without the blowout. Exposure back to 1.0.
+renderer.toneMapping = THREE.NeutralToneMapping;
+// 1.3: the double-sRGB bug used to brighten Realistic; with that fixed, both paths render at
+// the correct (darker) level, so lift exposure back up for a bright-but-not-washed interior.
+renderer.toneMappingExposure = 1.3;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x2a3340);
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+// WebGL context loss: a too-heavy model can trip Windows' GPU watchdog (TDR) or
+// exhaust VRAM (esp. with Revit also holding the GPU) -- the context dies and the
+// screen goes blank with no error. Catch it: report, stop hammering a dead context,
+// and tell the user WHY instead of a silent blank-blue screen.
+let glLost = false;
+renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); glLost = true;
+  try { post('diag:CONTEXT LOST (model likely too heavy for this GPU)'); } catch(_e){}
+  try { showHint('The graphics card reset while loading this model -- it may be too large for this PC. Try a smaller export scope or Draft quality.'); } catch(_e){}
+}, false);
+renderer.domElement.addEventListener('webglcontextrestored', () => { glLost = false;
+  try { post('diag:context restored'); } catch(_e){} }, false);
 
-const sun = new THREE.DirectionalLight(0xfff4e6, 2.6);
+const scene = new THREE.Scene();
+const SLATE = new THREE.Color(0x2a3340);
+const pmrem = new THREE.PMREMGenerator(renderer);
+
+// Procedural gradient sky: zenith blue -> bright horizon -> warm ground. Drives
+// BOTH image-based lighting (the outdoor ambient that makes PBR materials read as
+// their real material) AND the visible background. A full physically-based sky
+// with a movable sun + time-of-day is the Environment phase; this is its base.
+function _rgb(a){ return 'rgb('+(a[0]|0)+','+(a[1]|0)+','+(a[2]|0)+')'; }
+function _mix(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+// Build an equirect sky with a movable sun. `s` = unit direction TOWARD the sun (Y-up).
+// Sky warms + dims as the sun nears/drops below the horizon; a glowing sun disc is drawn
+// at the sun's position, matched to three.js's equirect mapping so it lines up with the
+// light direction (and the shadows it casts).
+function buildSky(s){
+  const W=512, H=256, cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  const g=cv.getContext('2d');
+  const elDeg = Math.asin(Math.max(-1,Math.min(1,s.y))) * 180/Math.PI;   // sun elevation, degrees
+  const d = Math.max(0, Math.min(1, (elDeg + 4)/30));    // daylight: 0 = night (sun below ~-4), 1 = high sun
+  // subtle warm band only when the sun is low but up (peaks ~4deg, gone by ~20deg / below horizon)
+  const warm = Math.max(0, Math.min(1, 1 - Math.abs(elDeg - 4)/16)) * Math.min(1, d*1.6);
+  const zenith  = _mix([10,12,24],  [95,150,220], d);    // dark night-blue -> day blue
+  let   horizon = _mix([22,24,36],  [205,222,240], d);   // dark -> pale day haze
+  horizon       = _mix(horizon, [232,170,118], warm*0.5);// gentle sunset tint (much less orange)
+  const ground  = _mix([16,15,14],  [118,112,103], 0.22+0.78*d);
+  const grad=g.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0.00, _rgb(zenith));
+  grad.addColorStop(0.46, _rgb(_mix(zenith,horizon,0.82)));
+  grad.addColorStop(0.50, _rgb(horizon));
+  grad.addColorStop(0.54, _rgb(_mix(horizon,ground,0.6)));
+  grad.addColorStop(1.00, _rgb(ground));
+  g.fillStyle=grad; g.fillRect(0,0,W,H);
+  if (s.y > -0.07){   // draw the sun only while it's at/above the horizon
+    const u = Math.atan2(s.z, s.x)/(2*Math.PI) + 0.5;
+    const v = Math.asin(Math.max(-1,Math.min(1,s.y)))/Math.PI + 0.5;
+    const sx = u*W, sy = (1-v)*H;                  // (1-v): CanvasTexture flips Y
+    const col = elDeg < 16 ? '255,200,140' : '255,250,236';   // warm near the horizon
+    g.globalCompositeOperation = 'lighter';
+    for (const ox of [-W, 0, W]){                  // wrap the glow across the seam
+      const gr = g.createRadialGradient(sx+ox, sy, 0, sx+ox, sy, W*0.16);
+      gr.addColorStop(0.00, 'rgba('+col+',1)');
+      gr.addColorStop(0.045,'rgba('+col+',0.95)');
+      gr.addColorStop(0.30, 'rgba('+col+',0.14)');
+      gr.addColorStop(1.00, 'rgba('+col+',0)');
+      g.fillStyle = gr; g.fillRect(0,0,W,H);
+    }
+    g.globalCompositeOperation = 'source-over';
+  }
+  const tex=new THREE.CanvasTexture(cv);
+  tex.mapping=THREE.EquirectangularReflectionMapping; tex.colorSpace=THREE.SRGBColorSpace;
+  return tex;
+}
+// sun state (azimuth + elevation in degrees, strength 0..1). Driven by the panel's
+// Time of day / Sun direction / Sun strength controls via the 'sun' message.
+let sunAz = 135, sunEl = 55, sunStrength = 0.7;
+function sunDir(){ const a=sunAz*Math.PI/180, e=sunEl*Math.PI/180, c=Math.cos(e);
+  return new THREE.Vector3(c*Math.cos(a), Math.sin(e), c*Math.sin(a)); }
+let skyTex = buildSky(sunDir());
+let envTex = pmrem.fromEquirectangular(skyTex).texture;
+scene.environment = envTex;
+// Full sky-ambient (1.0). It was dropped to 0.7 to fight a "washed out" look that turned
+// out to be the double-sRGB composer bug (since fixed) -- so that reduction was a wrong
+// guess that under-lit deep interior surfaces (a CMU wall reading near-black even though
+// its texture + factor are correct). Back to full strength so interiors are properly lit.
+scene.environmentIntensity = 1.0;
+scene.background = skyTex;
+let envDropped = false;   // set true if env IBL is found broken on this GPU (see verifyRender)
+let bigModel = false;     // set per-load: huge models render lean (no shadow/AO) to avoid context loss
+let bigModelTris = '0';   // millions, for the on-screen hint
+// toggle sky vs flat slate (Draft uses slate + no IBL for a fast clay look)
+function setSky(on){ scene.background = on ? skyTex : SLATE; scene.environment = (on && !envDropped) ? envTex : null;
+  if (typeof ground !== 'undefined' && ground) ground.visible = on && !!bounds; }
+// rebuild the sky + image-based lighting for the current sun, and re-tint the sun light
+// (its DIRECTION is applied every frame in updateClip from sunDir()).
+function applySun(){
+  const onSky = (scene.background !== SLATE);
+  const old = skyTex; skyTex = buildSky(sunDir()); if (old) old.dispose();
+  const oldEnv = envTex; envTex = pmrem.fromEquirectangular(skyTex).texture; if (oldEnv) oldEnv.dispose();
+  if (onSky) scene.background = skyTex;
+  if (!envDropped && scene.environment) scene.environment = envTex;
+  // sun fades out as it drops below the horizon (no lighting the model from beneath at night)
+  const above = Math.max(0, Math.min(1, (sunEl + 2) / 12));
+  // Sun dominates the ambient fill so lit vs shadowed faces clearly differ (the
+  // contrast a flat sky-flooded wall lacks). AgX rolls the brighter lit faces off
+  // gracefully, so this adds punch without blowing them to white.
+  sun.intensity = (0.8 + 4.6*Math.max(0, Math.min(1, sunStrength))) * above;
+  sun.color.setRGB(1.0, sunEl < 18 ? 0.85 : 0.95, sunEl < 18 ? 0.72 : 0.90);  // warmer when low
+}
+
+const sun = new THREE.DirectionalLight(0xfff2e0, 3.0);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.bias = -0.0004;
+sun.shadow.mapSize.set(2048, 2048);   // 2048 keeps GPU memory modest (4096 + the
+sun.shadow.bias = -0.0004;            // half-float AO composer can exhaust some GPUs)
 sun.shadow.normalBias = 0.04;
+sun.shadow.radius = 3;                 // soft (PCF) shadow edges
 scene.add(sun, sun.target);
-scene.add(new THREE.HemisphereLight(0xbcd0e6, 0x6b6256, 0.35));
+// sky/ground ambient. Forward-lit (no half-float), so it always works -- if the
+// image-based env lighting turns out broken on a GPU, we drop the env and lean
+// on a brighter version of this.
+const hemi = new THREE.HemisphereLight(0xbcd0e6, 0x6b6256, 0.45);   // interior fill so deep
+scene.add(hemi);                                                     // (sunless) walls aren't black
+
+// ---- ground plane -----------------------------------------------------------
+// The building was floating in the bright sky with nothing under it -- a big part
+// of the "washed out" read. A large matte ground catches the sun's shadow (a real
+// contact shadow grounds the building and adds the contrast a flat white wall lacks)
+// and gives the silhouette something other than pale sky to sit against. It's NOT a
+// model element: added straight to the scene (not `root`), so it stays out of
+// selection, visibility, bounds and the element list.
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x9298a0, roughness: 0.98, metalness: 0.0 });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), groundMat);
+ground.rotation.x = -Math.PI / 2;     // lay flat on XZ, +Y up
+ground.receiveShadow = true;
+ground.castShadow = false;
+ground.visible = false;               // shown once a model is placed (and only on sky modes)
+ground.userData.__env = true;
+scene.add(ground);
+function placeGround(){
+  if (!bounds) return;
+  const span = Math.max(bounds.span || bounds.radius * 2, 4);
+  ground.scale.set(span * 12, span * 12, 1);   // reads as "the ground", covers the shadow frustum
+  const y = (bounds.minY !== undefined ? bounds.minY : bounds.center.y - bounds.radius) - span * 0.001;
+  ground.position.set(bounds.center.x, y, bounds.center.z);
+  ground.visible = (scene.background !== SLATE);   // hidden in Draft's flat-slate clay mode
+}
 
 const camera = new THREE.PerspectiveCamera(60, 2, 0.05, 50000);
 
@@ -77,22 +225,179 @@ const camera = new THREE.PerspectiveCamera(60, 2, 0.05, 50000);
 // AO is the single biggest "looks rendered" cue (soft darkening in corners and
 // where elements meet). Composited through EffectComposer; OutputPass does the
 // tone map + sRGB. Toggled by quality tier (off in Draft).
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const gtao = new GTAOPass(scene, camera, 1, 1);
-gtao.output = GTAOPass.OUTPUT.Default;
-composer.addPass(gtao);
-composer.addPass(new OutputPass());
+// On this stack (NVIDIA RTX via ANGLE/Direct3D11, dpr 1.5) the composer renders FINE
+// to an offscreen 8-bit target but draws BLACK when it writes directly to the screen
+// (default framebuffer); a plain renderer.render() to the screen is always fine. So we
+// render the composer to an OFFSCREEN 8-bit target and then copy that target to the
+// screen with a plain fullscreen-quad pass -- a composite of two operations we've each
+// proven work, sidestepping the broken composer->screen write entirely.
+const _composerRT = new THREE.WebGLRenderTarget(
+  Math.max(2, renderer.domElement.width), Math.max(2, renderer.domElement.height),
+  { type: THREE.UnsignedByteType });   // 8-bit, NO multisample (MSAA-resolve is a suspect on ANGLE/NVIDIA)
+const composer = new EffectComposer(renderer, _composerRT);
+composer.renderToScreen = false;            // never write to the screen directly
+// N8AOPass renders the scene AND applies ambient occlusion (it replaces RenderPass).
+const n8ao = new N8AOPass(scene, camera,
+  Math.max(2, renderer.domElement.width), Math.max(2, renderer.domElement.height));
+try {
+  n8ao.setQualityMode('Medium');            // good/cheap; we drop to Low on weak GPUs later
+  n8ao.configuration.aoRadius = 1.5;        // metres; contact shading in corners/where things meet
+  n8ao.configuration.distanceFalloff = 1.0;
+  n8ao.configuration.intensity = 3.0;       // AO strength
+  n8ao.configuration.halfRes = false;       // full-res avoids the sky-darkening half-res issue
+} catch(e){}
+composer.addPass(n8ao);
+// NO OutputPass: N8AOPass already outputs a finished image (scene + AO + tone mapping +
+// sRGB). Adding OutputPass applied a SECOND sRGB encode, which lifted the midtones and made
+// Realistic look brighter/washed than Shaded (measured: composer mean ~= plain^(1/2.2)).
+// With it gone, the composer (Realistic) matches the plain (Shaded) render plus the AO.
+
+// fullscreen-quad blit of the composer's (already display-ready, sRGB) output texture
+// straight to the screen. RawShaderMaterial = no extra color conversion (1:1 copy).
+const _blitScene = new THREE.Scene();
+const _blitCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const _blitMat = new THREE.RawShaderMaterial({
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: 'attribute vec3 position; attribute vec2 uv; varying vec2 vUv;' +
+                'void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: 'precision highp float; uniform sampler2D tDiffuse; varying vec2 vUv;' +
+                  'void main(){ gl_FragColor = texture2D(tDiffuse, vUv); }',
+  depthTest: false, depthWrite: false
+});
+_blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _blitMat));
+function blitComposerToScreen(){
+  _blitMat.uniforms.tDiffuse.value = composer.readBuffer.texture;   // OutputPass result
+  renderer.setRenderTarget(null);
+  renderer.render(_blitScene, _blitCam);
+}
 let aoEnabled = true;
+// Some GPUs/drivers (seen in Revit's WebView2/ANGLE) choke on the half-float
+// textures used by image-based env lighting and the AO composer, rendering the
+// GEOMETRY pitch-black while the sky stays fine. verifyRender() runs once after a
+// model loads and self-heals: (1) if removing the env map makes the scene BRIGHTER,
+// the env IBL is broken here -> drop it + brighten the plain sky/sun lighting;
+// (2) if the AO composer is black while the plain render is lit -> turn AO off.
+// Conservative thresholds: on a healthy GPU neither triggers. Never worse than a
+// plain lit render.
+// composerOK starts FALSE: Realistic renders via the plain lit path (always works)
+// until verifyRender PROVES the AO composer draws to screen without blacking the
+// geometry. So the worst case is a lit Realistic without AO -- never a black model.
+let composerOK = false, renderChecked = false;
+// center sampling region (middle ~36% of the canvas, where the framed model sits)
+function _region(){ const w=renderer.domElement.width, h=renderer.domElement.height;
+  return { w, h, rx:Math.floor(w*0.32), ry:Math.floor(h*0.32), rw:Math.max(8,Math.floor(w*0.36)), rh:Math.max(8,Math.floor(h*0.36)) }; }
+// fraction of near-black pixels in the center from a fresh DIRECT (RGBA8) render.
+// Measures the actual symptom (pitch-black geometry) directly, so the bright sky
+// can't dilute it the way an average would.
+function _directBlackFrac(){
+  const R = _region(); const prevRT = renderer.getRenderTarget();
+  const tmp = new THREE.WebGLRenderTarget(R.w, R.h);
+  renderer.setRenderTarget(tmp); renderer.clear(); renderer.render(scene, camera);
+  const px = new Uint8Array(R.rw*R.rh*4); renderer.readRenderTargetPixels(tmp, R.rx, R.ry, R.rw, R.rh, px);
+  renderer.setRenderTarget(prevRT); tmp.dispose();
+  let black=0, n=R.rw*R.rh; for (let i=0;i<px.length;i+=4){ if (px[i]+px[i+1]+px[i+2] < 16) black++; }
+  return black/n;
+}
+// fraction of near-black pixels in the center of the ACTUAL canvas (default
+// framebuffer). preserveDrawingBuffer keeps it readable. Unlike reading a composer
+// buffer, this reflects EXACTLY what's on screen -- the composer can render fine to
+// an offscreen buffer yet draw black to the screen on some GPUs (the real symptom).
+function _screenBlackFrac(){
+  const gl = renderer.getContext(), R = _region();
+  renderer.setRenderTarget(null);
+  const px = new Uint8Array(R.rw*R.rh*4);
+  gl.readPixels(R.rx, R.ry, R.rw, R.rh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let black=0, n=R.rw*R.rh; for (let i=0;i<px.length;i+=4){ if (px[i]+px[i+1]+px[i+2] < 16) black++; }
+  return black/n;
+}
+// report the ACTUAL GPU/renderer + key WebGL capabilities, so we can tell whether
+// WebView2 is on the real GPU or fell back to software (SwiftShader), and whether
+// float render targets (used by the AO composer) are even supported here.
+function gpuInfo(){
+  try {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const rend = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    const vend = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+    post('diag:gpu renderer="' + rend + '" vendor="' + vend + '"' +
+         ' ver="' + gl.getParameter(gl.VERSION) + '"' +
+         ' colorBufFloat=' + !!gl.getExtension('EXT_color_buffer_float') +
+         ' colorBufHalfFloat=' + !!gl.getExtension('EXT_color_buffer_half_float') +
+         ' maxTex=' + gl.getParameter(gl.MAX_TEXTURE_SIZE) +
+         ' dpr=' + (window.devicePixelRatio || 1));
+  } catch(e){ try { post('diag:gpu error ' + (e&&e.message?e.message:e)); } catch(_e){} }
+}
+function verifyRender(){
+  if (!root || renderChecked) return;
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  if (w < 16 || h < 16) return;   // wait for a real canvas size
+  renderChecked = true;
+  gpuInfo();
+  const _gl = renderer.getContext();
+  if (glLost || (_gl.isContextLost && _gl.isContextLost())){
+    try { post('diag:render-check skipped (context lost)'); } catch(_e){} return;
+  }
+  try {
+    // --- env-lighting check: does the env map blacken the geometry on this GPU? ---
+    const blackOn = _directBlackFrac();           // with env IBL on
+    const savedEnv = scene.environment;
+    scene.environment = null;
+    const blackOff = _directBlackFrac();           // with env IBL off
+    if (blackOn > 0.12 && (blackOn - blackOff) > 0.08){
+      // a big black region with the env on that disappears without it -> env IBL is broken here
+      envDropped = true; hemi.intensity = 0.75;    // keep env off, brighten the plain sky/sun ambient
+      post('diag:env fallback(env IBL blacks geometry) blackOn=' + blackOn.toFixed(2) + ' blackOff=' + blackOff.toFixed(2));
+    } else {
+      scene.environment = savedEnv;                // env is fine; keep it
+      post('diag:env ok blackOn=' + blackOn.toFixed(2) + ' blackOff=' + blackOff.toFixed(2));
+    }
+    // --- 4-way probe: isolate exactly which stage goes black on THIS GPU ---
+    // plainScreen : plain render -> screen           (known-good baseline)
+    // plainRT     : plain render -> 8-bit offscreen RT (does render-to-target work at all?)
+    // composerRT  : full composer -> its offscreen buffer (does the post pipeline work offscreen?)
+    // composerScr : composer offscreen + blit -> screen (the path Realistic uses)
+    const cw = renderer.domElement.width, ch = renderer.domElement.height;
+    if (cw >= 200 && ch >= 120){
+      const R = _region();
+      function rtBlack(rt){ const px=new Uint8Array(R.rw*R.rh*4);
+        renderer.readRenderTargetPixels(rt, R.rx, R.ry, R.rw, R.rh, px);
+        let b=0,n=R.rw*R.rh; for(let i=0;i<px.length;i+=4){ if(px[i]+px[i+1]+px[i+2]<16)b++; } return b/n; }
+      const prevRT = renderer.getRenderTarget();
+      // plainRT: plain scene render into an 8-bit offscreen target
+      const testRT = new THREE.WebGLRenderTarget(cw, ch, { type: THREE.UnsignedByteType });
+      renderer.setRenderTarget(testRT); renderer.clear(); renderer.render(scene, camera);
+      const plainRT = rtBlack(testRT);
+      renderer.setRenderTarget(prevRT); testRT.dispose();
+      // composerRT: the N8AO composer (scene + AO) into its own offscreen buffer
+      composer.render();
+      const composerRT = rtBlack(composer.readBuffer);
+      // composerScr: blit that to the screen (the path Realistic uses)
+      blitComposerToScreen();
+      const composerScr = _screenBlackFrac();
+      // plainScreen baseline
+      renderer.setRenderTarget(null); renderer.clear(); renderer.render(scene, camera);
+      const plainScreen = _screenBlackFrac();
+      composerOK = (composerScr - plainScreen) < 0.10;
+      post('diag:ao ' + (composerOK ? 'enabled(N8AO ok)' : 'disabled(N8AO black -> plain render)') +
+           ' plainScreen=' + plainScreen.toFixed(2) + ' plainRT=' + plainRT.toFixed(2) +
+           ' composerRT=' + composerRT.toFixed(2) + ' composerScr=' + composerScr.toFixed(2));
+    } else {
+      post('diag:ao skipped(canvas ' + cw + 'x' + ch + ') -> staying on plain render');
+    }
+  } catch(e){ try { post('diag:render-check error ' + (e&&e.message?e.message:e)); } catch(_e){} }
+}
 function tuneAO(){
+  // scale the AO radius to the model so contact shading reads at building scale
   const r = bounds ? bounds.radius : 20;
-  gtao.updateGtaoMaterial({ radius: Math.max(0.25, r * 0.03), distanceExponent: 1.0,
-    thickness: 1.0, scale: 1.0, samples: 16, distanceFallOff: 1.0, screenSpaceRadius: false });
+  try { n8ao.configuration.aoRadius = Math.max(0.5, Math.min(4.0, r * 0.04)); } catch(e){}
 }
 
 // ---------- free-fly camera (ported from the WebGL viewer) ----------
 const cam = { pos: [0, 0, 0], yaw: 0, pitch: 0 };
 let vel = [0, 0, 0], keys = {}, dragMode = null, rightLook = false, locked = false;
+// true between requesting pointer-lock and it engaging: suppress hover-picking so a stray
+// transition mousemove can't re-show the selection box right after F clears it.
+let lockPending = false;
 let lastX = 0, lastY = 0, prevT = 0;
 let userSpeed = 4.0, userLook = 0.10;
 const PITCH_LIMIT = Math.PI / 2 - 0.02;
@@ -110,8 +415,16 @@ function applyCameraToThree(){
 // ---------- model state ----------
 const loader = new GLTFLoader();
 let root = null;                 // loaded glTF scene
-let elements = [];               // [{obj, meta, model, category, workset, center, box}]
-let pickables = [];              // meshes for raycasting
+let elements = [];               // [{obj, meta, model, category, workset, center, box, elemId, ...}]
+let pickables = [];              // meshes for raycasting (small-model path only)
+// Merged path (big models): per-element meshes are fused into a few large meshes by
+// material to cut draw calls ~1000x, so the full shadow+AO pipeline can run without
+// tripping the GPU. Selection then uses GPU picking (an offscreen id pass) and
+// visibility a per-vertex _vis attribute, since there's no longer one object per
+// element. Small models keep the proven per-object path untouched.
+let merged = false;              // true once a model is rendered via the merged path
+let mergedMeshes = [];           // the fused THREE.Mesh list
+let mergedRoot = null;           // group holding mergedMeshes
 let bounds = null;               // {center:THREE.Vector3, radius}
 let assetExtras = {};
 const hiddenModel = {}, hiddenCat = {}, hiddenWs = {};
@@ -120,18 +433,43 @@ function catKey(e){ return e.model + SEP + e.category; }
 function wsKey(e){ return e.model + SEP + e.workset; }
 
 function disposeModel(){
-  if (!root) return;
+  // merged meshes (big-model path): their geometry is ours, materials are shared with root
+  if (mergedRoot){
+    scene.remove(mergedRoot);
+    for (const m of mergedMeshes){ if (m.geometry) m.geometry.dispose(); }
+    mergedRoot = null;
+  }
+  mergedMeshes = []; merged = false;
+  if (!root){ elements = []; pickables = []; clearSelection(); clearMarkers(); return; }
   scene.remove(root);
-  root.traverse(o => { if (o.isMesh){ o.geometry.dispose(); if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+  root.traverse(o => { if (o.isMesh){ if (o.geometry) o.geometry.dispose(); if (o.material){ if (o.material.map) o.material.map.dispose(); o.material.dispose(); } } });
   root = null; elements = []; pickables = [];
+  edgeLines = []; edgesBuilt = false;   // edge overlays were children of the meshes -> gone with root
   clearSelection(); clearMarkers();
 }
 
-// element metadata lives in node.userData (glTF node extras). Walk up from a hit
-// mesh to the nearest ancestor carrying element_id.
+// "Show edges" (Revit shaded-with-edges look): thin dark lines on sharp edges, built
+// lazily on first enable as children of each mesh (so they inherit transform AND hide
+// with the mesh's visibility). No post-processing -> works on any GPU.
+let edgeLines = [], edgesBuilt = false, edgesOn = false;
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x2b3340, transparent: true, opacity: 0.5 });
+function buildEdges(){
+  if (edgesBuilt || !pickables.length) return;
+  edgesBuilt = true;
+  for (const p of pickables){
+    try { const ls = new THREE.LineSegments(new THREE.EdgesGeometry(p.geometry, 30), edgeMat);
+      ls.visible = edgesOn; ls.raycast = function(){}; p.add(ls); edgeLines.push(ls); } catch(e){}
+  }
+}
+function setEdges(on){ edgesOn = on; if (on) buildEdges(); for (const l of edgeLines) l.visible = on; }
+
+// Walk up from a hit mesh to the nearest ancestor carrying an element, and return
+// its WRAPPER ({obj,meta,box,center,...}) -- the display code (showHover/
+// setHighlight) needs .meta/.box, NOT the raw Object3D. Returning the object here
+// was the selection bug: a hit threw on e.box/e.meta so nothing ever appeared.
 function elementOf(obj){
   let o = obj;
-  while (o){ if (o.userData && o.userData.element_id !== undefined) return o; o = o.parent; }
+  while (o){ if (o.userData && o.userData.__el) return o.userData.__el; o = o.parent; }
   return null;
 }
 
@@ -146,34 +484,212 @@ function onLoaded(gltf){
       const center = box.getCenter(new THREE.Vector3());
       const e = { obj: o, meta: o.userData, model: o.userData.model || 'Model',
                   category: o.userData.category || 'Other', workset: o.userData.workset || '',
-                  center: center, box: box };
+                  center: center, box: box, elemId: elements.length };
+      o.userData.__el = e;   // link object -> wrapper so a raycast hit resolves to it
       elements.push(e); ctrs.push(center);
     }
     if (o.isMesh){
       o.castShadow = true; o.receiveShadow = true;
-      if (o.material) o.material.side = THREE.DoubleSide;
+      const mat = o.material;
+      if (mat){
+        mat.side = THREE.DoubleSide;
+        mat.envMapIntensity = 1.1;      // let the sky show in the surface
+        // Respect the real per-material metalness the exporter now carries
+        // (clamp guards against bad data); older exports report 0 = dielectric.
+        mat.metalness = (mat.metalness === undefined)
+          ? 0.0 : Math.min(1.0, Math.max(0.0, mat.metalness));
+        if (mat.transparent || (mat.opacity !== undefined && mat.opacity < 0.999)){
+          // glass: reflective, not flat-matte; keep very-clear glass visible
+          mat.roughness = 0.07; mat.metalness = 0.0; mat.envMapIntensity = 1.6;
+          if (mat.opacity < 0.35) mat.opacity = 0.35;
+        } else {
+          // opaque: honour the real Revit finish (matte concrete vs glossy paint vs
+          // metal) the exporter now ships, with a floor so default-matte surfaces
+          // aren't dead-flat. Old exports default to 0.85 = matte, unchanged.
+          const r = (mat.roughness === undefined) ? 0.85 : mat.roughness;
+          mat.roughness = Math.min(1.0, Math.max(0.18, r));
+          if (mat.metalness > 0.05) mat.envMapIntensity = 1.4;  // metal lives on its reflections
+        }
+        mat.needsUpdate = true;
+      }
       pickables.push(o);
     }
   });
-  scene.add(root);
   computeBounds(ctrs);
+  // Decide the render path BEFORE adding geometry to the scene. A big model (or a
+  // forced test) takes the merged path: fuse by material so the full shadow+AO pipeline
+  // can run, and never add the raw per-element scene. Small models add `root` as-is and
+  // keep the proven per-object selection/visibility path untouched.
+  const tris = countTris();
+  bigModelTris = (tris / 1e6).toFixed(1);
+  bigModel = tris > BIG_MODEL_TRIS;
+  merged = (elements.length > 0) && (bigModel || window.__forceMerge === true);
+  let usedLean = false;
+  if (merged){
+    try {
+      buildMerged();
+      // originals are baked into the merged meshes now; free the raw scene's geometry
+      root.traverse(o => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+      renderer.setPixelRatio(bigModel ? 1.0 : Math.min(window.devicePixelRatio || 1, 2));
+      post('diag:merged meshes=' + mergedMeshes.length + ' elements=' + elements.length +
+           ' tris=' + Math.round(tris));
+    } catch (err){
+      // merge failed -> fall back to the raw scene in lean mode so it still shows
+      merged = false; mergedMeshes = [];
+      if (mergedRoot){ scene.remove(mergedRoot); mergedRoot = null; }
+      scene.add(root); applyLean(); usedLean = true;
+      window.__mergeErr = (err && err.stack) ? err.stack : String(err);
+      post('diag:merge FAILED ' + (err && err.message ? err.message : err) + ' -> lean fallback');
+    }
+  } else {
+    scene.add(root);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    post('diag:model tris=' + Math.round(tris));
+  }
+  placeGround();
   tuneAO();
   frameCamera();
   recomputeVisibility();
   reportFilters();
-  showHint('');
+  showHint(usedLean ? ('Large model (' + bigModelTris + 'M triangles): lighter render for stability.')
+           : (merged && bigModel ? ('Large model (' + bigModelTris + 'M triangles) merged for performance.') : ''),
+           6000);
+  // verify env + AO aren't black on this GPU (self-heals). Skip only the lean fallback
+  // (AO is off there); the merged path runs the full pipeline, so it gets checked.
+  if (!usedLean) setTimeout(verifyRender, 900);
+}
+
+// Heavy-model guard. A federated MEP model can be millions of triangles. The merged path
+// handles that by cutting draw calls, but if merging is unavailable we fall back to a lean
+// single-pass lit render (no shadow map, no AO, lower pixel ratio) so the model still shows
+// instead of tripping the GPU watchdog (TDR)/VRAM -> lost context -> blank screen.
+const BIG_MODEL_TRIS = 2500000;
+function countTris(){
+  let tris = 0;
+  for (const e of elements){
+    const g = e.obj && e.obj.geometry;
+    if (g){ const idx = g.index;
+      tris += idx ? idx.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0); }
+  }
+  return tris;
+}
+function applyLean(){
+  renderer.setPixelRatio(1.0);
+  renderer.shadowMap.enabled = false;
+  scene.traverse(o => { if (o.isMesh){ o.castShadow = false; if (!o.userData.__env) o.receiveShadow = false; } });
+  aoEnabled = false; composerOK = false; renderChecked = true;   // never run the AO path/probe
+}
+
+// Add a per-vertex _vis attribute that discards hidden fragments, so one merged mesh can
+// hide individual elements (a category/workset toggle) without re-splitting geometry.
+// Anchored on standard-material chunk includes (reliably present in MeshStandardMaterial,
+// which is what GLTFLoader produces) rather than 'void main' (more fragile).
+function _injectVis(mat){
+  if (mat.__visInjected) return;
+  mat.__visInjected = true;
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = 'attribute float _vis;\nvarying float vVis;\n' +
+      shader.vertexShader.replace('#include <begin_vertex>',
+                                  '#include <begin_vertex>\n  vVis = _vis;');
+    shader.fragmentShader = 'varying float vVis;\n' +
+      shader.fragmentShader.replace('#include <clipping_planes_fragment>',
+                                    '#include <clipping_planes_fragment>\n  if (vVis < 0.5) discard;');
+  };
+  mat.needsUpdate = true;
+}
+
+// Fuse every per-element mesh into one merged mesh per material. World transforms are
+// baked into the vertices; a per-vertex _elemId (for GPU picking) and _vis (for hide)
+// ride along. This drops draw calls from ~one-per-element (thousands) to one-per-material
+// (dozens), which is what lets the full shadow+AO pipeline run on a huge model. Each
+// element records its (mergedMesh, vStart, vCount) so visibility can address its vertices.
+function buildMerged(){
+  mergedRoot = new THREE.Group();
+  root.updateMatrixWorld(true);
+  const buckets = new Map();                 // shared material instance -> [elements]
+  for (const e of elements){
+    const m = e.obj;
+    if (!m || !m.geometry || !m.geometry.attributes.position) continue;
+    let b = buckets.get(m.material);
+    if (!b){ b = []; buckets.set(m.material, b); }
+    b.push(e);
+  }
+  buckets.forEach((els, mat) => {
+    let totalVerts = 0, totalIdx = 0;
+    for (const e of els){
+      const g = e.obj.geometry, vc = g.attributes.position.count;
+      totalVerts += vc; totalIdx += g.index ? g.index.count : vc;
+    }
+    const pos = new Float32Array(totalVerts * 3);
+    const nrm = new Float32Array(totalVerts * 3);
+    const eid = new Float32Array(totalVerts);
+    const vis = new Float32Array(totalVerts); vis.fill(1);
+    const idx = (totalVerts > 65535) ? new Uint32Array(totalIdx) : new Uint16Array(totalIdx);
+    // carry UVs through only when the material is textured (so baseColorTexture maps);
+    // untextured buckets skip them to save memory
+    const hasUV = !!(mat && mat.map);
+    const uvs = hasUV ? new Float32Array(totalVerts * 2) : null;
+    let vOff = 0, iOff = 0;
+    for (const e of els){
+      const g = e.obj.geometry;
+      const pa = g.attributes.position.array;
+      let na = g.attributes.normal ? g.attributes.normal.array : null;
+      if (!na){ g.computeVertexNormals(); na = g.attributes.normal.array; }
+      const ua = (hasUV && g.attributes.uv) ? g.attributes.uv.array : null;
+      const vc = g.attributes.position.count;
+      const m = e.obj.matrixWorld.elements;
+      const nMat = new THREE.Matrix3().getNormalMatrix(e.obj.matrixWorld).elements;
+      for (let i = 0; i < vc; i++){
+        const x = pa[i*3], y = pa[i*3+1], z = pa[i*3+2];
+        const o3 = (vOff + i) * 3;
+        pos[o3]   = m[0]*x + m[4]*y + m[8]*z  + m[12];
+        pos[o3+1] = m[1]*x + m[5]*y + m[9]*z  + m[13];
+        pos[o3+2] = m[2]*x + m[6]*y + m[10]*z + m[14];
+        const nx = na[i*3], ny = na[i*3+1], nz = na[i*3+2];
+        let tx = nMat[0]*nx + nMat[3]*ny + nMat[6]*nz;
+        let ty = nMat[1]*nx + nMat[4]*ny + nMat[7]*nz;
+        let tz = nMat[2]*nx + nMat[5]*ny + nMat[8]*nz;
+        const len = Math.hypot(tx, ty, tz) || 1;
+        nrm[o3] = tx/len; nrm[o3+1] = ty/len; nrm[o3+2] = tz/len;
+        eid[vOff + i] = e.elemId;
+        if (uvs){ const o2 = (vOff + i) * 2; uvs[o2] = ua ? ua[i*2] : 0; uvs[o2+1] = ua ? ua[i*2+1] : 0; }
+      }
+      if (g.index){ const gi = g.index; for (let k = 0; k < gi.count; k++) idx[iOff+k] = gi.getX(k) + vOff; iOff += gi.count; }
+      else { for (let k = 0; k < vc; k++) idx[iOff+k] = vOff + k; iOff += vc; }
+      e.vStart = vOff; e.vCount = vc;        // this element's vertex range in the merged mesh
+      vOff += vc;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    geom.setAttribute('_elemId', new THREE.BufferAttribute(eid, 1));
+    geom.setAttribute('_vis', new THREE.BufferAttribute(vis, 1));
+    if (uvs) geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geom.setIndex(new THREE.BufferAttribute(idx, 1));
+    _injectVis(mat);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    mesh.frustumCulled = false;             // spans the whole model; per-mesh culling is moot
+    mesh.userData.__merged = true;
+    mergedMeshes.push(mesh);
+    mergedRoot.add(mesh);
+    for (const e of els) e.mergedMesh = mesh;
+  });
+  scene.add(mergedRoot);
 }
 
 // Robust bounds from element centers (a few stray elements can't hijack it).
 function computeBounds(ctrs){
-  if (!ctrs.length){ bounds = { center: new THREE.Vector3(), radius: 10 }; return; }
+  if (!ctrs.length){ bounds = { center: new THREE.Vector3(), radius: 10, minY: -10, span: 20 }; return; }
   let sx=0,sy=0,sz=0,sq=0;
   for (const c of ctrs){ sx+=c.x; sy+=c.y; sz+=c.z; sq+=c.x*c.x+c.y*c.y+c.z*c.z; }
   const n = ctrs.length, cx=sx/n, cy=sy/n, cz=sz/n;
   const rms = Math.sqrt(Math.max(0, sq/n - (cx*cx+cy*cy+cz*cz)));
   const full = new THREE.Box3().setFromObject(root);
   const fr = full.getSize(new THREE.Vector3()).length() / 2 || 10;
-  bounds = { center: new THREE.Vector3(cx,cy,cz), radius: Math.min(fr, Math.max(2, rms*2.5)) };
+  bounds = { center: new THREE.Vector3(cx,cy,cz), radius: Math.min(fr, Math.max(2, rms*2.5)),
+             minY: (isFinite(full.min.y) ? full.min.y : cy - fr),   // true base for the ground plane
+             span: fr * 2 };                                        // true diameter, for ground size
 }
 
 function frameCamera(){
@@ -193,7 +709,7 @@ function updateClip(){
   camera.far = d + bounds.radius * 3 + 50;          // log depth keeps precision across this
   camera.updateProjectionMatrix();
   const r = bounds.radius;
-  sun.position.copy(bounds.center).add(new THREE.Vector3(0.5,1.0,0.35).normalize().multiplyScalar(r*3));
+  sun.position.copy(bounds.center).addScaledVector(sunDir(), r*3);   // light from the current sun direction
   sun.target.position.copy(bounds.center);
   const sc = sun.shadow.camera;
   sc.left=-r; sc.right=r; sc.top=r; sc.bottom=-r; sc.near=0.1; sc.far=r*8+50; sc.updateProjectionMatrix();
@@ -201,6 +717,22 @@ function updateClip(){
 
 // ---------- visibility ----------
 function recomputeVisibility(){
+  if (merged){
+    // merged path: there's no per-element object to hide, so toggle the per-vertex _vis
+    // attribute over each element's vertex range (the shader discards _vis < 0.5) and
+    // re-upload only the merged meshes whose data actually changed.
+    const dirty = new Set();
+    for (const e of elements){
+      if (e.mergedMesh === undefined || e.mergedMesh === null) continue;
+      const v = (hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)]) ? 0 : 1;
+      const arr = e.mergedMesh.geometry.attributes._vis.array;
+      let changed = false;
+      for (let k = 0; k < e.vCount; k++){ const j = e.vStart + k; if (arr[j] !== v){ arr[j] = v; changed = true; } }
+      if (changed) dirty.add(e.mergedMesh);
+    }
+    dirty.forEach(m => { m.geometry.attributes._vis.needsUpdate = true; });
+    return;
+  }
   for (const e of elements){
     e.obj.visible = !(hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)]);
   }
@@ -220,7 +752,53 @@ function reportFilters(){
 
 // ---------- selection (raycasting) ----------
 const raycaster = new THREE.Raycaster();
-let hoverEl = null, pinnedEl = null, hlBox = null;
+let hoverEl = null, pinnedEl = null, hlBox = null, lastHoverPickT = 0;
+// GPU picking (merged path): per-element meshes are gone, so we identify an element by
+// rendering the merged meshes with a material that writes each element's id as a color,
+// then reading the one pixel under the cursor. Respects _vis (hidden = not pickable).
+let pickRT = null;
+const pickMat = new THREE.ShaderMaterial({
+  vertexShader:
+    'attribute float _elemId;\nattribute float _vis;\nvarying float vId;\nvarying float vVis;\n' +
+    'void main(){ vId=_elemId; vVis=_vis; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader:
+    'varying float vId;\nvarying float vVis;\n' +
+    'void main(){\n  if (vVis < 0.5) discard;\n  float id = vId + 1.0;   // +1 so empty(0) = nothing\n' +
+    '  float r = mod(id, 256.0);\n  float g = mod(floor(id/256.0), 256.0);\n  float b = floor(id/65536.0);\n' +
+    '  gl_FragColor = vec4(r/255.0, g/255.0, b/255.0, 1.0);\n}',
+  side: THREE.DoubleSide
+});
+function pickAtMerged(px, py){
+  if (!mergedRoot) return null;
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  if (w < 4 || h < 4) return null;
+  if (!pickRT || pickRT.width !== w || pickRT.height !== h){
+    if (pickRT) pickRT.dispose();
+    pickRT = new THREE.WebGLRenderTarget(w, h, { type: THREE.UnsignedByteType });
+  }
+  const rect = canvas.getBoundingClientRect();
+  const fx = (px - rect.left) / rect.width, fy = (py - rect.top) / rect.height;
+  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+  const gx = Math.min(w-1, Math.max(0, Math.floor(fx * w)));
+  const gy = Math.min(h-1, Math.max(0, Math.floor((1 - fy) * h)));   // GL origin is bottom-left
+  // render only the merged meshes, each fragment colored by element id
+  const gV = ground ? ground.visible : false;  if (ground) ground.visible = false;
+  const mV = markers ? markers.visible : false; if (markers) markers.visible = false;
+  const hV = hlBox ? hlBox.visible : false;     if (hlBox) hlBox.visible = false;
+  const prevBg = scene.background, prevOv = scene.overrideMaterial;
+  const prevClear = renderer.getClearColor(new THREE.Color()), prevAlpha = renderer.getClearAlpha();
+  scene.background = null; scene.overrideMaterial = pickMat;
+  renderer.setClearColor(0x000000, 1);
+  renderer.setRenderTarget(pickRT); renderer.clear(); renderer.render(scene, camera);
+  const buf = new Uint8Array(4);
+  renderer.readRenderTargetPixels(pickRT, gx, gy, 1, 1, buf);
+  renderer.setRenderTarget(null);
+  scene.overrideMaterial = prevOv; scene.background = prevBg;
+  renderer.setClearColor(prevClear, prevAlpha);
+  if (ground) ground.visible = gV; if (markers) markers.visible = mV; if (hlBox) hlBox.visible = hV;
+  const id = buf[0] + buf[1]*256 + buf[2]*65536 - 1;
+  return (id >= 0 && id < elements.length) ? elements[id] : null;
+}
 function ensureHlBox(){
   if (!hlBox){ hlBox = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(0xffd633));
     hlBox.material.depthTest = false; hlBox.renderOrder = 999; scene.add(hlBox); }
@@ -230,11 +808,30 @@ function setHighlight(e){
   if (!e){ if (hlBox) hlBox.visible = false; return; }
   ensureHlBox(); hlBox.box.copy(e.box); hlBox.visible = true;
 }
-function pickAt(px, py){
-  if (!pickables.length) return null;
+// Build the pick ray WITHOUT three.js unproject(). unproject relies on
+// camera.projectionMatrixInverse, which goes wrong inside Revit's WebView2 (a
+// diagnostic proved a cursor ray hit nothing while a hand-built control ray from
+// the same camera hit fine). This derives the ray from the camera's world basis
+// + fov + aspect instead -- mathematically identical to unproject when the
+// projection is fresh (verified: direction dot = 1.0), and correct when it isn't.
+function setPickRay(px, py){
+  camera.updateMatrixWorld();
   const rect = canvas.getBoundingClientRect();
-  const ndc = new THREE.Vector2(((px-rect.left)/rect.width)*2-1, -(((py-rect.top)/rect.height)*2-1));
-  raycaster.setFromCamera(ndc, camera);
+  const nx = ((px-rect.left)/rect.width)*2-1;
+  const ny = -(((py-rect.top)/rect.height)*2-1);
+  const origin = camera.getWorldPosition(new THREE.Vector3());
+  const fwd = camera.getWorldDirection(new THREE.Vector3());
+  const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+  const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov)/2), tanH = tanV*camera.aspect;
+  const dir = fwd.clone().addScaledVector(right, nx*tanH).addScaledVector(up, ny*tanV).normalize();
+  raycaster.set(origin, dir);
+  return { nx: nx, ny: ny, rect: rect };
+}
+function pickAt(px, py){
+  if (merged) return pickAtMerged(px, py);
+  if (!pickables.length) return null;
+  setPickRay(px, py);
   const hits = raycaster.intersectObjects(pickables, false);
   for (const h of hits){ if (h.object.visible){ const e = elementOf(h.object); if (e) return e; } }
   return null;
@@ -325,7 +922,7 @@ function applyPan(dx,dy){ const f=forwardVec(), r=rightVec();
 let leftDown=null;
 canvas.addEventListener('mousedown', e => {
   flying=false; canvas.focus();
-  if (e.button===2){ clearHover(); if(!locked && canvas.requestPointerLock){ rightLook=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
+  if (e.button===2){ clearHover(); if(!locked && canvas.requestPointerLock){ rightLook=true; lockPending=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
   if (locked) return;
   if (e.button===1){ clearHover(); dragMode='pan'; lastX=e.clientX; lastY=e.clientY; e.preventDefault(); }
   else if (e.button===0){ leftDown={x:e.clientX,y:e.clientY}; }
@@ -333,26 +930,40 @@ canvas.addEventListener('mousedown', e => {
 window.addEventListener('mouseup', e => {
   if (rightLook && e.button===2){ rightLook=false; if(document.exitPointerLock) document.exitPointerLock(); }
   if (e.button===0 && leftDown && !locked){
-    if (Math.hypot(e.clientX-leftDown.x, e.clientY-leftDown.y) < 5){ const el=pickAt(e.clientX,e.clientY); pinnedEl=el; hoverEl=el; refreshSel(e.clientX,e.clientY); }
+    // a clean click (not a drag) selects + pins the element under the cursor
+    if (Math.hypot(e.clientX-leftDown.x, e.clientY-leftDown.y) < 5){
+      const el = pickAt(e.clientX, e.clientY); pinnedEl=el; hoverEl=el; refreshSel(e.clientX, e.clientY);
+    }
     leftDown=null;
   }
   dragMode=null;
 });
 window.addEventListener('mousemove', e => {
-  if (locked){ applyLook(e.movementX||0, e.movementY||0); return; }
+  if (locked || lockPending){ if (locked) applyLook(e.movementX||0, e.movementY||0); return; }
   if (dragMode==='pan'){ applyPan(e.clientX-lastX, e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; return; }
   if (isFlying()) return;
-  if (!pinnedEl){ hoverEl = pickAt(e.clientX, e.clientY); refreshSel(e.clientX, e.clientY); }
+  if (!pinnedEl){
+    // merged path: each pick is a full id-pass render, so throttle hover to ~16/s; the
+    // props panel still follows the cursor every move. Small models raycast cheaply.
+    if (merged){
+      const now = performance.now();
+      if (now - lastHoverPickT >= 60){ lastHoverPickT = now; hoverEl = pickAt(e.clientX, e.clientY); }
+    } else {
+      hoverEl = pickAt(e.clientX, e.clientY);
+    }
+    refreshSel(e.clientX, e.clientY);
+  }
 });
 canvas.addEventListener('mouseleave', clearHover);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('wheel', e => { e.preventDefault(); flying=false;
   const f=forwardVec(), step=(bounds?bounds.radius*0.012:0.3)*(e.deltaY<0?1:-1);
   cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step; }, { passive:false });
-document.addEventListener('pointerlockchange', () => { locked=(document.pointerLockElement===canvas); if(!locked) rightLook=false; });
+document.addEventListener('pointerlockchange', () => { locked=(document.pointerLockElement===canvas); lockPending=false; if(!locked) rightLook=false; });
+document.addEventListener('pointerlockerror', () => { lockPending=false; });   // lock failed: don't freeze hover
 window.addEventListener('keydown', e => { const k=e.key.toLowerCase();
-  if (k==='escape'){ clearSelection(); post('escape'); return; }
-  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); canvas.requestPointerLock(); } e.preventDefault(); return; }
+  if (k==='escape'){ clearSelection(); e.preventDefault(); return; }   // unselect only; never closes/minimizes
+  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); lockPending=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
   if (k==='shift'){ keys.shift=true; return; }
   if ('wasdqe'.indexOf(k)>=0){ keys[k]=true; flying=false; e.preventDefault(); } });
 window.addEventListener('keyup', e => { const k=e.key.toLowerCase(); keys[k==='shift'?'shift':k]=false; });
@@ -360,6 +971,8 @@ window.addEventListener('blur', () => { keys={}; dragMode=null; clearHover(); })
 
 // ---------- panel <-> viewer messages ----------
 function post(msg){ if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg); }
+// minimize button (bottom-left, under the badge): exit the enlarged/full-screen view
+(function(){ const mb=document.getElementById('minbtn'); if (mb) mb.addEventListener('click', () => post('minimize')); })();
 function b64ToBuffer(b64){ const bin=atob(b64), n=bin.length, a=new Uint8Array(n); for(let i=0;i<n;i++)a[i]=bin.charCodeAt(i); return a.buffer; }
 function loadFromUrl(url){ showHint('Loading model…'); loader.load(url, onLoaded, undefined, err=>showHint('Load error: '+(err&&err.message?err.message:err))); }
 function loadFromBuffer(buf){ showHint('Parsing model…'); try{ loader.parse(buf,'',onLoaded, err=>showHint('Load error: '+(err&&err.message?err.message:err))); }catch(e){ showHint('Load error: '+e.message); } }
@@ -383,16 +996,26 @@ function handleMessage(data){
     else if (cmd==='flytopoint'){ const p=arg.split(',').map(parseFloat); if(p.length===3) flyToPoint(p); }
     else if (cmd==='viewpose'){ const vp=JSON.parse(arg); startFly(vp.pos, vp.yaw, vp.pitch); }
     else if (cmd==='quality'){ setQuality(arg); }
+    else if (cmd==='sun'){ const p=arg.split(',').map(parseFloat);
+      if (p.length>=3 && !isNaN(p[0])){ sunEl=p[0]; sunAz=p[1]; sunStrength=p[2]; applySun(); } }
+    else if (cmd==='edges'){ setEdges(arg==='1'); }
   } catch(err){ showHint('Error: '+(err&&err.message?err.message:err)); }
 }
 if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', e => handleMessage(e.data));
 
-// quality tiers: Draft (flat, no shadows/AO), Shaded (sun+shadows), Realistic/Ultra (+AO)
-let renderMode = 2;   // default Realistic so AO is on out of the box
+// quality tiers: Draft (flat clay, slate bg, no IBL/shadows/AO), Shaded (outdoor
+// sky IBL + sun + shadows), Realistic/Ultra (+ ambient occlusion)
+let renderMode = 2;   // default Realistic so the sky + AO are on out of the box
 function setQuality(name){ const m={draft:0,shaded:1,realistic:2,ultra:3}; if(name in m){ renderMode=m[name];
-  renderer.shadowMap.enabled = renderMode>=1;
-  scene.traverse(o=>{ if(o.isMesh) o.castShadow=o.receiveShadow=(renderMode>=1); });
-  aoEnabled = renderMode>=2; } }
+  // Effects (shadow/AO) are allowed unless this is a big model that ISN'T merged: re-enabling
+  // them on a raw multi-million-triangle scene is what lost the GPU context. A merged big model
+  // runs them fine (draw calls are now low), so merging restores full quality at scale.
+  const fx = merged || !bigModel, shadows = fx && renderMode>=1;
+  renderer.shadowMap.enabled = shadows;
+  scene.traverse(o=>{ if(o.isMesh && !o.userData.__env) o.castShadow=o.receiveShadow=shadows; });
+  if (typeof ground !== 'undefined' && ground) ground.receiveShadow = shadows;
+  aoEnabled = fx && renderMode>=2;
+  setSky(renderMode>=1); } }
 
 // throttled camera report for saved viewpoints
 let lastCamReport=0, lastCam=null;
@@ -410,7 +1033,8 @@ window.dbhmsLoadUrl = loadFromUrl;
 window.dbhmsLoadB64 = b64 => loadFromBuffer(b64ToBuffer(b64));
 window.__msg = handleMessage; window.THREE=THREE; window.__scene=scene; window.__camera=camera; window.__renderer=renderer;
 window.__state = () => ({ elements: elements.length, pickables: pickables.length, pinned: pinnedEl?pinnedEl.meta:null,
-  hover: hoverEl?hoverEl.category:null, markers: markers?markers.geometry.attributes.position.count:0, showMarkers, flying, bounds });
+  hover: hoverEl?hoverEl.category:null, markers: markers?markers.geometry.attributes.position.count:0, showMarkers, flying, bounds,
+  merged: merged, bigModel: bigModel, mergedMeshes: mergedMeshes.length, forceMerge: window.__forceMerge });
 // debug: render the composer (AO path) to an offscreen target and return pixel stats,
 // so AO can be verified despite the headless preview's canvas quirks.
 window.__aoProbe = (W, H, aimX, aimY, aimZ) => {
@@ -438,12 +1062,40 @@ window.__aoProbe = (W, H, aimX, aimY, aimZ) => {
            maxLum:Math.round(maxV*100)/100, glErr: renderer.getContext().getError() };
 };
 
+// debug: measure the ACTUAL on-screen brightness of the plain (Shaded) path vs the
+// composer (Realistic) path at the same camera, to diagnose why they diverge.
+window.__cmpScreen = (W, H, ax, ay, az) => {
+  cam.pos = [ax, ay, az]; const c = bounds ? bounds.center : new THREE.Vector3();
+  const d = [c.x-ax, c.y-ay, c.z-az], dl = Math.hypot(d[0],d[1],d[2]) || 1;
+  cam.yaw = Math.atan2(d[0]/dl, -d[2]/dl); cam.pitch = Math.asin(d[1]/dl);
+  renderer.setSize(W, H, false); composer.setSize(W, H);
+  camera.aspect = W/H; camera.updateProjectionMatrix(); applyCameraToThree(); tuneAO();
+  const gl = renderer.getContext();
+  function readMean(){ const px = new Uint8Array(W*H*4); gl.readPixels(0,0,W,H,gl.RGBA,gl.UNSIGNED_BYTE,px);
+    let s=0, mx=0, n=W*H; for (let i=0;i<px.length;i+=4){ const L=(0.3*px[i]+0.6*px[i+1]+0.1*px[i+2])/255; s+=L; if(L>mx)mx=L; }
+    return { mean: Math.round(s/n*1000)/1000, max: Math.round(mx*1000)/1000 }; }
+  renderer.setRenderTarget(null); renderer.clear(); renderer.render(scene, camera);
+  const plain = readMean();
+  composer.render(); blitComposerToScreen();
+  const comp = readMean();
+  // composer WITHOUT OutputPass (blit the N8AO output directly) -- tests whether
+  // OutputPass is the extra sRGB encode
+  let compNoOut = null;
+  if (composer.passes.length > 1 && composer.passes[composer.passes.length-1].constructor.name === 'OutputPass'){
+    const op = composer.passes.pop();
+    composer.render(); blitComposerToScreen();
+    compNoOut = readMean();
+    composer.passes.push(op);
+  }
+  return { plain, composerBlit: comp, composerNoOutput: compNoOut };
+};
 // ---------- loop ----------
 function resize(){ const w=canvas.clientWidth, h=canvas.clientHeight;
   if (canvas.width!==w || canvas.height!==h){ renderer.setSize(w,h,false); composer.setSize(w,h);
     camera.aspect=w/Math.max(1,h); camera.updateProjectionMatrix(); } }
 function frame(t){
   requestAnimationFrame(frame);
+  if (glLost) return;   // context is dead; don't throw on every frame trying to draw
   const dt = prevT ? Math.min(0.05, (t-prevT)/1000) : 0.016; prevT=t;
   const pads = navigator.getGamepads ? navigator.getGamepads() : []; let gp=null;
   for (const p of pads){ if (p){ gp=p; break; } }
@@ -455,7 +1107,8 @@ function frame(t){
   applyCameraToThree();
   reportCam(t);
   resize();
-  if (aoEnabled && root) composer.render(); else renderer.render(scene, camera);
+  if (aoEnabled && composerOK && root){ composer.render(); blitComposerToScreen(); }
+  else renderer.render(scene, camera);
 }
 showHint('Ready. Export & load a model to begin.');
 requestAnimationFrame(frame);

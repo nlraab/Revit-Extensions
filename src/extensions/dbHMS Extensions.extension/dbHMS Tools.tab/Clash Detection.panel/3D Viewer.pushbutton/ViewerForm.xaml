@@ -48,6 +48,11 @@
         <Style TargetType="ComboBox">
             <Setter Property="Padding" Value="6,4"/><Setter Property="Height" Value="26"/>
         </Style>
+        <!-- Collapsible section: a card with an Expander whose header is the section title -->
+        <Style x:Key="SectionExpander" TargetType="Expander">
+            <Setter Property="IsExpanded" Value="True"/>
+            <Setter Property="Foreground" Value="#1A202C"/>
+        </Style>
     </Window.Resources>
 
     <DockPanel>
@@ -92,200 +97,219 @@
         <!-- Body: settings (left) + render host (right) -->
         <Grid Margin="20,16,20,16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="340" MinWidth="300"/>
-                <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="*" MinWidth="420"/>
+                <ColumnDefinition Width="360" MinWidth="240"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*" MinWidth="160"/>
             </Grid.ColumnDefinitions>
 
             <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel>
 
-                    <!-- Model & export -->
+                    <!-- Model & export (top box, kept first) -->
                     <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Model" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Export the Revit model once, then fly through it here."
-                                       Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
-                            <Button x:Name="btn_export" Content="Export &amp; Load Model"
-                                    Style="{StaticResource PrimaryButton}"
-                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0,0,0,6" Padding="14,8"/>
-                            <Button x:Name="btn_load_last" Content="Load Last Export"
-                                    Style="{StaticResource SecondaryButton}"
-                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0,0,0,8" Padding="12,6"/>
-                            <TextBlock Text="Export scope" Style="{StaticResource FieldLabel}"/>
-                            <ComboBox x:Name="cmb_scope" IsEnabled="False">
-                                <ComboBoxItem Content="Whole model + links" IsSelected="True"/>
-                                <ComboBoxItem Content="Active view only"/>
-                            </ComboBox>
-                            <TextBlock x:Name="txt_stats" Text="No model loaded yet."
-                                       Style="{StaticResource HelperText}" Margin="0,8,0,0"/>
-                        </StackPanel>
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Model" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <TextBlock Text="Export the Revit model once, then fly through it here."
+                                           Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+                                <Button x:Name="btn_export" Content="Export &amp; Load Model"
+                                        Style="{StaticResource PrimaryButton}"
+                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                        MinWidth="0" Margin="0,0,0,6" Padding="14,8"/>
+                                <Button x:Name="btn_load_last" Content="Load Last Export"
+                                        Style="{StaticResource SecondaryButton}"
+                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                        MinWidth="0" Margin="0,0,0,8" Padding="12,6"/>
+                                <TextBlock Text="Export scope" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_scope" IsEnabled="False">
+                                    <ComboBoxItem Content="Whole model + links" IsSelected="True"/>
+                                    <ComboBoxItem Content="Active view only"/>
+                                </ComboBox>
+                                <TextBlock x:Name="txt_stats" Text="No model loaded yet."
+                                           Style="{StaticResource HelperText}" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Expander>
                     </Border>
 
                     <!-- Navigation -->
                     <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Navigation" Style="{StaticResource SectionHeader}"/>
-                            <Grid Margin="0,0,0,2">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="Speed" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
-                                <Slider Grid.Column="1" x:Name="sl_speed" Minimum="0.3" Maximum="30" Value="4"
-                                        TickFrequency="0.1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
-                                <TextBlock Grid.Column="2" x:Name="txt_speed_val" Text="4.0 m/s"
-                                           VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
-                            </Grid>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="Look" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
-                                <Slider Grid.Column="1" x:Name="sl_look" Minimum="0.02" Maximum="0.40" Value="0.10"
-                                        TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
-                                <TextBlock Grid.Column="2" x:Name="txt_look_val" Text="0.10"
-                                           VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
-                            </Grid>
-                            <CheckBox x:Name="chk_invert_look" Content="Invert look (Y)" IsEnabled="False" Margin="0,6,0,0"/>
-                            <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8" Margin="0,8,0,0">
-                                <TextBlock Style="{StaticResource HelperText}">
-                                    <Run Text="Right-drag" FontWeight="Bold"/><Run Text=" look · "/><Run Text="Middle-drag" FontWeight="Bold"/><Run Text=" pan · "/><Run Text="Scroll" FontWeight="Bold"/><Run Text=" zoom · "/><Run Text="F" FontWeight="Bold"/><Run Text=" mouselook · "/><Run Text="WASD" FontWeight="Bold"/><Run Text=" fly · "/><Run Text="Q/E" FontWeight="Bold"/><Run Text=" down/up · "/><Run Text="Shift" FontWeight="Bold"/><Run Text=" faster · "/><Run Text="Left-click" FontWeight="Bold"/><Run Text=" select (soon)"/><LineBreak/><Run Text="Xbox controller:" FontWeight="Bold"/><Run Text=" left stick fly, right stick look, LB/RB down/up, RT faster"/>
-                                </TextBlock>
-                            </Border>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Visibility -->
-                    <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Visibility" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Turn whole models off, or individual categories within each model. Instant — nothing re-exports."
-                                       Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
-                            <Border x:Name="brd_models" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Your model and each linked model — with their categories — list here after a model loads."/>
-                            </Border>
-                            <TextBlock Text="Worksets &amp; Levels (coming)" Style="{StaticResource FieldLabel}"/>
-                            <TextBlock Style="{StaticResource HelperText}"
-                                       Text="Per-model workset and level toggles are the next step in this phase."/>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Appearance -->
-                    <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Appearance" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Render quality" Style="{StaticResource FieldLabel}"/>
-                            <ComboBox x:Name="cmb_quality">
-                                <ComboBoxItem Content="Draft"/>
-                                <ComboBoxItem Content="Shaded" IsSelected="True"/>
-                                <ComboBoxItem Content="Realistic"/>
-                                <ComboBoxItem Content="Ultra"/>
-                            </ComboBox>
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
-                                       Text="Draft = fast flat fly-through. Shaded = lit, real material colors. Realistic / Ultra add sky lighting, shadows and reflections (coming next)."/>
-                            <TextBlock Text="Background" Style="{StaticResource FieldLabel}"/>
-                            <ComboBox x:Name="cmb_background" IsEnabled="False">
-                                <ComboBoxItem Content="Dark" IsSelected="True"/>
-                                <ComboBoxItem Content="Light"/>
-                            </ComboBox>
-                            <TextBlock Text="Color elements by" Style="{StaticResource FieldLabel}"/>
-                            <ComboBox x:Name="cmb_color_by" IsEnabled="False">
-                                <ComboBoxItem Content="Discipline" IsSelected="True"/>
-                                <ComboBoxItem Content="Category"/>
-                                <ComboBoxItem Content="Material"/>
-                                <ComboBoxItem Content="Clash status"/>
-                            </ComboBox>
-                            <CheckBox x:Name="chk_edges" Content="Show edges" IsEnabled="False" Margin="0,8,0,0"/>
-                            <CheckBox x:Name="chk_section_box" Content="Section box" IsEnabled="False"/>
-                            <TextBlock Text="Environment (coming)" Style="{StaticResource FieldLabel}"/>
-                            <StackPanel IsEnabled="False">
-                                <TextBlock Text="Time of day" Style="{StaticResource HelperText}"/>
-                                <Slider x:Name="sl_time_of_day" Minimum="0" Maximum="24" Value="12"/>
-                                <TextBlock Text="Sun strength" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                <Slider x:Name="sl_sun_strength" Minimum="0" Maximum="100" Value="70"/>
-                                <TextBlock Text="Sun direction" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                <Slider x:Name="sl_sun_direction" Minimum="0" Maximum="360" Value="135"/>
-                                <TextBlock Text="Sky" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                <ComboBox x:Name="cmb_sky">
-                                    <ComboBoxItem Content="Solid" IsSelected="True"/>
-                                    <ComboBoxItem Content="Gradient"/>
-                                    <ComboBoxItem Content="Sky + horizon"/>
-                                </ComboBox>
-                                <TextBlock Text="Ground" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                <ComboBox x:Name="cmb_ground">
-                                    <ComboBoxItem Content="None" IsSelected="True"/>
-                                    <ComboBoxItem Content="Plane"/>
-                                    <ComboBoxItem Content="Grid"/>
-                                </ComboBox>
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Navigation" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <Grid Margin="0,0,0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Speed" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <Slider Grid.Column="1" x:Name="sl_speed" Minimum="0.3" Maximum="30" Value="4"
+                                            TickFrequency="0.1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="2" x:Name="txt_speed_val" Text="4.0 m/s"
+                                               VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="78"/><ColumnDefinition Width="*"/><ColumnDefinition Width="64"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Look" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <Slider Grid.Column="1" x:Name="sl_look" Minimum="0.02" Maximum="0.40" Value="0.10"
+                                            TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="2" x:Name="txt_look_val" Text="0.10"
+                                               VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource MonoText}"/>
+                                </Grid>
+                                <CheckBox x:Name="chk_invert_look" Content="Invert look (Y)" IsEnabled="False" Margin="0,6,0,0"/>
+                                <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="3" Padding="8" Margin="0,8,0,0">
+                                    <TextBlock Style="{StaticResource HelperText}">
+                                        <Run Text="Right-drag" FontWeight="Bold"/><Run Text=" look · "/><Run Text="Middle-drag" FontWeight="Bold"/><Run Text=" pan · "/><Run Text="Scroll" FontWeight="Bold"/><Run Text=" zoom · "/><Run Text="F" FontWeight="Bold"/><Run Text=" mouselook · "/><Run Text="WASD" FontWeight="Bold"/><Run Text=" fly · "/><Run Text="Q/E" FontWeight="Bold"/><Run Text=" down/up · "/><Run Text="Shift" FontWeight="Bold"/><Run Text=" faster · "/><Run Text="Left-click" FontWeight="Bold"/><Run Text=" select"/><LineBreak/><Run Text="Xbox controller:" FontWeight="Bold"/><Run Text=" left stick fly, right stick look, LB/RB down/up, RT faster"/>
+                                    </TextBlock>
+                                </Border>
                             </StackPanel>
-                        </StackPanel>
+                        </Expander>
+                    </Border>
+
+                    <!-- Saved views -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Saved Views" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <TextBlock Text="Save the current view to jump back to it later. Click a saved view to fly there. (Pop Out / Full Screen are in the footer.)"
+                                           Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
+                                <Button x:Name="btn_saved_views" Content="Save Current View"
+                                        Style="{StaticResource SecondaryButton}"
+                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                        MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
+                                <Border x:Name="brd_viewpoints" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="3" Padding="8" Margin="0,0,0,8">
+                                    <TextBlock Style="{StaticResource HelperText}" Text="Saved viewpoints list here."/>
+                                </Border>
+                                <Button x:Name="btn_screenshot" Content="Save Screenshot"
+                                        Style="{StaticResource SecondaryButton}" IsEnabled="False"
+                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                        MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
+                                <CheckBox x:Name="chk_minimap" Content="Floor-plan minimap" IsEnabled="False"/>
+                            </StackPanel>
+                        </Expander>
+                    </Border>
+
+                    <!-- Appearance (render quality + environment) -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Appearance" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <TextBlock Text="Render quality" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_quality">
+                                    <ComboBoxItem Content="Draft"/>
+                                    <ComboBoxItem Content="Shaded" IsSelected="True"/>
+                                    <ComboBoxItem Content="Realistic"/>
+                                    <ComboBoxItem Content="Ultra"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
+                                           Text="Draft = fast flat fly-through. Shaded = lit, real material colors. Realistic / Ultra add sky lighting, shadows and reflections (coming next)."/>
+                                <TextBlock Text="Background" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_background" IsEnabled="False">
+                                    <ComboBoxItem Content="Dark" IsSelected="True"/>
+                                    <ComboBoxItem Content="Light"/>
+                                </ComboBox>
+                                <TextBlock Text="Color elements by" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_color_by" IsEnabled="False">
+                                    <ComboBoxItem Content="Discipline" IsSelected="True"/>
+                                    <ComboBoxItem Content="Category"/>
+                                    <ComboBoxItem Content="Material"/>
+                                    <ComboBoxItem Content="Clash status"/>
+                                </ComboBox>
+                                <CheckBox x:Name="chk_edges" Content="Show edges" Margin="0,8,0,0"/>
+                                <CheckBox x:Name="chk_section_box" Content="Section box" IsEnabled="False"/>
+                                <TextBlock Text="Environment" Style="{StaticResource SectionHeader}" Margin="0,12,0,4"/>
+                                <StackPanel>
+                                    <TextBlock Text="Time of day" Style="{StaticResource HelperText}"/>
+                                    <Slider x:Name="sl_time_of_day" Minimum="0" Maximum="24" Value="12"/>
+                                    <TextBlock Text="Sun strength" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                    <Slider x:Name="sl_sun_strength" Minimum="0" Maximum="100" Value="70"/>
+                                    <TextBlock Text="Sun direction" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                    <Slider x:Name="sl_sun_direction" Minimum="0" Maximum="360" Value="135"/>
+                                    <TextBlock Text="Sky (coming)" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                    <ComboBox x:Name="cmb_sky" IsEnabled="False">
+                                        <ComboBoxItem Content="Solid"/>
+                                        <ComboBoxItem Content="Gradient"/>
+                                        <ComboBoxItem Content="Sky + horizon" IsSelected="True"/>
+                                    </ComboBox>
+                                    <TextBlock Text="Ground (coming)" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                                    <ComboBox x:Name="cmb_ground" IsEnabled="False">
+                                        <ComboBoxItem Content="None" IsSelected="True"/>
+                                        <ComboBoxItem Content="Plane"/>
+                                        <ComboBoxItem Content="Grid"/>
+                                    </ComboBox>
+                                </StackPanel>
+                            </StackPanel>
+                        </Expander>
+                    </Border>
+
+                    <!-- Visibility (model on/off) -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Visibility" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <TextBlock Text="Turn whole models off, or individual categories within each model. Instant — nothing re-exports."
+                                           Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
+                                <Border x:Name="brd_models" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="3" Padding="8">
+                                    <TextBlock Style="{StaticResource HelperText}" Text="Your model and each linked model — with their categories — list here after a model loads."/>
+                                </Border>
+                                <TextBlock Text="Worksets &amp; Levels (coming)" Style="{StaticResource FieldLabel}"/>
+                                <TextBlock Style="{StaticResource HelperText}"
+                                           Text="Per-model workset and level toggles are the next step in this phase."/>
+                            </StackPanel>
+                        </Expander>
                     </Border>
 
                     <!-- Clashes -->
                     <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Clashes" Style="{StaticResource SectionHeader}"/>
-                            <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsChecked="False"/>
-                            <TextBlock Text="Filter the list, then click a clash to fly to it. Turn on markers to drop dots in the view for the filtered clashes."
-                                       Style="{StaticResource HelperText}" Margin="0,4,0,6"/>
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Clashes" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <CheckBox x:Name="chk_clash_markers" Content="Show clash markers" IsChecked="False"/>
+                                <TextBlock Text="Filter the list, then click a clash to fly to it. Turn on markers to drop dots in the view for the filtered clashes."
+                                           Style="{StaticResource HelperText}" Margin="0,4,0,6"/>
 
-                            <!-- Filters: built from this project's clashes; hidden until a model loads -->
-                            <StackPanel x:Name="sp_clash_filters" Visibility="Collapsed">
-                                <TextBlock Text="Trade" Style="{StaticResource FieldLabel}"/>
-                                <StackPanel x:Name="sp_clash_trades"/>
-                                <TextBlock Text="Status" Style="{StaticResource FieldLabel}"/>
-                                <StackPanel x:Name="sp_clash_status"/>
-                                <TextBlock Text="Type" Style="{StaticResource FieldLabel}"/>
-                                <StackPanel x:Name="sp_clash_kind"/>
-                                <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
-                                <TextBox x:Name="txt_clash_search"/>
-                                <TextBlock x:Name="lbl_clash_count" Style="{StaticResource HelperText}" Margin="0,6,0,2"/>
+                                <!-- Filters: built from this project's clashes; hidden until a model loads -->
+                                <StackPanel x:Name="sp_clash_filters" Visibility="Collapsed">
+                                    <TextBlock Text="Trade" Style="{StaticResource FieldLabel}"/>
+                                    <StackPanel x:Name="sp_clash_trades"/>
+                                    <TextBlock Text="Status" Style="{StaticResource FieldLabel}"/>
+                                    <StackPanel x:Name="sp_clash_status"/>
+                                    <TextBlock Text="Type" Style="{StaticResource FieldLabel}"/>
+                                    <StackPanel x:Name="sp_clash_kind"/>
+                                    <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox x:Name="txt_clash_search"/>
+                                    <TextBlock x:Name="lbl_clash_count" Style="{StaticResource HelperText}" Margin="0,6,0,2"/>
+                                </StackPanel>
+
+                                <Border x:Name="brd_clashes" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="3" Padding="8" Margin="0,4,0,0">
+                                    <TextBlock Style="{StaticResource HelperText}" Text="Clashes list here after a model loads."/>
+                                </Border>
                             </StackPanel>
-
-                            <Border x:Name="brd_clashes" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8" Margin="0,4,0,0">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Clashes list here after a model loads."/>
-                            </Border>
-                        </StackPanel>
+                        </Expander>
                     </Border>
 
                     <!-- Selection -->
                     <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Selection" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Click an element (when not in F mouselook) to highlight it and see its details — category, name, model, level, workset — right in the view. Full parameter list and pick-what-to-show come later."
-                                       Style="{StaticResource HelperText}"/>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Viewpoints -->
-                    <Border Style="{StaticResource CardBorder}">
-                        <StackPanel>
-                            <TextBlock Text="Viewpoints" Style="{StaticResource SectionHeader}"/>
-                            <TextBlock Text="Save the current view to jump back to it later. Click a saved view to fly there. (Pop Out / Full Screen are in the footer.)"
-                                       Style="{StaticResource HelperText}" Margin="0,0,0,6"/>
-                            <Button x:Name="btn_saved_views" Content="Save Current View"
-                                    Style="{StaticResource SecondaryButton}"
-                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
-                            <Border x:Name="brd_viewpoints" Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                    CornerRadius="3" Padding="8" Margin="0,0,0,8">
-                                <TextBlock Style="{StaticResource HelperText}" Text="Saved viewpoints list here."/>
-                            </Border>
-                            <Button x:Name="btn_screenshot" Content="Save Screenshot"
-                                    Style="{StaticResource SecondaryButton}" IsEnabled="False"
-                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                                    MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
-                            <CheckBox x:Name="chk_minimap" Content="Floor-plan minimap" IsEnabled="False"/>
-                        </StackPanel>
+                        <Expander Style="{StaticResource SectionExpander}">
+                            <Expander.Header><TextBlock Text="Selection" Style="{StaticResource SectionHeader}" Margin="0"/></Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <TextBlock Text="Click an element (when not in F mouselook) to highlight it and see its details — category, name, model, level, workset — right in the view. Full parameter list and pick-what-to-show come later."
+                                           Style="{StaticResource HelperText}"/>
+                            </StackPanel>
+                        </Expander>
                     </Border>
 
                 </StackPanel>
             </ScrollViewer>
+
+            <!-- Drag to resize the settings panel (wider when the render is undocked). -->
+            <GridSplitter Grid.Column="1" Width="8" VerticalAlignment="Stretch" HorizontalAlignment="Center"
+                          Background="#E2E8F0" Cursor="SizeWE"
+                          ToolTip="Drag to resize — widen the panel when the render is on another screen"/>
 
             <!-- Render host: WebView2 attaches here. Kept clean for sharing. -->
             <Border Grid.Column="2" x:Name="brd_viewport"

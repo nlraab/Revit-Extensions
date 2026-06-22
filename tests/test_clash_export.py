@@ -65,7 +65,9 @@ def _read_accessor_uints(gltf_obj, bin_bytes, accessor_index):
     bv = gltf_obj["bufferViews"][acc["bufferView"]]
     offset = bv.get("byteOffset", 0)
     n = acc["count"]
-    return list(struct.unpack_from('<%dI' % n, bin_bytes, offset))
+    # indices may be narrowed to UNSIGNED_SHORT (5123) when the mesh fits in 16 bits
+    fmt = 'H' if acc["componentType"] == 5123 else 'I'
+    return list(struct.unpack_from('<%d%s' % (n, fmt), bin_bytes, offset))
 
 
 class MeshTests(unittest.TestCase):
@@ -161,12 +163,211 @@ class GlbStructureTests(unittest.TestCase):
         idx = _read_accessor_uints(self.gltf, self.bin, prim1["indices"])
         self.assertEqual(idx, [0, 1, 2, 0, 2, 3])
 
+    def test_small_mesh_indices_narrowed_to_ushort(self):
+        # a 4-vertex mesh fits in 16 bits -> indices stored as UNSIGNED_SHORT (2 bytes)
+        prim1 = self.gltf["meshes"][1]["primitives"][0]
+        acc = self.gltf["accessors"][prim1["indices"]]
+        self.assertEqual(acc["componentType"], 5123)  # UNSIGNED_SHORT
+
     def test_buffer_length_matches(self):
         # buffers[0].byteLength is the unpadded content length; the BIN chunk
         # may be padded up to a 4-byte boundary, so chunk >= declared.
         declared = self.gltf["buffers"][0]["byteLength"]
         self.assertGreaterEqual(len(self.bin), declared)
         self.assertEqual(len(self.bin) % 4, 0)
+
+
+class TextureTests(unittest.TestCase):
+    def _make(self, **kw):
+        m = Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0], **kw)
+        return _parse_glb(gltf.build_glb([m]))
+
+    def test_uvs_emit_texcoord0_accessor(self):
+        g, b = self._make(uvs=[0, 0, 1, 0, 0, 1])
+        prim = g["meshes"][0]["primitives"][0]
+        self.assertIn("TEXCOORD_0", prim["attributes"])
+        acc = g["accessors"][prim["attributes"]["TEXCOORD_0"]]
+        self.assertEqual(acc["type"], "VEC2")
+        self.assertEqual(acc["count"], 3)
+        vals = list(struct.unpack_from('<6f', b, g["bufferViews"][acc["bufferView"]].get("byteOffset", 0)))
+        self.assertEqual(vals, [0, 0, 1, 0, 0, 1])
+
+    def test_texture_emits_image_sampler_and_basecolortexture(self):
+        g, _ = self._make(uvs=[0, 0, 1, 0, 0, 1], texture="tex/brick.png")
+        self.assertEqual(g["images"][0]["uri"], "tex/brick.png")
+        self.assertEqual(len(g["samplers"]), 1)
+        self.assertEqual(g["textures"][0]["source"], 0)
+        prim = g["meshes"][0]["primitives"][0]
+        pbr = g["materials"][prim["material"]]["pbrMetallicRoughness"]
+        self.assertEqual(pbr["baseColorTexture"]["index"], 0)
+
+    def test_untextured_mesh_has_no_texture_arrays(self):
+        g, _ = self._make()
+        self.assertNotIn("images", g)
+        self.assertNotIn("textures", g)
+        prim = g["meshes"][0]["primitives"][0]
+        self.assertNotIn("baseColorTexture", g["materials"][prim["material"]]["pbrMetallicRoughness"])
+
+    def test_shared_texture_is_deduped(self):
+        a = Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0], uvs=[0, 0, 1, 0, 0, 1], texture="t.png")
+        b = Mesh(positions=[0, 0, 1, 1, 0, 1, 0, 1, 1], uvs=[0, 0, 1, 0, 0, 1], texture="t.png")
+        g, _ = _parse_glb(gltf.build_glb([a, b]))
+        self.assertEqual(len(g["images"]), 1)      # same uri -> one image
+        self.assertEqual(len(g["textures"]), 1)
+
+    def test_writer_matches_build_glb_with_textures(self):
+        meshes = [Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0], uvs=[0, 0, 1, 0, 0, 1],
+                       texture="data:image/png;base64,AAAA", color=(0.2, 0.4, 0.6))]
+        ref = bytes(gltf.build_glb(meshes))
+        tmp = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmp, "t.glb")
+            w = gltf.GlbWriter(path)
+            for m in meshes:
+                w.add(m)
+            w.finalize()
+            with open(path, 'rb') as f:
+                self.assertEqual(f.read(), ref)   # streaming path byte-identical
+        finally:
+            try: os.remove(os.path.join(tmp, "t.glb"))
+            except OSError: pass
+            os.rmdir(tmp)
+
+
+class TextureExtractionTests(unittest.TestCase):
+    """The Revit-free parts of texture extraction: path handling, data-URI encoding,
+    and the appearance-asset tree walk (mocked). The Revit API calls themselves are
+    lazy-imported and only run inside Revit."""
+
+    def test_looks_like_image(self):
+        self.assertTrue(revit_geometry._looks_like_image("Brick.PNG"))
+        self.assertTrue(revit_geometry._looks_like_image("a/b/c.jpg"))
+        self.assertFalse(revit_geometry._looks_like_image("notes.txt"))
+        self.assertFalse(revit_geometry._looks_like_image(None))
+
+    def test_first_image_path_picks_first_image(self):
+        self.assertEqual(revit_geometry._first_image_path("a.png|b.jpg"), "a.png")
+        self.assertEqual(revit_geometry._first_image_path("x.txt|b.jpg"), "b.jpg")
+        self.assertIsNone(revit_geometry._first_image_path("x.txt|y.dat"))
+
+    def test_file_to_datauri_roundtrips(self):
+        import base64
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "t.png")
+            payload = b"\x89PNG\r\n\x1a\nsome-bytes"
+            with open(p, "wb") as f:
+                f.write(payload)
+            uri = revit_geometry._file_to_datauri(p)
+            self.assertTrue(uri.startswith("data:image/png;base64,"))
+            self.assertEqual(base64.b64decode(uri.split(",", 1)[1]), payload)
+        finally:
+            try: os.remove(os.path.join(tmp, "t.png"))
+            except OSError: pass
+            os.rmdir(tmp)
+
+    def test_file_to_datauri_skips_oversize(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "big.png")
+            with open(p, "wb") as f:
+                f.write(b"\x00" * (revit_geometry._MAX_TEX_BYTES + 1))
+            self.assertIsNone(revit_geometry._file_to_datauri(p))
+        finally:
+            try: os.remove(os.path.join(tmp, "big.png"))
+            except OSError: pass
+            os.rmdir(tmp)
+
+    def test_resolve_absolute_existing_path(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "wall.jpg")
+            with open(p, "wb") as f:
+                f.write(b"x")
+            self.assertEqual(revit_geometry._resolve_texture_path(p), p)
+            self.assertIsNone(revit_geometry._resolve_texture_path("nope/missing.jpg"))
+        finally:
+            try: os.remove(os.path.join(tmp, "wall.jpg"))
+            except OSError: pass
+            os.rmdir(tmp)
+
+    def test_find_bitmap_path_walks_connected_asset(self):
+        # mock the Revit tree: a diffuse slot -> connected UnifiedBitmap asset ->
+        # a *bitmap* string property holding the file path
+        class P(object):
+            def __init__(self, name="", value=None, members=None, connected=None):
+                self.Name = name; self._v = value
+                self._members = members; self._c = connected or []
+            @property
+            def Value(self):
+                if self._v is None: raise AttributeError("no value")
+                return self._v
+            @property
+            def Size(self):
+                if self._members is None: raise AttributeError("not a collection")
+                return len(self._members)
+            def Get(self, i): return self._members[i]
+            @property
+            def NumberOfConnectedProperties(self): return len(self._c)
+            def GetConnectedProperty(self, j): return self._c[j]
+        bitmap = P(name="unifiedbitmap_Bitmap", value="1\\Mats\\brick.png")
+        ubasset = P(members=[bitmap])
+        diffuse = P(name="generic_diffuse", connected=[ubasset])
+        root = P(members=[diffuse])
+        self.assertEqual(revit_geometry._find_bitmap_path(root), "1\\Mats\\brick.png")
+
+    def test_find_bitmap_path_none_when_no_bitmap(self):
+        class P(object):
+            def __init__(self, name="", members=None):
+                self.Name = name; self._members = members
+            @property
+            def Size(self):
+                if self._members is None: raise AttributeError
+                return len(self._members)
+            def Get(self, i): return self._members[i]
+            @property
+            def NumberOfConnectedProperties(self): return 0
+        root = P(members=[P(name="generic_diffuse"), P(name="common_Tint")])
+        self.assertIsNone(revit_geometry._find_bitmap_path(root))
+
+    def _slot_with_bitmap(self, slot_name, path):
+        class P(object):
+            def __init__(self, name="", value=None, members=None, connected=None):
+                self.Name = name; self._v = value
+                self._members = members; self._c = connected or []
+            @property
+            def Value(self):
+                if self._v is None: raise AttributeError("no value")
+                return self._v
+            @property
+            def Size(self):
+                if self._members is None: raise AttributeError("not a collection")
+                return len(self._members)
+            def Get(self, i): return self._members[i]
+            @property
+            def NumberOfConnectedProperties(self): return len(self._c)
+            def GetConnectedProperty(self, j): return self._c[j]
+        bm = P(name="unifiedbitmap_Bitmap", value=path)
+        return P(name=slot_name, connected=[P(members=[bm])]), P
+
+    def test_find_bitmap_path_prefers_diffuse_over_bump(self):
+        # bump slot listed FIRST, diffuse second -> must still pick the diffuse colour map
+        bump, P = self._slot_with_bitmap("generic_bump_map", "bump.png")
+        diffuse, _ = self._slot_with_bitmap("generic_diffuse", "cream.jpg")
+        root = P(members=[bump, diffuse])
+        self.assertEqual(revit_geometry._find_bitmap_path(root), "cream.jpg")
+
+    def test_find_bitmap_path_skips_lone_bump_map(self):
+        # only a bump map -> return None rather than paint a bump map on as base colour
+        bump, P = self._slot_with_bitmap("generic_bump_map", "bump.png")
+        root = P(members=[bump])
+        self.assertIsNone(revit_geometry._find_bitmap_path(root))
+
+    def test_find_bitmap_path_skips_cmu_pattern_map(self):
+        # CMU: solid base colour + a relief/pattern map -> don't use the pattern as colour
+        pat, P = self._slot_with_bitmap("masonrycmu_pattern_map", "blockgrid.png")
+        root = P(members=[pat])
+        self.assertIsNone(revit_geometry._find_bitmap_path(root))
 
 
 class GlbEdgeCaseTests(unittest.TestCase):
@@ -182,6 +383,24 @@ class GlbEdgeCaseTests(unittest.TestCase):
         gltf_obj, bin_bytes = _parse_glb(data)
         self.assertEqual(gltf_obj["nodes"], [])
         self.assertEqual(gltf_obj["buffers"][0]["byteLength"], 0)
+
+    def test_large_mesh_indices_stay_uint(self):
+        # a mesh with > 65536 vertices can't use 16-bit indices -> UNSIGNED_INT
+        big = Mesh(positions=[0.0] * (3 * 65537), indices=[0, 65536, 1])
+        data = gltf.build_glb([big])
+        gltf_obj, _ = _parse_glb(data)
+        prim = gltf_obj["meshes"][0]["primitives"][0]
+        acc = gltf_obj["accessors"][prim["indices"]]
+        self.assertEqual(acc["componentType"], 5125)  # UNSIGNED_INT
+
+    def test_index_narrowing_roundtrips_values(self):
+        # narrowed (ushort) indices must still decode to the exact input values
+        m = Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
+                 indices=[0, 1, 2, 0, 2, 3])
+        gltf_obj, bin_bytes = _parse_glb(gltf.build_glb([m]))
+        prim = gltf_obj["meshes"][0]["primitives"][0]
+        self.assertEqual(_read_accessor_uints(gltf_obj, bin_bytes, prim["indices"]),
+                         [0, 1, 2, 0, 2, 3])
 
     def test_write_glb_file(self):
         m = Mesh(positions=[0, 0, 0, 1, 0, 0, 0, 1, 0])

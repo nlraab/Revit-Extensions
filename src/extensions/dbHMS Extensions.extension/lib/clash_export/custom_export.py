@@ -45,6 +45,22 @@ except Exception:
     _HAVE_REVIT = False
 
 
+def _is_non_model(el):
+    """True for elements we never want as 3D geometry -- anything whose category
+    is not a Model category (levels, grids, reference planes, scope boxes,
+    cameras, and all annotation: text, dimensions, tags). Keeps the everything-on
+    export to physical building geometry only. Null-category elements are kept
+    (CustomExporter wouldn't be emitting geometry for them otherwise)."""
+    try:
+        from Autodesk.Revit.DB import CategoryType
+        cat = el.Category
+        if cat is None:
+            return False
+        return cat.CategoryType != CategoryType.Model
+    except Exception:
+        return False
+
+
 def _log(msg):
     """Best-effort log to the viewer log (shared with the tool); never raises."""
     try:
@@ -74,14 +90,19 @@ class GltfExportContext(_CONTEXT_BASE):
         self.doc = doc
         self.writer = writer
         self.ox, self.oy, self.oz = offset
-        self.lod = lod                      # 0.0..1.0 -> Revit 0..15
+        self.lod = lod                      # Revit ViewNode.LevelOfDetail, int 0..15
         self._xf = []                       # Transform stack (instances + links)
         self._docs = []                     # document stack (host -> link docs)
         self._meta = None
         self._color = (0.70, 0.72, 0.74)
         self._alpha = 1.0
+        self._roughness = 0.85              # glTF PBR roughnessFactor (1 = matte)
+        self._metallic = 0.0
+        self._texture = None                # base-color texture data: URI (or None)
+        self._tex_cache = {}                # material id -> texture data: URI, resolved once
         self._pos = []
         self._nrm = []
+        self._uv = []
         self._idx = []
         # stats / diagnostics
         self.elements = 0
@@ -112,8 +133,10 @@ class GltfExportContext(_CONTEXT_BASE):
     def OnViewBegin(self, node):
         from Autodesk.Revit.DB import RenderNodeAction
         # The faceting fix: ask Revit for fine tessellation of curved faces.
+        # LevelOfDetail is an INTEGER 0..15 (8 = normal); passing a 0..1 float
+        # silently failed, leaving pipes coarse. Higher = rounder.
         try:
-            node.LevelOfDetail = self.lod
+            node.LevelOfDetail = int(self.lod)
         except Exception:
             pass
         return RenderNodeAction.Proceed
@@ -126,9 +149,13 @@ class GltfExportContext(_CONTEXT_BASE):
         from Autodesk.Revit.DB import RenderNodeAction
         self._pos = []
         self._nrm = []
+        self._uv = []
         self._idx = []
         self._color = (0.70, 0.72, 0.74)
         self._alpha = 1.0
+        self._roughness = 0.85
+        self._metallic = 0.0
+        self._texture = None
         # Always carry at least the element id so the viewer can select it, even
         # if the richer metadata lookup below fails.
         self._meta = {"element_id": eid_int(element_id)}
@@ -136,12 +163,20 @@ class GltfExportContext(_CONTEXT_BASE):
             import clash_export.revit_geometry as rg
             el = self._curdoc().GetElement(element_id)   # right doc for links
             if el is not None:
+                # Physical models only: skip annotation + datum categories (levels,
+                # grids, reference planes, scope boxes, text, dims, tags) that can
+                # show in a 3D view -- Nathan wants just the real building geometry.
+                if _is_non_model(el):
+                    return RenderNodeAction.Skip
                 md = rg._metadata_for_element(el)         # uses el.Document internally
                 if md:
                     self._meta = md
-                rgb, alpha, _rough, _metal = rg._material_for_element(el)
+                rgb, alpha, rough, metal, tex = rg._material_for_element(el, self._tex_cache)
                 self._color = rgb
                 self._alpha = alpha
+                self._roughness = rough
+                self._metallic = metal
+                self._texture = tex
         except Exception:
             pass
         return RenderNodeAction.Proceed
@@ -150,14 +185,25 @@ class GltfExportContext(_CONTEXT_BASE):
         try:
             if self._pos and self._idx:
                 normals = self._nrm if len(self._nrm) == len(self._pos) else None
+                nvert = len(self._pos) // 3
+                # only ship UVs when there's a texture to map (and the count lines up)
+                uvs = self._uv if (self._texture and len(self._uv) == nvert * 2) else None
                 self.writer.add(Mesh(
                     positions=self._pos, indices=self._idx, normals=normals,
-                    color=self._color, alpha=self._alpha, metadata=self._meta))
+                    color=self._color, alpha=self._alpha,
+                    roughness=self._roughness, metallic=self._metallic,
+                    uvs=uvs, texture=(self._texture if uvs else None),
+                    metadata=self._meta))
                 self.elements += 1
+                # progress heartbeat so the log shows alive-vs-hung on big models
+                if self.elements % 2000 == 0:
+                    _log("export progress: {0} elements, {1:,} tris".format(
+                        self.elements, self.triangles))
         except Exception:
             pass
         self._pos = []
         self._nrm = []
+        self._uv = []
         self._idx = []
 
     # ---- instances + links: push/pop the placement transform -------------
@@ -202,16 +248,32 @@ class GltfExportContext(_CONTEXT_BASE):
 
     # ---- material: capture colour + transparency -------------------------
     def OnMaterial(self, node):
-        try:
-            c = node.Color
-            if c is not None:
-                self._color = (c.Red / 255.0, c.Green / 255.0, c.Blue / 255.0)
-        except Exception:
-            pass
+        # Skip the colour override when this element has a base-colour texture: the texture
+        # IS the colour and _material_for_element set the factor to white; the live node's
+        # shading colour is the tint, which would re-darken the texture (see CMU fix).
+        if not self._texture:
+            try:
+                c = node.Color
+                if c is not None:
+                    self._color = (c.Red / 255.0, c.Green / 255.0, c.Blue / 255.0)
+            except Exception:
+                pass
         try:
             t = node.Transparency       # 0..1
             if t and t > 0:
                 self._alpha = max(0.05, 1.0 - float(t))
+        except Exception:
+            pass
+        # Live finish: the render node's glossiness is more authoritative than the
+        # Material element's Smoothness for how the surface actually shades. Some
+        # Revit builds report 0..1, others 0..100 -- normalise either way.
+        try:
+            g = node.Glossiness
+            if g is not None:
+                g = float(g)
+                if g > 1.0:
+                    g = g / 100.0
+                self._roughness = min(1.0, max(0.04, 1.0 - g))
         except Exception:
             pass
 
@@ -232,6 +294,19 @@ class GltfExportContext(_CONTEXT_BASE):
             self._pos.append((q.X - ox) * FT_TO_M)
             self._pos.append((q.Z - oz) * FT_TO_M)
             self._pos.append(-(q.Y - oy) * FT_TO_M)
+        # texture coordinates per vertex (Revit supplies them when the surface is
+        # textured); pad (0,0) when absent so _uv stays parallel to the vertex count
+        # across an element's multiple polymeshes. glTF V is top-down vs Revit's V.
+        try:
+            uvs = node.GetUVs()
+        except Exception:
+            uvs = None
+        if uvs is not None and len(uvs) == len(pts):
+            for uv in uvs:
+                self._uv.append(uv.U); self._uv.append(1.0 - uv.V)
+        else:
+            for _ in pts:
+                self._uv.append(0.0); self._uv.append(0.0)
         # per-vertex normals when Revit gives them at each point (smooth shading)
         try:
             from Autodesk.Revit.DB import DistributionOfNormals
@@ -308,46 +383,70 @@ def _view_offset(doc, view):
     return ((mnx + mxx) / 2.0, (mny + mxy) / 2.0, (mnz + mxz) / 2.0)
 
 
-def export_view(doc, out_path, view, lod=0.9, asset_extras=None):
-    """Export `view` (a 3D view) to a .glb via CustomExporter. Returns a stats
-    dict. Raises on hard failure so the caller can fall back to the old path.
-
-    Exports a Fine-detail DUPLICATE of the view (not the user's own view): at
-    coarser detail Revit draws thin elements like pipes as centerlines with no
-    solid, so they wouldn't export at all; Fine also tessellates curves smoothly.
-    The duplicate inherits the view's visibility, so what shows still matches
-    what the user set up."""
-    if not _HAVE_REVIT:
-        raise RuntimeError("CustomExporter unavailable (no Revit API)")
-    from Autodesk.Revit.DB import (CustomExporter, View3D, ViewDetailLevel,
-                                   Transaction, ViewDuplicateOption)
-    if not isinstance(view, View3D) or view.IsTemplate:
-        raise RuntimeError("CustomExporter needs a non-template 3D view")
-
-    temp_view = None
-    src = view
-    t = None
-    try:
-        t = Transaction(doc, "dbHMS: export view")
-        t.Start()
-        dup_id = view.Duplicate(ViewDuplicateOption.Duplicate)
-        tv = doc.GetElement(dup_id)
+def _make_export_view(doc):
+    """Create a fresh, throwaway isometric 3D view with EVERYTHING on (all model
+    categories, all worksets, links) at Fine detail, for a complete export that
+    doesn't depend on the user's active view (works even from a sheet/2D view).
+    Visibility is then controlled entirely inside the web viewer. Returns the
+    view, or None if creation failed."""
+    from Autodesk.Revit.DB import (View3D, ViewFamilyType, ViewFamily,
+                                   FilteredElementCollector, ViewDetailLevel,
+                                   Transaction, WorksetKind, WorksetVisibility,
+                                   FilteredWorksetCollector)
+    vft = None
+    for v in FilteredElementCollector(doc).OfClass(ViewFamilyType):
         try:
-            tv.DetailLevel = ViewDetailLevel.Fine
+            if v.ViewFamily == ViewFamily.ThreeDimensional:
+                vft = v
+                break
+        except Exception:
+            continue
+    if vft is None:
+        return None
+    t = Transaction(doc, "dbHMS: export view")
+    t.Start()
+    try:
+        v3 = View3D.CreateIsometric(doc, vft.Id)
+        try:
+            v3.DetailLevel = ViewDetailLevel.Fine
+        except Exception:
+            pass
+        # Force every user workset visible (a new view inherits defaults that may
+        # hide some), so the export is genuinely complete.
+        try:
+            if doc.IsWorkshared:
+                for ws in FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset):
+                    try:
+                        v3.SetWorksetVisibility(ws.Id, WorksetVisibility.Visible)
+                    except Exception:
+                        pass
         except Exception:
             pass
         t.Commit()
-        temp_view = tv
-        src = tv
-        _log("export: using Fine-detail duplicate view")
+        _log("export: created dedicated all-on Fine 3D view")
+        return v3
     except Exception:
         try:
-            if t is not None:
-                t.RollBack()
+            t.RollBack()
         except Exception:
             pass
-        src = view
-        _log("export: duplicate view failed, using active view ({0})".format(_exc_last()))
+        _log("export: dedicated view creation failed ({0})".format(_exc_last()))
+        return None
+
+
+def export_view(doc, out_path, lod=8, asset_extras=None):
+    """Export the WHOLE model (everything on) to a .glb via CustomExporter, using
+    a dedicated throwaway 3D view so it works from any context and captures all
+    geometry (visibility is controlled in the viewer). Returns a stats dict;
+    raises on hard failure so the caller can fall back to the old path."""
+    if not _HAVE_REVIT:
+        raise RuntimeError("CustomExporter unavailable (no Revit API)")
+    from Autodesk.Revit.DB import CustomExporter
+
+    temp_view = _make_export_view(doc)
+    if temp_view is None:
+        raise RuntimeError("could not create an export 3D view")
+    src = temp_view
 
     offset = _view_offset(doc, src)
     extras = dict(asset_extras or {})
@@ -359,6 +458,11 @@ def export_view(doc, out_path, view, lod=0.9, asset_extras=None):
 
     writer = GlbWriter(out_path, asset_extras=extras)
     ctx = GltfExportContext(doc, writer, offset, lod)
+    try:
+        import clash_export.revit_geometry as _rg
+        _rg.TEXTURE_DEBUG[:] = []        # fresh per-material texture diagnostics this export
+    except Exception:
+        _rg = None
     t0 = time.time()
     try:
         exporter = CustomExporter(doc, ctx)
@@ -380,13 +484,28 @@ def export_view(doc, out_path, view, lod=0.9, asset_extras=None):
         raise
     secs = time.time() - t0
     _delete_view(doc, temp_view)
+    # textures: how many distinct materials resolved a base-color image (vs flat)
+    mats_seen = len(ctx._tex_cache)
+    mats_textured = len([v for v in ctx._tex_cache.values() if v])
     stats = {
         "elements": ctx.elements, "triangles": ctx.triangles,
         "polymeshes": ctx.polymeshes, "bytes": size, "seconds": secs,
         "normals_dist": ctx.normals_dist,
+        "materials": mats_seen, "textured_materials": mats_textured,
     }
-    _log("export done: {0} elements, {1:,} tris, {2:,} bytes, {3:.0f}s, normals={4}".format(
-        ctx.elements, ctx.triangles, size, secs, ctx.normals_dist))
+    _log("export done: {0} elements, {1:,} tris, {2:,} bytes, {3:.0f}s, normals={4}, "
+         "textures={5}/{6} materials".format(
+             ctx.elements, ctx.triangles, size, secs, ctx.normals_dist,
+             mats_textured, mats_seen))
+    # per-material texture diagnostics (one TEX line each) so a misbehaving material can
+    # be diagnosed from the log without guessing at Revit's appearance-asset slot names
+    try:
+        if _rg is not None and _rg.TEXTURE_DEBUG:
+            _log("--- texture diagnostics ({0} materials) ---".format(len(_rg.TEXTURE_DEBUG)))
+            for line in _rg.TEXTURE_DEBUG:
+                _log(line)
+    except Exception:
+        pass
     return stats
 
 

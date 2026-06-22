@@ -22,9 +22,22 @@ GENERATOR = "dbHMS 3D Viewer"
 # glTF / WebGL constants
 _FLOAT = 5126
 _UNSIGNED_INT = 5125
+_UNSIGNED_SHORT = 5123
 _ARRAY_BUFFER = 34962
 _ELEMENT_ARRAY_BUFFER = 34963
 _TRIANGLES = 4
+
+# A mesh whose vertices fit in 16 bits can use UNSIGNED_SHORT indices (2 bytes)
+# instead of UNSIGNED_INT (4 bytes) -- halves the index buffer (the bulk of a
+# big model's bytes) on disk and on the GPU. Per-element meshes are almost all
+# under this, so the win is large and it costs nothing (no per-vertex math, just
+# a smaller pack). Indices are element-local (0..vertex_count-1), so the cap is
+# purely vertex_count.
+_USHORT_MAX_VERTS = 65536
+
+# One shared texture sampler: bilinear + mipmaps, repeat wrap (tiling textures like
+# brick/concrete repeat across a surface). glTF/WebGL filter + wrap enum values.
+_DEFAULT_SAMPLER = {"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}
 
 # .glb container constants
 _GLB_MAGIC = 0x46546C67   # "glTF"
@@ -64,32 +77,68 @@ def _pack_uints(values):
     return out
 
 
+def _pack_ushorts(values):
+    out = bytearray()
+    n = len(values)
+    i = 0
+    while i < n:
+        chunk = values[i:i + _PACK_CHUNK]
+        out.extend(struct.pack('<%dH' % len(chunk), *chunk))
+        i += _PACK_CHUNK
+    return out
+
+
+def _pack_indices(indices, vertex_count):
+    """Pack mesh indices, narrowing to UNSIGNED_SHORT when the vertices fit in
+    16 bits. Returns (packed_bytes, component_type)."""
+    if vertex_count <= _USHORT_MAX_VERTS:
+        return _pack_ushorts(indices), _UNSIGNED_SHORT
+    return _pack_uints(indices), _UNSIGNED_INT
+
+
 def _mesh_material_attrs(mesh):
-    """(color, alpha, roughness, metallic) for a mesh, defaulting for older
-    Mesh objects that predate the PBR fields."""
+    """(color, alpha, roughness, metallic, texture) for a mesh, defaulting for
+    older Mesh objects that predate the PBR / texture fields."""
     return (mesh.color,
             getattr(mesh, "alpha", 1.0),
             getattr(mesh, "roughness", 0.85),
-            getattr(mesh, "metallic", 0.0))
+            getattr(mesh, "metallic", 0.0),
+            getattr(mesh, "texture", None))
 
 
-def _material_key(color, alpha, roughness, metallic):
+def _material_key(color, alpha, roughness, metallic, texture=None):
     r, g, b = color
     return (round(r, 4), round(g, 4), round(b, 4),
-            round(alpha, 4), round(roughness, 4), round(metallic, 4))
+            round(alpha, 4), round(roughness, 4), round(metallic, 4),
+            texture)
 
 
-def _material_json(color, alpha, roughness, metallic):
-    """A glTF 2.0 metallic-roughness material. Marks BLEND when see-through."""
+def _ensure_texture(uri, images, textures, tex_cache):
+    """Return the glTF texture index for `uri`, adding the image/texture (and
+    sharing one sampler, index 0) the first time each distinct uri is seen."""
+    idx = tex_cache.get(uri)
+    if idx is not None:
+        return idx
+    img_index = len(images)
+    images.append({"uri": uri})
+    idx = len(textures)
+    textures.append({"source": img_index, "sampler": 0})
+    tex_cache[uri] = idx
+    return idx
+
+
+def _material_json(color, alpha, roughness, metallic, tex_index=None):
+    """A glTF 2.0 metallic-roughness material. Marks BLEND when see-through and
+    attaches a base-color texture (TEXCOORD_0) when one is given."""
     r, g, b = color
-    mat = {
-        "pbrMetallicRoughness": {
-            "baseColorFactor": [r, g, b, alpha],
-            "metallicFactor": metallic,
-            "roughnessFactor": roughness,
-        },
-        "doubleSided": True,
+    pbr = {
+        "baseColorFactor": [r, g, b, alpha],
+        "metallicFactor": metallic,
+        "roughnessFactor": roughness,
     }
+    if tex_index is not None:
+        pbr["baseColorTexture"] = {"index": tex_index}
+    mat = {"pbrMetallicRoughness": pbr, "doubleSided": True}
     if alpha < 0.999:
         mat["alphaMode"] = "BLEND"
     return mat
@@ -106,6 +155,9 @@ def build_glb(meshes, asset_extras=None):
     buffer_views = []
     materials = []
     mat_cache = {}
+    images = []
+    textures = []
+    tex_cache = {}
     gltf_meshes = []
     nodes = []
     scene_nodes = []
@@ -162,10 +214,30 @@ def build_glb(meshes, asset_extras=None):
             })
             primitive["attributes"]["NORMAL"] = nrm_accessor
 
+        # --- texture coordinates (optional, for base-color textures) ---
+        uv = getattr(mesh, "uvs", None)
+        if uv:
+            uv_offset = len(bin_buf)
+            bin_buf.extend(_pack_floats(uv))
+            uv_len = len(bin_buf) - uv_offset
+            bin_buf.extend(b'\x00' * _pad4(len(bin_buf)))
+            uv_view = len(buffer_views)
+            buffer_views.append({
+                "buffer": 0, "byteOffset": uv_offset, "byteLength": uv_len,
+                "target": _ARRAY_BUFFER,
+            })
+            uv_accessor = len(accessors)
+            accessors.append({
+                "bufferView": uv_view, "componentType": _FLOAT,
+                "count": len(uv) // 2, "type": "VEC2",
+            })
+            primitive["attributes"]["TEXCOORD_0"] = uv_accessor
+
         # --- indices (optional) ---
         if mesh.indices:
             idx_offset = len(bin_buf)
-            bin_buf.extend(_pack_uints(mesh.indices))
+            idx_bytes, idx_ctype = _pack_indices(mesh.indices, mesh.vertex_count)
+            bin_buf.extend(idx_bytes)
             idx_len = len(bin_buf) - idx_offset
             bin_buf.extend(b'\x00' * _pad4(len(bin_buf)))
 
@@ -179,19 +251,20 @@ def build_glb(meshes, asset_extras=None):
             idx_accessor = len(accessors)
             accessors.append({
                 "bufferView": idx_view,
-                "componentType": _UNSIGNED_INT,
+                "componentType": idx_ctype,
                 "count": len(mesh.indices),
                 "type": "SCALAR",
             })
             primitive["indices"] = idx_accessor
 
         # --- material (deduped: many elements share the same material) ---
-        color, alpha, rough, metal = _mesh_material_attrs(mesh)
-        key = _material_key(color, alpha, rough, metal)
+        color, alpha, rough, metal, texture = _mesh_material_attrs(mesh)
+        tex_index = _ensure_texture(texture, images, textures, tex_cache) if texture else None
+        key = _material_key(color, alpha, rough, metal, texture)
         mat_index = mat_cache.get(key)
         if mat_index is None:
             mat_index = len(materials)
-            materials.append(_material_json(color, alpha, rough, metal))
+            materials.append(_material_json(color, alpha, rough, metal, tex_index))
             mat_cache[key] = mat_index
         primitive["material"] = mat_index
 
@@ -219,6 +292,10 @@ def build_glb(meshes, asset_extras=None):
         "bufferViews": buffer_views,
         "buffers": [{"byteLength": len(bin_buf)}],
     }
+    if textures:
+        gltf["images"] = images
+        gltf["textures"] = textures
+        gltf["samplers"] = [_DEFAULT_SAMPLER]
 
     # glTF JSON chunk must be UTF-8. ensure_ascii=False avoids an IronPython
     # quirk with non-ASCII escaping and gives us real UTF-8 once encoded.
@@ -278,6 +355,9 @@ class GlbWriter(object):
         self._buffer_views = []
         self._materials = []
         self._mat_cache = {}
+        self._images = []
+        self._textures = []
+        self._tex_cache = {}
         self._meshes = []
         self._nodes = []
         self._scene_nodes = []
@@ -333,9 +413,28 @@ class GlbWriter(object):
             })
             primitive["attributes"]["NORMAL"] = nrm_accessor
 
+        uv = getattr(mesh, "uvs", None)
+        if uv:
+            uv_offset = self._bin_len
+            self._write_bin(_pack_floats(uv))
+            uv_len = self._bin_len - uv_offset
+            self._pad_bin()
+            uv_view = len(self._buffer_views)
+            self._buffer_views.append({
+                "buffer": 0, "byteOffset": uv_offset, "byteLength": uv_len,
+                "target": _ARRAY_BUFFER,
+            })
+            uv_accessor = len(self._accessors)
+            self._accessors.append({
+                "bufferView": uv_view, "componentType": _FLOAT,
+                "count": len(uv) // 2, "type": "VEC2",
+            })
+            primitive["attributes"]["TEXCOORD_0"] = uv_accessor
+
         if mesh.indices:
             idx_offset = self._bin_len
-            self._write_bin(_pack_uints(mesh.indices))
+            idx_bytes, idx_ctype = _pack_indices(mesh.indices, mesh.vertex_count)
+            self._write_bin(idx_bytes)
             idx_len = self._bin_len - idx_offset
             self._pad_bin()
             idx_view = len(self._buffer_views)
@@ -345,17 +444,18 @@ class GlbWriter(object):
             })
             idx_accessor = len(self._accessors)
             self._accessors.append({
-                "bufferView": idx_view, "componentType": _UNSIGNED_INT,
+                "bufferView": idx_view, "componentType": idx_ctype,
                 "count": len(mesh.indices), "type": "SCALAR",
             })
             primitive["indices"] = idx_accessor
 
-        color, alpha, rough, metal = _mesh_material_attrs(mesh)
-        key = _material_key(color, alpha, rough, metal)
+        color, alpha, rough, metal, texture = _mesh_material_attrs(mesh)
+        tex_index = _ensure_texture(texture, self._images, self._textures, self._tex_cache) if texture else None
+        key = _material_key(color, alpha, rough, metal, texture)
         mat_index = self._mat_cache.get(key)
         if mat_index is None:
             mat_index = len(self._materials)
-            self._materials.append(_material_json(color, alpha, rough, metal))
+            self._materials.append(_material_json(color, alpha, rough, metal, tex_index))
             self._mat_cache[key] = mat_index
         primitive["material"] = mat_index
 
@@ -387,6 +487,10 @@ class GlbWriter(object):
             "bufferViews": self._buffer_views,
             "buffers": [{"byteLength": self._bin_len}],
         }
+        if self._textures:
+            gltf["images"] = self._images
+            gltf["textures"] = self._textures
+            gltf["samplers"] = [_DEFAULT_SAMPLER]
         json_text = json.dumps(gltf, ensure_ascii=False,
                                separators=(',', ':'), sort_keys=True)
         json_bytes = bytearray(json_text.encode('utf-8'))

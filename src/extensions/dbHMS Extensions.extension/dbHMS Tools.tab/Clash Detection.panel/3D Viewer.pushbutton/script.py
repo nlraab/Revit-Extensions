@@ -149,7 +149,10 @@ def _load_webview2_type():
 
 class ViewerForm(forms.WPFWindow):
     def __init__(self):
-        forms.WPFWindow.__init__(self, FORM_XAML)
+        # handle_esc=False: pyRevit's WPFWindow otherwise wires PreviewKeyDown ->
+        # self.Close() on Escape, which was closing the whole tool. We want Escape
+        # to only deselect (handled inside the viewer page), never close.
+        forms.WPFWindow.__init__(self, FORM_XAML, handle_esc=False)
         self._webview = None
         self._vhost_ok = False     # True once the virtual host is mapped
         self._model_version = 0     # cache-buster for re-exports
@@ -163,6 +166,11 @@ class ViewerForm(forms.WPFWindow):
         self.btn_fullscreen.Click += self._on_fullscreen
         self.sl_speed.ValueChanged += self._on_speed_changed
         self.sl_look.ValueChanged  += self._on_look_changed
+        self.sl_time_of_day.ValueChanged  += self._on_sun_changed
+        self.sl_sun_strength.ValueChanged += self._on_sun_changed
+        self.sl_sun_direction.ValueChanged += self._on_sun_changed
+        self.chk_edges.Checked   += self._on_edges_changed
+        self.chk_edges.Unchecked += self._on_edges_changed
         self.chk_clash_markers.Checked   += self._on_clash_filter_changed
         self.chk_clash_markers.Unchecked += self._on_clash_filter_changed
         self.txt_clash_search.TextChanged += self._on_clash_filter_changed
@@ -406,27 +414,25 @@ class ViewerForm(forms.WPFWindow):
         t0 = time.time()
         try:
             path = self._export_path(doc)
-            # Prefer the high-fidelity CustomExporter (smooth curves, view-faithful
-            # geometry, per-vertex normals); fall back to the geometry-API exporter
-            # on ANY failure so an export always succeeds.
-            view3d = self._active_3d_view(doc, view)
-            if view3d is not None:
-                try:
-                    from clash_export import custom_export
-                    ce = custom_export.export_view(doc, path, view3d)
-                    if ce.get("elements", 0) > 0 and ce.get("bytes", 0) > 0:
-                        result = {"path": path, "asset_extras": None, "stats": {
-                            "elements": ce["elements"], "host_elements": ce["elements"],
-                            "link_elements": 0, "triangles": ce["triangles"],
-                            "models": 1, "bytes": ce["bytes"], "capped": False}}
-                        _log("export: used CustomExporter ({0} elements)".format(ce["elements"]))
-                    else:
-                        _log("export: CustomExporter produced no geometry, falling back")
-                        result = None
-                except Exception:
-                    _log("export: CustomExporter failed, falling back to geometry API\n{0}"
-                         .format(traceback.format_exc()))
+            # Prefer the high-fidelity CustomExporter (smooth curves, full model
+            # via its own all-on view, per-vertex normals); fall back to the
+            # geometry-API exporter on ANY failure so an export always succeeds.
+            try:
+                from clash_export import custom_export
+                ce = custom_export.export_view(doc, path)
+                if ce.get("elements", 0) > 0 and ce.get("bytes", 0) > 0:
+                    result = {"path": path, "asset_extras": None, "stats": {
+                        "elements": ce["elements"], "host_elements": ce["elements"],
+                        "link_elements": 0, "triangles": ce["triangles"],
+                        "models": 1, "bytes": ce["bytes"], "capped": False}}
+                    _log("export: used CustomExporter ({0} elements)".format(ce["elements"]))
+                else:
+                    _log("export: CustomExporter produced no geometry, falling back")
                     result = None
+            except Exception:
+                _log("export: CustomExporter failed, falling back to geometry API\n{0}"
+                     .format(traceback.format_exc()))
+                result = None
             if result is None:
                 result = revit_geometry.export_model(doc, path, view=view)
                 _log("export: used geometry-API exporter")
@@ -577,6 +583,35 @@ class ViewerForm(forms.WPFWindow):
         self.txt_look_val.Text = "{0:.2f}".format(self.sl_look.Value)
         self._post("look:{0:.3f}".format(self.sl_look.Value))
 
+    def _push_sun(self):
+        """Push the environment sun (from Time of day / direction / strength sliders)
+        to the render as 'sun:<elevation>,<azimuth>,<strength0..1>'. Time of day drives
+        a real arc: the sun rises on one side (~6am), peaks high at noon, and sets on
+        the OTHER side (~6pm), going below the horizon at night. 'Sun direction' sets the
+        noon bearing (which way the building faces), and time sweeps +/-90 deg around it."""
+        try:
+            import math
+            t = self.sl_time_of_day.Value
+            frac = (t - 6.0) / 12.0                      # 0 at 6am, 1 at 6pm; <0 / >1 = night
+            el = math.sin(frac * math.pi) * 78.0         # negative at night (sun below horizon)
+            az = self.sl_sun_direction.Value + (frac - 0.5) * 180.0   # sweep E -> S -> W
+            strength = self.sl_sun_strength.Value / 100.0
+            self._post("sun:{0:.1f},{1:.1f},{2:.3f}".format(el, az, strength))
+        except Exception:
+            pass
+
+    def _on_sun_changed(self, sender, args):
+        self._push_sun()
+
+    def _push_edges(self):
+        try:
+            self._post("edges:" + ("1" if self.chk_edges.IsChecked else "0"))
+        except Exception:
+            pass
+
+    def _on_edges_changed(self, sender, args):
+        self._push_edges()
+
     # --- Pop-out / full screen ----------------------------------------
 
     def _on_popout(self, sender, args):
@@ -600,7 +635,6 @@ class ViewerForm(forms.WPFWindow):
             win.Background = SolidColorBrush(Color.FromRgb(0x1A, 0x20, 0x2C))
             win.Content = self._webview
             win.Closed += self._on_popout_closed
-            win.PreviewKeyDown += self._on_popout_key   # Esc backup (WPF focus)
             self._popout = win
             win.Show()
             win.Activate()
@@ -699,15 +733,6 @@ class ViewerForm(forms.WPFWindow):
         except Exception:
             _log("exit_fullscreen: EXCEPTION\n{0}".format(traceback.format_exc()))
 
-    def _on_popout_key(self, sender, args):
-        from System.Windows.Input import Key
-        try:
-            if args.Key == Key.Escape and self._fs:
-                self._exit_fullscreen()
-                args.Handled = True
-        except Exception:
-            pass
-
     def _on_web_message(self, sender, args):
         try:
             msg = args.TryGetWebMessageAsString()
@@ -715,9 +740,23 @@ class ViewerForm(forms.WPFWindow):
             msg = None
         if not msg:
             return
-        if msg == "escape":
-            if self._fs:
-                self._exit_fullscreen()
+        if msg.startswith("diag:"):
+            _log("viewer {0}".format(msg))
+            return
+        if msg == "minimize":
+            # The viewer's bottom-left "minimize" button: step out of the enlarged
+            # view. Full screen -> windowed; popped out -> docked; embedded ->
+            # minimize the tool window. (Escape no longer does this; it unselects.)
+            try:
+                if self._fs:
+                    self._exit_fullscreen()
+                elif self._popout is not None:
+                    self._dock_render()
+                else:
+                    from System.Windows import WindowState
+                    self.WindowState = WindowState.Minimized
+            except Exception:
+                _log("minimize: EXCEPTION\n{0}".format(traceback.format_exc()))
             return
         if msg.startswith("cam:"):
             try:
@@ -733,6 +772,8 @@ class ViewerForm(forms.WPFWindow):
             self._load_clashes()
             self._build_viewpoints_list()
             self._push_quality()   # re-sync the tier in case it changed pre-load
+            self._push_sun()       # apply the current time-of-day / sun settings
+            self._push_edges()     # apply the current edges toggle
             return
 
     # --- render quality -----------------------------------------------

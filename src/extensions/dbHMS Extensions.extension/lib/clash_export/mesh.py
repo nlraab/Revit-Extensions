@@ -28,11 +28,16 @@ class Mesh(object):
     metadata:  dict of per-element info (element_id, category, discipline,
         workset, level, name) carried into the glTF node's 'extras' so the
         viewer can filter and identify elements later.
+    uvs:       optional flat list of floats [u0, v0, u1, v1, ...] parallel to
+        positions (two per vertex). Written as TEXCOORD_0 so a baseColorTexture
+        maps onto the surface. None -> no texture coords (untextured material).
+    texture:   optional URI string for the material's base-color image -- a
+        relative path (e.g. 'tex/brick.jpg') or a data: URI. None -> flat color.
     """
 
     def __init__(self, positions, indices=None, color=(0.7, 0.7, 0.7),
                  metadata=None, alpha=1.0, roughness=0.85, metallic=0.0,
-                 normals=None):
+                 normals=None, uvs=None, texture=None):
         self.positions = positions or []
         self.indices = indices
         self.color = color
@@ -40,6 +45,8 @@ class Mesh(object):
         self.roughness = roughness
         self.metallic = metallic
         self.normals = normals
+        self.uvs = uvs
+        self.texture = texture
         self.metadata = metadata or {}
 
     @property
