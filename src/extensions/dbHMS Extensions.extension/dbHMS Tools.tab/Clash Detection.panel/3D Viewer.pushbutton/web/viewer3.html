@@ -87,11 +87,16 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 // and tell the user WHY instead of a silent blank-blue screen.
 let glLost = false;
 renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); glLost = true;
-  try { post('diag:CONTEXT LOST (model likely too heavy for this GPU)'); } catch(_e){}
-  try { showHint('The graphics card reset while loading this model -- it may be too large for this PC. Try a smaller export scope or Draft quality.'); } catch(_e){}
+  try { post('diag:CONTEXT LOST (GPU reset -- model too heavy / out of GPU memory)'); } catch(_e){}
+  try { showHint('Graphics reset. The model is too heavy for the GPU right now. Close and reopen '
+    + 'the 3D Viewer to recover. If it keeps happening, reboot the PC, or use a smaller export scope.'); } catch(_e){}
 }, false);
-renderer.domElement.addEventListener('webglcontextrestored', () => { glLost = false;
-  try { post('diag:context restored'); } catch(_e){} }, false);
+// A lost context destroys EVERY GPU resource (textures, buffers, shaders, render targets).
+// Resuming in place (the old glLost=false) rendered garbage -- the boxed/corner image. So we
+// stay down and tell the user to relaunch; a fresh page reinitialises the GPU cleanly. Do NOT
+// auto-resume here.
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  try { post('diag:context restored (relaunch the viewer for a clean state)'); } catch(_e){} }, false);
 
 const scene = new THREE.Scene();
 const SLATE = new THREE.Color(0x2a3340);
@@ -524,6 +529,7 @@ function onLoaded(gltf){
   bigModelTris = (tris / 1e6).toFixed(1);
   bigModel = tris > BIG_MODEL_TRIS;
   merged = (elements.length > 0) && (bigModel || window.__forceMerge === true);
+  if (bigModel) applyBigModelMemory();   // trim GPU memory so a heavy model is less likely to reset it
   let usedLean = false;
   if (merged){
     try {
@@ -578,6 +584,15 @@ function applyLean(){
   renderer.shadowMap.enabled = false;
   scene.traverse(o => { if (o.isMesh){ o.castShadow = false; if (!o.userData.__env) o.receiveShadow = false; } });
   aoEnabled = false; composerOK = false; renderChecked = true;   // never run the AO path/probe
+}
+// Trim GPU memory for a heavy model so it's less likely to reset the driver. Geometry is the
+// bulk (the real fix is compression), but a smaller shadow map is free + safe. (Pixel ratio is
+// already forced to 1.0 for big models on the merged path.)
+function applyBigModelMemory(){
+  try {
+    sun.shadow.mapSize.set(1024, 1024);                  // 2048 -> 1024 = 1/4 the shadow-map VRAM
+    if (sun.shadow.map){ sun.shadow.map.dispose(); sun.shadow.map = null; }   // recreate at new size
+  } catch(e){}
 }
 
 // Add a per-vertex _vis attribute that discards hidden fragments, so one merged mesh can
@@ -961,12 +976,19 @@ canvas.addEventListener('wheel', e => { e.preventDefault(); flying=false;
   cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step; }, { passive:false });
 document.addEventListener('pointerlockchange', () => { locked=(document.pointerLockElement===canvas); lockPending=false; if(!locked) rightLook=false; });
 document.addEventListener('pointerlockerror', () => { lockPending=false; });   // lock failed: don't freeze hover
-window.addEventListener('keydown', e => { const k=e.key.toLowerCase();
-  if (k==='escape'){ clearSelection(); e.preventDefault(); return; }   // unselect only; never closes/minimizes
-  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); lockPending=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
+// Nav-key actions, shared by the page's OWN keydown and by keys forwarded from the WPF
+// host (so F / WASD / etc. work whenever the tool window is focused, not only when the
+// render area has keyboard focus -- no click-into-the-view required).
+function navKeyDown(k){
+  if (k==='escape'){ clearSelection(); return; }   // unselect only; never closes/minimizes
+  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); lockPending=true; canvas.requestPointerLock(); } return; }
   if (k==='shift'){ keys.shift=true; return; }
-  if ('wasdqe'.indexOf(k)>=0){ keys[k]=true; flying=false; e.preventDefault(); } });
-window.addEventListener('keyup', e => { const k=e.key.toLowerCase(); keys[k==='shift'?'shift':k]=false; });
+  if ('wasdqe'.indexOf(k)>=0){ keys[k]=true; flying=false; }
+}
+function navKeyUp(k){ keys[k==='shift'?'shift':k]=false; }
+window.addEventListener('keydown', e => { const k=e.key.toLowerCase();
+  if (k==='escape'||k==='f'||k==='shift'||'wasdqe'.indexOf(k)>=0){ navKeyDown(k); e.preventDefault(); } });
+window.addEventListener('keyup', e => { navKeyUp(e.key.toLowerCase()); });
 window.addEventListener('blur', () => { keys={}; dragMode=null; clearHover(); });
 
 // ---------- panel <-> viewer messages ----------
@@ -999,6 +1021,8 @@ function handleMessage(data){
     else if (cmd==='sun'){ const p=arg.split(',').map(parseFloat);
       if (p.length>=3 && !isNaN(p[0])){ sunEl=p[0]; sunAz=p[1]; sunStrength=p[2]; applySun(); } }
     else if (cmd==='edges'){ setEdges(arg==='1'); }
+    else if (cmd==='kd'){ navKeyDown(arg); }   // nav key forwarded from the WPF host
+    else if (cmd==='ku'){ navKeyUp(arg); }
   } catch(err){ showHint('Error: '+(err&&err.message?err.message:err)); }
 }
 if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', e => handleMessage(e.data));

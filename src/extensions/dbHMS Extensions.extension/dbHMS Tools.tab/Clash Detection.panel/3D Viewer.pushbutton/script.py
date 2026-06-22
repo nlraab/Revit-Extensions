@@ -176,6 +176,11 @@ class ViewerForm(forms.WPFWindow):
         self.txt_clash_search.TextChanged += self._on_clash_filter_changed
         self.btn_saved_views.Click += self._on_save_viewpoint
         self.cmb_quality.SelectionChanged += self._on_quality_changed
+        # Forward fly/nav keys to the viewer whenever the tool window is focused, so F/WASD
+        # work without first clicking into the render area. PreviewKeyDown tunnels from the
+        # window root, so it fires no matter which panel control has focus.
+        self.PreviewKeyDown += self._on_nav_key_down
+        self.PreviewKeyUp   += self._on_nav_key_up
         self._last_cam = None    # latest camera reported by the viewer
         self._clash_rows = []    # every clash for this project (row dicts)
         self._trade_chks = []    # dynamic filter checkboxes, by dimension
@@ -559,6 +564,60 @@ class ViewerForm(forms.WPFWindow):
                 wv.CoreWebView2.PostWebMessageAsString(msg)
         except Exception:
             pass
+
+    # --- Fly/nav key forwarding (panel-focus -> render) ---------------
+    # System.Windows.Input.Key name -> the viewer's lowercase key string. Only the
+    # fly keys; everything else passes through to the WPF controls untouched.
+    _NAV_KEYS = {"F": "f", "W": "w", "A": "a", "S": "s", "D": "d", "Q": "q", "E": "e",
+                 "LeftShift": "shift", "RightShift": "shift"}
+
+    def _focus_in_textbox(self):
+        """True if a text field (e.g. the clash search box) has focus -- don't steal its keys."""
+        try:
+            from System.Windows.Input import Keyboard
+            from System.Windows.Controls import TextBox
+            return isinstance(Keyboard.FocusedElement, TextBox)
+        except Exception:
+            return False
+
+    def _nav_key(self, e):
+        try:
+            return self._NAV_KEYS.get(str(e.Key))
+        except Exception:
+            return None
+
+    def _webview_focused(self):
+        """True if the render already has keyboard focus -- then it gets keys directly and
+        we must NOT also forward them (a double F would toggle mouselook off again)."""
+        try:
+            return self._webview is not None and self._webview.IsKeyboardFocusWithin
+        except Exception:
+            return False
+
+    def _on_nav_key_down(self, sender, e):
+        if self._webview_focused() or self._focus_in_textbox():
+            return
+        wk = self._nav_key(e)
+        if wk is None:
+            return
+        # F enters mouselook (pointer lock), which the browser only grants to a focused
+        # document, so make sure the render has focus before forwarding the keypress.
+        if wk == "f" and self._webview is not None:
+            try:
+                self._webview.Focus()
+            except Exception:
+                pass
+        self._post("kd:" + wk)
+        e.Handled = True
+
+    def _on_nav_key_up(self, sender, e):
+        if self._webview_focused() or self._focus_in_textbox():
+            return
+        wk = self._nav_key(e)
+        if wk is None:
+            return
+        self._post("ku:" + wk)
+        e.Handled = True
 
     def _push_tuning(self):
         """Push the current speed/look slider values to the render."""

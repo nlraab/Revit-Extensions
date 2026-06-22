@@ -100,6 +100,49 @@ def get_discipline(sheet):
     return "Other"
 
 
+# Display label for sheets without a Sheet Collection assignment. Used both
+# as the group header and as the filter chip label, so both stay consistent.
+NO_COLLECTION_LABEL = "(No Collection)"
+
+
+def get_sheet_collection(sheet):
+    """Return the 'Sheet Collection' parameter value on a sheet, or the
+    NO_COLLECTION_LABEL fallback. Handles both string-backed (older shared
+    parameter) and ElementId-backed (Revit 2024+ built-in Sheet Collections,
+    which reference an actual SheetCollection element) variants.
+
+    Deliberately avoids ElementId.IntegerValue — that property is removed in
+    Revit 2024+ and would throw inside the outer try/except, leaving every
+    sheet labeled '(No Collection)' even when a collection is set."""
+    try:
+        p = sheet.LookupParameter("Sheet Collection")
+        if p is None:
+            return NO_COLLECTION_LABEL
+        v = ""
+        st = p.StorageType
+        if st == StorageType.String:
+            v = p.AsString() or ""
+        elif st == StorageType.ElementId:
+            # AsValueString gives the linked SheetCollection element's display
+            # name in Revit 2024+. Fall back to looking up the element by id
+            # and reading its Name if that returns nothing.
+            v = p.AsValueString() or ""
+            if not v:
+                try:
+                    eid = p.AsElementId()
+                    el = doc.GetElement(eid) if eid is not None else None
+                    if el is not None and hasattr(el, "Name"):
+                        v = el.Name or ""
+                except Exception:
+                    pass
+        else:
+            v = p.AsValueString() or ""
+        v = (v or "").strip()
+        return v if v else NO_COLLECTION_LABEL
+    except Exception:
+        return NO_COLLECTION_LABEL
+
+
 def get_current_revision(sheet):
     """Return the current revision string on a sheet."""
     try:
@@ -335,6 +378,7 @@ class SheetItem(INotifyPropertyChanged):
         self._name      = sheet.Name
         self._prefix    = get_prefix(sheet.SheetNumber)
         self._discipline = get_discipline(sheet)
+        self._collection = get_sheet_collection(sheet)
         self._revision  = get_current_revision(sheet)
         try:
             self._view_count = len(list(sheet.GetAllViewports()))
@@ -442,6 +486,12 @@ class SheetItem(INotifyPropertyChanged):
     def Prefix(self):      return self._prefix
     @property
     def Discipline(self):  return self._discipline
+    @property
+    def SheetCollection(self): return self._collection
+    # Compound key used by the "Collection + Prefix" group mode so the grid
+    # mirrors Revit's project browser layout (collection at top, prefix nested).
+    @property
+    def CollectionPrefix(self): return "{0}  -  {1}".format(self._collection, self._prefix)
     @property
     def Revision(self):    return self._revision
     @property
@@ -1080,9 +1130,11 @@ MAIN_XAML = """
         <!-- Group by -->
         <TextBlock Text="Group:" Foreground="#4A5568" FontSize="12"
                    VerticalAlignment="Center" Margin="0,0,6,0"/>
-        <ComboBox x:Name="cmb_group" Width="125" Height="30" SelectedIndex="0">
+        <ComboBox x:Name="cmb_group" Width="170" Height="30" SelectedIndex="0">
           <ComboBoxItem Content="Prefix"/>
           <ComboBoxItem Content="Discipline"/>
+          <ComboBoxItem Content="Sheet Collection"/>
+          <ComboBoxItem Content="Collection + Prefix"/>
           <ComboBoxItem Content="All Flat"/>
         </ComboBox>
         <Border Width="1" Background="#E2E8F0" Margin="14,4"/>
@@ -1108,6 +1160,15 @@ MAIN_XAML = """
           <TextBlock Text="Prefix:" FontWeight="SemiBold" Foreground="#4A5568"
                      FontSize="11" VerticalAlignment="Center"/>
           <WrapPanel x:Name="pnl_filter_prefixes" Grid.Column="1"/>
+        </Grid>
+        <Grid x:Name="pnl_filter_collections_outer" Margin="0,0,0,4" Visibility="Collapsed">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="80"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="Collection:" FontWeight="SemiBold" Foreground="#4A5568"
+                     FontSize="11" VerticalAlignment="Center"/>
+          <WrapPanel x:Name="pnl_filter_collections" Grid.Column="1"/>
         </Grid>
         <Grid Margin="0,0,0,4">
           <Grid.ColumnDefinitions>
@@ -1241,7 +1302,7 @@ MAIN_XAML = """
 RENAME_XAML = """
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Rename / Renumber Sheets" Width="720" Height="680"
+        Title="Rename / Renumber Sheets" Width="780" Height="800"
         WindowStartupLocation="CenterOwner"
         Background="#F7FAFC" Foreground="#1A202C"
         FontFamily="Segoe UI" FontSize="12"
@@ -1264,7 +1325,7 @@ RENAME_XAML = """
         <StackPanel HorizontalAlignment="Left">
           <TextBlock Text="Rename / Renumber Sheets" Foreground="White"
                      FontSize="18" FontWeight="Bold"/>
-          <TextBlock Text="Edit a single sheet, batch-renumber a sequence, or run find/replace rules across the selection."
+          <TextBlock Text="Edit a single sheet, or batch-transform numbers and names with prefix/suffix, sequence, and find/replace rules."
                      Foreground="#CBD5E0" FontSize="11" Margin="0,2,0,0"/>
         </StackPanel>
       </Grid>
@@ -1290,9 +1351,7 @@ RENAME_XAML = """
       <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,14">
         <RadioButton x:Name="rb_single"   Content="Single Rename"  IsChecked="True"
                      Margin="0,0,20,0" Cursor="Hand"/>
-        <RadioButton x:Name="rb_batch"    Content="Batch Renumber"
-                     Margin="0,0,20,0" Cursor="Hand"/>
-        <RadioButton x:Name="rb_findrep"  Content="Find / Replace" Cursor="Hand"/>
+        <RadioButton x:Name="rb_batch"    Content="Batch"          Cursor="Hand"/>
       </StackPanel>
 
       <!-- Single rename panel -->
@@ -1318,56 +1377,77 @@ RENAME_XAML = """
         </StackPanel>
       </Border>
 
-      <!-- Batch renumber panel -->
+      <!-- Batch panel — per-target Apply/Prefix/Suffix + optional sequence + rules. -->
       <Border x:Name="pnl_batch" Grid.Row="1" Style="{StaticResource CardBorder}"
               Visibility="Collapsed" Margin="0,0,0,12">
         <StackPanel>
-          <TextBlock Text="Renumbers all selected sheets in order by sheet number."
+          <TextBlock Text="Each target transforms independently:  source → find/replace → prefix + suffix.  Uncheck Apply to leave a target alone."
                      Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
-          <Grid>
+
+          <!-- Per-target Apply / Prefix / Suffix grid -->
+          <Grid Margin="0,0,0,8">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="120"/>
               <ColumnDefinition Width="100"/>
-              <ColumnDefinition Width="20"/>
-              <ColumnDefinition Width="120"/>
-              <ColumnDefinition Width="100"/>
+              <ColumnDefinition Width="60"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="10"/>
+              <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto"/>
-              <RowDefinition Height="8"/>
+              <RowDefinition Height="4"/>
               <RowDefinition Height="Auto"/>
-              <RowDefinition Height="8"/>
+              <RowDefinition Height="4"/>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <TextBlock Text="Prefix:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
-            <TextBox x:Name="txt_prefix" Grid.Column="1" Height="30"/>
-            <TextBlock Grid.Column="3" Text="Separator:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
-            <TextBox x:Name="txt_sep" Grid.Column="4" Height="30"/>
-            <TextBlock Grid.Row="2" Text="Start #:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
-            <TextBox x:Name="txt_start" Grid.Row="2" Grid.Column="1" Height="30" Text="100"/>
-            <TextBlock Grid.Row="2" Grid.Column="3" Text="Increment:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
-            <TextBox x:Name="txt_inc" Grid.Row="2" Grid.Column="4" Height="30" Text="1"/>
-            <TextBlock Grid.Row="4" Text="Suffix:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
-            <TextBox x:Name="txt_suffix" Grid.Row="4" Grid.Column="1" Height="30"/>
-            <Button x:Name="btn_preview" Grid.Row="4" Grid.Column="3" Grid.ColumnSpan="2"
-                    Content="Preview Changes" Style="{StaticResource SecondaryButton}" Height="30"/>
+            <!-- Column headers -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Target"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="Apply"
+                       Style="{StaticResource FieldLabel}" Margin="0"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Text="Prefix"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <TextBlock Grid.Row="0" Grid.Column="4" Text="Suffix"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <!-- Sheet # -->
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Sheet #"
+                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
+            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="chk_b_apply_num"
+                      IsChecked="True" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Margin="0"/>
+            <TextBox Grid.Row="2" Grid.Column="2" x:Name="txt_b_prefix_num" Height="28"/>
+            <TextBox Grid.Row="2" Grid.Column="4" x:Name="txt_b_suffix_num" Height="28"/>
+            <!-- Sheet Name -->
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Sheet Name"
+                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
+            <CheckBox Grid.Row="4" Grid.Column="1" x:Name="chk_b_apply_name"
+                      IsChecked="False" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Margin="0"/>
+            <TextBox Grid.Row="4" Grid.Column="2" x:Name="txt_b_prefix_name" Height="28"/>
+            <TextBox Grid.Row="4" Grid.Column="4" x:Name="txt_b_suffix_name" Height="28"/>
           </Grid>
-        </StackPanel>
-      </Border>
 
-      <!-- Find / Replace panel -->
-      <Border x:Name="pnl_findrep" Grid.Row="1" Style="{StaticResource CardBorder}"
-              Visibility="Collapsed" Margin="0,0,0,12">
-        <StackPanel>
-          <TextBlock Text="Apply find/replace rules to every selected sheet's number and/or name."
-                     Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-            <TextBlock Text="Apply to:" Foreground="#4A5568" FontSize="12"
-                       VerticalAlignment="Center" Margin="0,0,10,0"/>
-            <CheckBox x:Name="chk_fr_apply_num"  Content="Sheet #"    IsChecked="True" Margin="0,0,16,0"/>
-            <CheckBox x:Name="chk_fr_apply_name" Content="Sheet Name" IsChecked="True"/>
+          <!-- Sequence renumber (Sheet # only) -->
+          <StackPanel Orientation="Horizontal" Margin="0,4,0,2">
+            <CheckBox x:Name="chk_b_sequence" Content="Renumber Sheet # with sequence"
+                      VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBlock Text="Start:" Foreground="#4A5568" FontSize="11"
+                       VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <TextBox x:Name="txt_b_seq_start" Width="60" Height="26" Text="100"
+                     VerticalContentAlignment="Center"/>
+            <TextBlock Text="Increment:" Foreground="#4A5568" FontSize="11"
+                       VerticalAlignment="Center" Margin="14,0,4,0"/>
+            <TextBox x:Name="txt_b_seq_inc" Width="50" Height="26" Text="1"
+                     VerticalContentAlignment="Center"/>
           </StackPanel>
-          <ItemsControl x:Name="fr_rules_list" Margin="0,4,0,4">
+          <TextBlock Text="When sequence is on, prefix + sequence number + suffix replaces the source #; find/replace rules are skipped for numbers."
+                     Style="{StaticResource HelperText}" Margin="0,2,0,10"/>
+
+          <!-- Find / replace rules -->
+          <TextBlock Text="Find / replace rules (applied to enabled non-sequence targets):"
+                     Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
+          <ItemsControl x:Name="b_rules_list" Margin="0,0,0,4">
             <ItemsControl.ItemTemplate>
               <DataTemplate>
                 <Grid Margin="0,2">
@@ -1406,10 +1486,10 @@ RENAME_XAML = """
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <Button Grid.Column="0" x:Name="btn_fr_add_rule" Content="+ Add rule"
+            <Button Grid.Column="0" x:Name="btn_b_add_rule" Content="+ Add rule"
                     Style="{StaticResource SecondaryButton}" Height="30" MinWidth="100"
                     Margin="0"/>
-            <Button Grid.Column="2" x:Name="btn_fr_preview" Content="Preview Changes"
+            <Button Grid.Column="2" x:Name="btn_preview" Content="Preview Changes"
                     Style="{StaticResource SecondaryButton}" Height="30" MinWidth="140"/>
           </Grid>
         </StackPanel>
@@ -1431,7 +1511,7 @@ RENAME_XAML = """
 DUPLICATE_XAML = """
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Duplicate Sheets with Views" Width="960" Height="780"
+        Title="Duplicate Sheets with Views" Width="980" Height="880"
         WindowStartupLocation="CenterOwner"
         Background="#F7FAFC" Foreground="#1A202C"
         FontFamily="Segoe UI" FontSize="12"
@@ -1570,17 +1650,78 @@ DUPLICATE_XAML = """
       <Border Grid.Row="0" Style="{StaticResource CardBorder}" Margin="0,0,0,12" Padding="14">
         <StackPanel>
           <TextBlock Text="Naming rules" Style="{StaticResource SectionHeader}"/>
-          <TextBlock Text="Add find/replace pairs and apply them to the new sheet number, name, and view name. Rules transform the source sheet's values."
-                     Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+          <TextBlock Text="Each target transforms independently:  source → find/replace → prefix + suffix.  Uncheck Apply to leave a target at its default ('-DUP' / '(Copy)')."
+                     Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
 
-          <!-- Apply-to checkboxes -->
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-            <TextBlock Text="Apply to:" Foreground="#4A5568" FontSize="12"
-                       VerticalAlignment="Center" Margin="0,0,10,0"/>
-            <CheckBox x:Name="chk_apply_num"  Content="Sheet #"    IsChecked="True" Margin="0,0,16,0"/>
-            <CheckBox x:Name="chk_apply_name" Content="Sheet Name" IsChecked="True" Margin="0,0,16,0"/>
-            <CheckBox x:Name="chk_apply_view" Content="View Name"  IsChecked="True"/>
+          <!-- Per-target Apply / Prefix / Suffix grid -->
+          <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="100"/>  <!-- target label -->
+              <ColumnDefinition Width="60"/>   <!-- apply -->
+              <ColumnDefinition Width="*"/>    <!-- prefix -->
+              <ColumnDefinition Width="10"/>
+              <ColumnDefinition Width="*"/>    <!-- suffix -->
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="4"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="4"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="4"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <!-- Column headers -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Target"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="Apply"
+                       Style="{StaticResource FieldLabel}" Margin="0"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Text="Prefix"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <TextBlock Grid.Row="0" Grid.Column="4" Text="Suffix"
+                       Style="{StaticResource FieldLabel}" Margin="0"/>
+            <!-- Sheet # row -->
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Sheet #"
+                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
+            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="chk_apply_num"
+                      IsChecked="True" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Margin="0"/>
+            <TextBox Grid.Row="2" Grid.Column="2" x:Name="txt_prefix_num" Height="28"/>
+            <TextBox Grid.Row="2" Grid.Column="4" x:Name="txt_suffix_num" Height="28"/>
+            <!-- Sheet Name row -->
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Sheet Name"
+                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
+            <CheckBox Grid.Row="4" Grid.Column="1" x:Name="chk_apply_name"
+                      IsChecked="True" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Margin="0"/>
+            <TextBox Grid.Row="4" Grid.Column="2" x:Name="txt_prefix_name" Height="28"/>
+            <TextBox Grid.Row="4" Grid.Column="4" x:Name="txt_suffix_name" Height="28"/>
+            <!-- View Name row -->
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="View Name"
+                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
+            <CheckBox Grid.Row="6" Grid.Column="1" x:Name="chk_apply_view"
+                      IsChecked="True" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Margin="0"/>
+            <TextBox Grid.Row="6" Grid.Column="2" x:Name="txt_prefix_view" Height="28"/>
+            <TextBox Grid.Row="6" Grid.Column="4" x:Name="txt_suffix_view" Height="28"/>
+          </Grid>
+
+          <!-- Sequence renumber (Sheet # only) -->
+          <StackPanel Orientation="Horizontal" Margin="0,4,0,2">
+            <CheckBox x:Name="chk_sequence" Content="Renumber Sheet # with sequence"
+                      VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBlock Text="Start:" Foreground="#4A5568" FontSize="11"
+                       VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <TextBox x:Name="txt_seq_start" Width="60" Height="26" Text="100"
+                     VerticalContentAlignment="Center"/>
+            <TextBlock Text="Increment:" Foreground="#4A5568" FontSize="11"
+                       VerticalAlignment="Center" Margin="14,0,4,0"/>
+            <TextBox x:Name="txt_seq_inc" Width="50" Height="26" Text="1"
+                     VerticalContentAlignment="Center"/>
           </StackPanel>
+          <TextBlock Text="In sequence mode: prefix + sequence number + suffix replaces the source #. Find/replace rules are skipped for Sheet # but still apply to Name and View Name."
+                     Style="{StaticResource HelperText}" Margin="0,2,0,10"/>
 
           <!-- Rules list -->
           <ItemsControl x:Name="rules_list" Margin="0,4,0,4">
@@ -1943,6 +2084,18 @@ class RevisionRow(INotifyPropertyChanged):
 # ═══════════════════════════════════════════════════════════════
 
 class RenameDialog(object):
+    """Two modes:
+       - Single Rename: direct edit of one sheet's #/name (when only 1 sheet
+         is selected).
+       - Batch: per-target Apply / Prefix / Suffix for Sheet # and Sheet Name,
+         optional sequence-number renumber for Sheet #, and a Find/Replace
+         rules list. Mirrors the Duplicate dialog's pipeline so the two tools
+         behave the same way.
+       Pipeline per target:  source → find/replace → prefix + suffix
+       Sheet # in sequence mode: prefix + (start + i*inc) + suffix (rules
+       skipped for #, still applied to Name).
+    """
+
     def __init__(self, owner, selected_items):
         self._items   = selected_items
         self._applied = False
@@ -1952,27 +2105,26 @@ class RenameDialog(object):
 
         self._rb_single  = w.FindName("rb_single")
         self._rb_batch   = w.FindName("rb_batch")
-        self._rb_findrep = w.FindName("rb_findrep")
         self._pnl_single = w.FindName("pnl_single")
         self._pnl_batch  = w.FindName("pnl_batch")
-        self._pnl_findrep = w.FindName("pnl_findrep")
         self._txt_num    = w.FindName("txt_new_number")
         self._txt_name   = w.FindName("txt_new_name")
-        self._txt_prefix = w.FindName("txt_prefix")
-        self._txt_sep    = w.FindName("txt_sep")
-        self._txt_start  = w.FindName("txt_start")
-        self._txt_inc    = w.FindName("txt_inc")
-        self._txt_suffix = w.FindName("txt_suffix")
         self._lst        = w.FindName("lst_preview")
         self._btn_prev   = w.FindName("btn_preview")
         self._btn_apply  = w.FindName("btn_apply")
         self._btn_cancel = w.FindName("btn_cancel")
-        # Find/replace controls
-        self._fr_rules_list   = w.FindName("fr_rules_list")
-        self._chk_fr_apply_num  = w.FindName("chk_fr_apply_num")
-        self._chk_fr_apply_name = w.FindName("chk_fr_apply_name")
-        self._btn_fr_add_rule = w.FindName("btn_fr_add_rule")
-        self._btn_fr_preview  = w.FindName("btn_fr_preview")
+        # Batch-mode controls
+        self._chk_b_apply_num  = w.FindName("chk_b_apply_num")
+        self._chk_b_apply_name = w.FindName("chk_b_apply_name")
+        self._txt_b_prefix_num  = w.FindName("txt_b_prefix_num")
+        self._txt_b_suffix_num  = w.FindName("txt_b_suffix_num")
+        self._txt_b_prefix_name = w.FindName("txt_b_prefix_name")
+        self._txt_b_suffix_name = w.FindName("txt_b_suffix_name")
+        self._chk_b_sequence    = w.FindName("chk_b_sequence")
+        self._txt_b_seq_start   = w.FindName("txt_b_seq_start")
+        self._txt_b_seq_inc     = w.FindName("txt_b_seq_inc")
+        self._b_rules_list      = w.FindName("b_rules_list")
+        self._btn_b_add_rule    = w.FindName("btn_b_add_rule")
 
         # Pre-fill single fields
         if selected_items:
@@ -1981,7 +2133,7 @@ class RenameDialog(object):
 
         # Single Rename only makes sense for a single sheet — when the user
         # has multiple sheets selected, hide that radio entirely and switch
-        # the default to Batch Renumber.
+        # the default to Batch.
         if len(selected_items) > 1:
             self._rb_single.Visibility = Visibility.Collapsed
             self._rb_single.IsChecked  = False
@@ -1989,96 +2141,91 @@ class RenameDialog(object):
             self._pnl_single.Visibility = Visibility.Collapsed
             self._pnl_batch.Visibility  = Visibility.Visible
 
-        # Find/replace rules collection
-        self._fr_rules = ObservableCollection[FindReplaceRule]()
-        self._fr_rules.Add(FindReplaceRule())
-        self._fr_rules_list.ItemsSource = self._fr_rules
+        # Batch rules collection (starts with one empty rule for affordance).
+        self._b_rules = ObservableCollection[FindReplaceRule]()
+        self._b_rules.Add(FindReplaceRule())
+        self._b_rules_list.ItemsSource = self._b_rules
 
         # Events
         self._rb_single.Checked   += self._on_mode
         self._rb_batch.Checked    += self._on_mode
-        self._rb_findrep.Checked  += self._on_mode
         self._btn_prev.Click      += self._on_preview
-        self._btn_fr_preview.Click += self._on_fr_preview
-        self._btn_fr_add_rule.Click += self._on_fr_add_rule
+        self._btn_b_add_rule.Click += self._on_b_add_rule
         self._btn_apply.Click     += self._on_apply
         self._btn_cancel.Click    += lambda s, e: w.Close()
         # Bubble class handler for the per-row "Remove rule" buttons.
-        self._fr_rules_list.AddHandler(
+        self._b_rules_list.AddHandler(
             Button.ClickEvent,
-            RoutedEventHandler(self._on_fr_rules_button_click))
+            RoutedEventHandler(self._on_b_rules_button_click))
         w.ShowDialog()
 
     def _on_mode(self, sender, e):
-        # Hide all panels, then show the one matching the active radio.
-        self._pnl_single.Visibility  = Visibility.Collapsed
-        self._pnl_batch.Visibility   = Visibility.Collapsed
-        self._pnl_findrep.Visibility = Visibility.Collapsed
-        if self._rb_single.IsChecked:
-            self._pnl_single.Visibility  = Visibility.Visible
-        elif self._rb_batch.IsChecked:
-            self._pnl_batch.Visibility   = Visibility.Visible
-        else:
-            self._pnl_findrep.Visibility = Visibility.Visible
+        is_single = bool(self._rb_single.IsChecked)
+        self._pnl_single.Visibility = Visibility.Visible if is_single else Visibility.Collapsed
+        self._pnl_batch.Visibility  = Visibility.Collapsed if is_single else Visibility.Visible
 
-    def _on_preview(self, sender, e):
-        self._lst.Items.Clear()
-        rows = self._build_batch_rows()
-        for old, new in rows:
-            lbi = System.Windows.Controls.ListBoxItem()
-            lbi.Content = "{0}  →  {1}".format(old, new)
-            lbi.Foreground = SolidColorBrush(Color.FromRgb(0x1A, 0x20, 0x2C))
-            self._lst.Items.Add(lbi)
+    # ── Batch mode ────────────────────────────────────────────
 
-    def _build_batch_rows(self):
-        prefix = self._txt_prefix.Text or ""
-        sep    = self._txt_sep.Text or ""
-        try:    start = int(self._txt_start.Text)
-        except: start = 100
-        try:    inc   = int(self._txt_inc.Text)
-        except: inc   = 1
-        suffix = self._txt_suffix.Text or ""
-        sorted_items = sorted(self._items, key=lambda x: x.SheetNumber)
-        rows = []
-        for i, item in enumerate(sorted_items):
-            new_num = "{0}{1}{2}{3}{4}".format(
-                prefix, sep, start + i * inc, sep, suffix).strip("-_")
-            rows.append((item.SheetNumber + "  " + item.SheetName, new_num))
-        return rows
+    def _on_b_add_rule(self, sender, e):
+        self._b_rules.Add(FindReplaceRule())
 
-    # ── Find/replace mode ────────────────────────────────────
-
-    def _on_fr_add_rule(self, sender, e):
-        self._fr_rules.Add(FindReplaceRule())
-
-    def _on_fr_rules_button_click(self, sender, e):
+    def _on_b_rules_button_click(self, sender, e):
         src = e.OriginalSource
         if isinstance(src, Button) and str(src.Tag) == "RemoveRule":
             rule = src.DataContext
-            if rule is not None and rule in self._fr_rules:
-                self._fr_rules.Remove(rule)
+            if rule is not None and rule in self._b_rules:
+                self._b_rules.Remove(rule)
                 e.Handled = True
 
-    def _build_findrep_rows(self):
-        """Return list of (old_label, new_label, new_number_or_None, new_name_or_None)
-        for every selected sheet, after applying the active rules."""
-        apply_num  = bool(self._chk_fr_apply_num.IsChecked)
-        apply_name = bool(self._chk_fr_apply_name.IsChecked)
-        rules = list(self._fr_rules)
+    def _build_batch_rows(self):
+        """Return list of (old_label, new_label, new_number_or_None,
+        new_name_or_None) for every selected sheet, after applying the active
+        prefix/suffix, sequence, and rules. Either new_* is None when that
+        target's Apply checkbox is off (signaling 'leave it alone')."""
+        apply_num  = bool(self._chk_b_apply_num.IsChecked)
+        apply_name = bool(self._chk_b_apply_name.IsChecked)
+        pre_num    = self._txt_b_prefix_num.Text  or ""
+        suf_num    = self._txt_b_suffix_num.Text  or ""
+        pre_name   = self._txt_b_prefix_name.Text or ""
+        suf_name   = self._txt_b_suffix_name.Text or ""
+        use_seq    = bool(self._chk_b_sequence.IsChecked)
+        try:    seq_start = int(self._txt_b_seq_start.Text)
+        except: seq_start = 100
+        try:    seq_inc = int(self._txt_b_seq_inc.Text)
+        except: seq_inc = 1
+        rules = list(self._b_rules)
+
+        def wrap(prefix, body, suffix):
+            return "{0}{1}{2}".format(prefix or "", body, suffix or "")
+
+        # When sequence is on, sort the items by current sheet number so the
+        # generated sequence follows a predictable order. Otherwise iterate in
+        # selection order (which preserves any user-meaningful ordering).
+        items = sorted(self._items, key=lambda x: x.SheetNumber) if use_seq else list(self._items)
+
         rows = []
-        for item in self._items:
-            new_num  = apply_rules(item.SheetNumber, rules) if apply_num else None
-            new_name = apply_rules(item.SheetName,   rules) if apply_name else None
-            old_lbl = "{0}  •  {1}".format(item.SheetNumber, item.SheetName)
+        for i, item in enumerate(items):
+            if apply_num:
+                if use_seq:
+                    new_num = wrap(pre_num, seq_start + i * seq_inc, suf_num)
+                else:
+                    new_num = wrap(pre_num, apply_rules(item.SheetNumber, rules), suf_num)
+            else:
+                new_num = None
+            if apply_name:
+                new_name = wrap(pre_name, apply_rules(item.SheetName, rules), suf_name)
+            else:
+                new_name = None
+            old_lbl = "{0}  -  {1}".format(item.SheetNumber, item.SheetName)
             disp_num  = new_num  if new_num  is not None else item.SheetNumber
             disp_name = new_name if new_name is not None else item.SheetName
-            new_lbl = "{0}  •  {1}".format(disp_num, disp_name)
-            rows.append((old_lbl, new_lbl, new_num, new_name))
+            new_lbl = "{0}  -  {1}".format(disp_num, disp_name)
+            rows.append((old_lbl, new_lbl, new_num, new_name, item))
         return rows
 
-    def _on_fr_preview(self, sender, e):
+    def _on_preview(self, sender, e):
         self._lst.Items.Clear()
-        for old_lbl, new_lbl, new_num, new_name in self._build_findrep_rows():
+        for old_lbl, new_lbl, _nn, _nm, _it in self._build_batch_rows():
             lbi = System.Windows.Controls.ListBoxItem()
             unchanged = (old_lbl == new_lbl)
             lbi.Content = "{0}  →  {1}{2}".format(
@@ -2101,50 +2248,36 @@ class RenameDialog(object):
                         new_name = self._txt_name.Text.strip()
                         if new_num:  sheet.SheetNumber = new_num
                         if new_name: sheet.Name = new_name
-                elif self._rb_batch.IsChecked:
-                    # Batch renumber
-                    prefix = self._txt_prefix.Text or ""
-                    sep    = self._txt_sep.Text or ""
-                    try:    start = int(self._txt_start.Text)
-                    except: start = 100
-                    try:    inc   = int(self._txt_inc.Text)
-                    except: inc   = 1
-                    suffix = self._txt_suffix.Text or ""
-                    sorted_items = sorted(self._items, key=lambda x: x.SheetNumber)
-                    # Pass 1: temp numbers to avoid duplicates
-                    for i, item in enumerate(sorted_items):
-                        item.Sheet.SheetNumber = "__tmp_{0}__".format(i)
-                    # Pass 2: real numbers
-                    for i, item in enumerate(sorted_items):
-                        new_num = "{0}{1}{2}{3}{4}".format(
-                            prefix, sep, start + i * inc, sep, suffix).strip("-_")
-                        item.Sheet.SheetNumber = new_num
                 else:
-                    # Find / replace across selection
-                    rows = self._build_findrep_rows()
-                    # Pass 1: stage temp numbers if numbers change, to avoid
-                    # collisions with existing sheets in the same selection.
+                    # Batch: prefix/suffix + optional sequence + rules.
+                    rows = self._build_batch_rows()
+                    # If any number is changing, stage every selected sheet to
+                    # a unique temp number first so we never collide with an
+                    # existing sheet number mid-rename.
                     has_num_changes = any(
                         nn is not None and nn != it.SheetNumber
-                        for (_old, _new, nn, _nm), it in zip(rows, self._items))
+                        for (_o, _n, nn, _nm, it) in rows)
                     if has_num_changes:
-                        for i, item in enumerate(self._items):
-                            item.Sheet.SheetNumber = "__tmp_fr_{0}__".format(i)
-                    for item, (_old, _new, new_num, new_name) in zip(self._items, rows):
-                        sheet = item.Sheet
+                        for i, (_o, _n, _nn, _nm, it) in enumerate(rows):
+                            try:
+                                it.Sheet.SheetNumber = "__tmp_b_{0}__".format(i)
+                            except Exception:
+                                pass
+                    for (_o, _n, new_num, new_name, it) in rows:
+                        sheet = it.Sheet
                         if new_num is not None and new_num.strip():
                             try:
                                 sheet.SheetNumber = new_num
                             except Exception:
-                                # Append a uniqueness suffix if collision.
                                 try:
                                     sheet.SheetNumber = new_num + "-1"
                                 except Exception:
                                     pass
                         elif has_num_changes:
-                            # Number wasn't being changed — restore original.
+                            # Number wasn't being changed for this row — put
+                            # it back to its original value.
                             try:
-                                sheet.SheetNumber = item.SheetNumber
+                                sheet.SheetNumber = it.SheetNumber
                             except Exception:
                                 pass
                         if new_name is not None and new_name.strip():
@@ -2199,6 +2332,17 @@ class DuplicateDialog(object):
         self._chk_apply_view  = w.FindName("chk_apply_view")
         self._chk_view_eq_name = w.FindName("chk_view_eq_name")
         self._lbl_rules_hint  = w.FindName("lbl_rules_hint")
+        # Per-target prefix / suffix textboxes (new in the per-target grid).
+        self._txt_prefix_num  = w.FindName("txt_prefix_num")
+        self._txt_suffix_num  = w.FindName("txt_suffix_num")
+        self._txt_prefix_name = w.FindName("txt_prefix_name")
+        self._txt_suffix_name = w.FindName("txt_suffix_name")
+        self._txt_prefix_view = w.FindName("txt_prefix_view")
+        self._txt_suffix_view = w.FindName("txt_suffix_view")
+        # Sequence renumber controls (Sheet # only).
+        self._chk_sequence    = w.FindName("chk_sequence")
+        self._txt_seq_start   = w.FindName("txt_seq_start")
+        self._txt_seq_inc     = w.FindName("txt_seq_inc")
 
         # Build rows; subscribe to row PropertyChanged so the
         # "View name = Sheet name" toggle can mirror NewName → NewViewName live.
@@ -2280,7 +2424,7 @@ class DuplicateDialog(object):
     def _update_rules_hint(self):
         n = sum(1 for r in self._rules if (r.Find or "").strip())
         if n == 0:
-            self._lbl_rules_hint.Text = "Add rules then click Apply Rules to preview."
+            self._lbl_rules_hint.Text = "Click Apply Rules to preview your transforms."
         else:
             self._lbl_rules_hint.Text = "{0} active rule(s).".format(n)
 
@@ -2298,24 +2442,47 @@ class DuplicateDialog(object):
                 e.Handled = True
 
     def _on_apply_rules(self, sender, e):
+        """Pipeline (per target):  source → find/replace → prefix + suffix
+        Sheet # in sequence mode:  prefix + (start + i*inc) + suffix   (rules
+        skipped for #, but they still run on Name and View Name)."""
         apply_num    = bool(self._chk_apply_num.IsChecked)
         apply_name   = bool(self._chk_apply_name.IsChecked)
         apply_view   = bool(self._chk_apply_view.IsChecked)
         view_eq_name = bool(self._chk_view_eq_name.IsChecked)
-        rules        = list(self._rules)
+        pre_num   = self._txt_prefix_num.Text  or ""
+        suf_num   = self._txt_suffix_num.Text  or ""
+        pre_name  = self._txt_prefix_name.Text or ""
+        suf_name  = self._txt_suffix_name.Text or ""
+        pre_view  = self._txt_prefix_view.Text or ""
+        suf_view  = self._txt_suffix_view.Text or ""
+        use_seq   = bool(self._chk_sequence.IsChecked)
+        try:    seq_start = int(self._txt_seq_start.Text)
+        except: seq_start = 100
+        try:    seq_inc = int(self._txt_seq_inc.Text)
+        except: seq_inc = 1
+        rules = list(self._rules)
+
+        def wrap(prefix, body, suffix):
+            return "{0}{1}{2}".format(prefix or "", body, suffix or "")
 
         # Suppress NewName→NewViewName mirroring while we set values explicitly.
         self._suppress_mirror = True
         try:
-            for row in self._rows:
+            for i, row in enumerate(self._rows):
                 if apply_num:
-                    row.NewNumber = apply_rules(row.SourceNumber, rules)
+                    if use_seq:
+                        row.NewNumber = wrap(pre_num, seq_start + i * seq_inc, suf_num)
+                    else:
+                        row.NewNumber = wrap(
+                            pre_num, apply_rules(row.SourceNumber, rules), suf_num)
                 if apply_name:
-                    row.NewName = apply_rules(row.SourceName, rules)
+                    row.NewName = wrap(
+                        pre_name, apply_rules(row.SourceName, rules), suf_name)
                 if view_eq_name:
                     row.NewViewName = row.NewName
                 elif apply_view:
-                    row.NewViewName = apply_rules(row.SourceViewName, rules)
+                    row.NewViewName = wrap(
+                        pre_view, apply_rules(row.SourceViewName, rules), suf_view)
         finally:
             self._suppress_mirror = False
         self._update_rules_hint()
@@ -2337,11 +2504,13 @@ class DuplicateDialog(object):
           - every row's NewViewName is immediately mirrored to NewName.
         When OFF, all of those revert."""
         on = bool(self._chk_view_eq_name.IsChecked)
-        # Disable the Apply-to View Name chip when mirroring is on.
-        try:
-            self._chk_apply_view.IsEnabled = not on
-        except Exception:
-            pass
+        # Disable the entire View Name row of the per-target grid when
+        # mirroring is on (Apply checkbox + Prefix + Suffix).
+        for ctrl in (self._chk_apply_view, self._txt_prefix_view, self._txt_suffix_view):
+            try:
+                ctrl.IsEnabled = not on
+            except Exception:
+                pass
         # Flip the column to read-only when mirroring is on.
         if self._col_view_name is not None:
             try:
@@ -2725,9 +2894,10 @@ class SheetManagerWindow(object):
         self._template_map  = get_all_view_templates(doc)
         self._group_prop    = "Prefix" # Current grouping property
         # Filter state (filter pane). Empty set → no filtering on that axis.
-        self._filter_prefixes = set()  # set[str], e.g. {'E', 'F'}
-        self._filter_series   = set()  # set[int], e.g. {100, 200}
-        self._filter_params   = {}     # {slot_index: True | False}, missing means Any
+        self._filter_prefixes   = set()  # set[str], e.g. {'E', 'F'}
+        self._filter_collections = set() # set[str], e.g. {'SUTHERLAND'}
+        self._filter_series     = set()  # set[int], e.g. {100, 200}
+        self._filter_params     = {}     # {slot_index: True | False}, missing means Any
 
         # Discover sheet-bound project parameters BEFORE any SheetItem is built
         # so each SheetItem reads its slot values during construction.
@@ -2762,6 +2932,8 @@ class SheetManagerWindow(object):
         self._btn_filter         = w.FindName("btn_filter")
         self._filter_panel       = w.FindName("filter_panel")
         self._pnl_fil_prefixes   = w.FindName("pnl_filter_prefixes")
+        self._pnl_fil_collections     = w.FindName("pnl_filter_collections")
+        self._pnl_fil_collections_out = w.FindName("pnl_filter_collections_outer")
         self._pnl_fil_series     = w.FindName("pnl_filter_series")
         self._pnl_fil_params     = w.FindName("pnl_filter_params")
         self._pnl_fil_params_out = w.FindName("pnl_filter_params_outer")
@@ -2950,8 +3122,8 @@ class SheetManagerWindow(object):
         return (n // 100) * 100
 
     def _populate_filter_chips(self):
-        """Build the chip toggle buttons for prefixes / series / params,
-        based on what actually exists in the project."""
+        """Build the chip toggle buttons for prefixes / collections / series /
+        params, based on what actually exists in the project."""
         # PREFIXES
         self._pnl_fil_prefixes.Children.Clear()
         prefixes = sorted({i.Prefix for i in self._all_items if i.Prefix})
@@ -2965,6 +3137,28 @@ class SheetManagerWindow(object):
             tb.Checked   += self._on_filter_chip
             tb.Unchecked += self._on_filter_chip
             self._pnl_fil_prefixes.Children.Add(tb)
+
+        # COLLECTIONS — only useful when the project actually uses 2+ values
+        # (otherwise every sheet sits in the same collection and the row would
+        # be pure noise). Sort with NO_COLLECTION_LABEL last so the "real"
+        # named collections lead.
+        self._pnl_fil_collections.Children.Clear()
+        collections = {i.SheetCollection for i in self._all_items if i.SheetCollection}
+        if len(collections) >= 2:
+            self._pnl_fil_collections_out.Visibility = Visibility.Visible
+            named = sorted(c for c in collections if c != NO_COLLECTION_LABEL)
+            ordered = named + ([NO_COLLECTION_LABEL] if NO_COLLECTION_LABEL in collections else [])
+            for c in ordered:
+                tb = ToggleButton()
+                tb.Content = c
+                tb.Tag = "COL:" + c
+                if chip_style is not None:
+                    tb.Style = chip_style
+                tb.Checked   += self._on_filter_chip
+                tb.Unchecked += self._on_filter_chip
+                self._pnl_fil_collections.Children.Add(tb)
+        else:
+            self._pnl_fil_collections_out.Visibility = Visibility.Collapsed
 
         # SERIES
         self._pnl_fil_series.Children.Clear()
@@ -3026,6 +3220,13 @@ class SheetManagerWindow(object):
             else:
                 self._filter_prefixes.discard(val)
 
+        elif tag.startswith("COL:"):
+            val = tag[4:]
+            if is_on:
+                self._filter_collections.add(val)
+            else:
+                self._filter_collections.discard(val)
+
         elif tag.startswith("SER:"):
             try:
                 val = int(tag[4:])
@@ -3077,10 +3278,12 @@ class SheetManagerWindow(object):
 
     def _on_filter_reset(self, sender, e):
         self._filter_prefixes.clear()
+        self._filter_collections.clear()
         self._filter_series.clear()
         self._filter_params.clear()
         # Untick every chip
-        for panel in (self._pnl_fil_prefixes, self._pnl_fil_series):
+        for panel in (self._pnl_fil_prefixes, self._pnl_fil_collections,
+                      self._pnl_fil_series):
             for child in panel.Children:
                 if isinstance(child, ToggleButton):
                     child.IsChecked = False
@@ -3099,6 +3302,8 @@ class SheetManagerWindow(object):
                      if q in i.SheetNumber.lower() or q in i.SheetName.lower()]
         if self._filter_prefixes:
             items = [i for i in items if i.Prefix in self._filter_prefixes]
+        if self._filter_collections:
+            items = [i for i in items if i.SheetCollection in self._filter_collections]
         if self._filter_series:
             items = [i for i in items
                      if self._series_bucket(i.SheetNumber) in self._filter_series]
@@ -3110,8 +3315,8 @@ class SheetManagerWindow(object):
         self._update_filter_summary()
 
     def _update_filter_summary(self):
-        active = (len(self._filter_prefixes) + len(self._filter_series)
-                  + len(self._filter_params))
+        active = (len(self._filter_prefixes) + len(self._filter_collections)
+                  + len(self._filter_series) + len(self._filter_params))
         if active == 0:
             self._lbl_fil_summary.Text = "No filters active."
         else:
@@ -3123,8 +3328,10 @@ class SheetManagerWindow(object):
 
     def _on_group_changed(self, sender, e):
         idx = self._cmb_group.SelectedIndex
-        if idx == 0:   self._group_prop = "Prefix"
+        if   idx == 0: self._group_prop = "Prefix"
         elif idx == 1: self._group_prop = "Discipline"
+        elif idx == 2: self._group_prop = "SheetCollection"
+        elif idx == 3: self._group_prop = "CollectionPrefix"
         else:          self._group_prop = None
         self._apply_view()
 
