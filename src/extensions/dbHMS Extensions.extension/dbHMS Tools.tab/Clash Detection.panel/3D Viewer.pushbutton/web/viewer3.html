@@ -80,6 +80,11 @@ renderer.toneMapping = THREE.NeutralToneMapping;
 renderer.toneMappingExposure = 1.3;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// Anisotropic texture filtering: without it, textures (brick, wood, concrete) viewed at a
+// grazing angle -- floors and walls receding from the camera, which is most of a walkthrough --
+// go blurry and shimmer. Capped at 8 (the quality/perf sweet spot) and clamped to what the GPU
+// supports, so it stays scalable across firm machines.
+const MAX_ANISO = Math.min(8, (renderer.capabilities.getMaxAnisotropy && renderer.capabilities.getMaxAnisotropy()) || 1);
 
 // WebGL context loss: a too-heavy model can trip Windows' GPU watchdog (TDR) or
 // exhaust VRAM (esp. with Revit also holding the GPU) -- the context dies and the
@@ -108,6 +113,65 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 // with a movable sun + time-of-day is the Environment phase; this is its base.
 function _rgb(a){ return 'rgb('+(a[0]|0)+','+(a[1]|0)+','+(a[2]|0)+')'; }
 function _mix(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+// --- night sky + sun as real 3D objects (NOT painted on the equirect canvas) ---
+// Painting stars/sun on the low-res equirect sky stretched the stars into big blurry blobs
+// and pinched the sun into a cone at the zenith (equirect POLE distortion -- everything
+// converges to a point at the top). Instead the stars are a GPU point-sprite field and the
+// sun is a camera-facing billboard: both stay crisp, correctly tiny, and round at ANY
+// elevation. Built on a UNIT sphere and then, every frame, centered on the camera and
+// scaled to sit just inside the CURRENT far plane (updateClip retunes camera.far per model,
+// so a fixed huge radius gets clipped -> the bug where the sun/stars vanished). Hidden in
+// Draft/slate mode. Opacity tracks the sun's elevation.
+// Star glint sprite: a tiny bright core + faint 4/8-point rays ("a speck emitting light").
+function _starSprite(){
+  const S=64, cv=document.createElement('canvas'); cv.width=S; cv.height=S;
+  const g=cv.getContext('2d'), c=S/2;
+  const core=g.createRadialGradient(c,c,0,c,c,S*0.14);
+  core.addColorStop(0,'rgba(255,255,255,1)'); core.addColorStop(0.5,'rgba(244,248,255,0.8)');
+  core.addColorStop(1,'rgba(210,224,255,0)');
+  g.fillStyle=core; g.beginPath(); g.arc(c,c,S*0.14,0,6.2832); g.fill();
+  g.globalCompositeOperation='lighter';
+  function ray(ang,len,hw){ g.save(); g.translate(c,c); g.rotate(ang);
+    const lg=g.createLinearGradient(0,0,len,0);
+    lg.addColorStop(0,'rgba(255,255,255,0.8)'); lg.addColorStop(0.4,'rgba(255,255,255,0.18)'); lg.addColorStop(1,'rgba(255,255,255,0)');
+    g.fillStyle=lg; g.beginPath(); g.moveTo(0,-hw); g.lineTo(len,0); g.lineTo(0,hw); g.closePath(); g.fill(); g.restore(); }
+  for (let k=0;k<4;k++) ray(k*Math.PI/2, S*0.47, S*0.020);            // long cross rays
+  for (let k=0;k<4;k++) ray(Math.PI/4+k*Math.PI/2, S*0.27, S*0.013);  // short diagonal rays
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t;
+}
+// Soft round sun glow (bright core -> warm faint halo). Always round = no equirect cone.
+function _sunSprite(){
+  const S=128, cv=document.createElement('canvas'); cv.width=S; cv.height=S;
+  const g=cv.getContext('2d'), c=S/2;
+  const gr=g.createRadialGradient(c,c,0,c,c,c);
+  gr.addColorStop(0.00,'rgba(255,255,255,1)'); gr.addColorStop(0.06,'rgba(255,252,246,0.95)');
+  gr.addColorStop(0.16,'rgba(255,243,214,0.45)'); gr.addColorStop(0.42,'rgba(255,228,184,0.12)');
+  gr.addColorStop(1.00,'rgba(255,224,176,0)');
+  g.fillStyle=gr; g.fillRect(0,0,S,S);
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t;
+}
+// GPU point-sprite star field on the sky sphere: many tiny crisp specks, a few brighter.
+function _buildStarField(){
+  const N=600, pos=new Float32Array(N*3), col=new Float32Array(N*3);
+  let seed=20260622; const rnd=()=>{ seed=(seed*1664525+1013904223)&0x7fffffff; return seed/0x7fffffff; };
+  let n=0;
+  while (n<N){
+    const u=rnd()*2-1, th=rnd()*Math.PI*2, r=Math.sqrt(Math.max(0,1-u*u));
+    if (u < -0.12){ continue; }                      // keep stars in the sky, not far below the horizon
+    pos[n*3]=r*Math.cos(th); pos[n*3+1]=u; pos[n*3+2]=r*Math.sin(th);   // UNIT sphere; scaled per-frame
+    const b=0.4+rnd()*rnd()*0.6;                     // a few bright, many faint
+    col[n*3]=b; col[n*3+1]=b; col[n*3+2]=Math.min(1,b*1.05);
+    n++;
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col,3));
+  const mat=new THREE.PointsMaterial({ size:10, sizeAttenuation:false, map:_starSprite(),
+    transparent:true, opacity:0, depthWrite:false, depthTest:true,
+    blending:THREE.AdditiveBlending, vertexColors:true });
+  const pts=new THREE.Points(geo, mat); pts.frustumCulled=false; pts.userData.__env=true;
+  return pts;
+}
 // Build an equirect sky with a movable sun. `s` = unit direction TOWARD the sun (Y-up).
 // Sky warms + dims as the sun nears/drops below the horizon; a glowing sun disc is drawn
 // at the sun's position, matched to three.js's equirect mapping so it lines up with the
@@ -125,27 +189,15 @@ function buildSky(s){
   const ground  = _mix([16,15,14],  [118,112,103], 0.22+0.78*d);
   const grad=g.createLinearGradient(0,0,0,H);
   grad.addColorStop(0.00, _rgb(zenith));
-  grad.addColorStop(0.46, _rgb(_mix(zenith,horizon,0.82)));
+  grad.addColorStop(0.28, _rgb(_mix(zenith,horizon,0.42)));   // smoother upper-sky gradation
+  grad.addColorStop(0.46, _rgb(_mix(zenith,horizon,0.86)));
   grad.addColorStop(0.50, _rgb(horizon));
-  grad.addColorStop(0.54, _rgb(_mix(horizon,ground,0.6)));
+  grad.addColorStop(0.56, _rgb(_mix(horizon,ground,0.55)));   // softer, wider horizon haze (no hard line)
   grad.addColorStop(1.00, _rgb(ground));
   g.fillStyle=grad; g.fillRect(0,0,W,H);
-  if (s.y > -0.07){   // draw the sun only while it's at/above the horizon
-    const u = Math.atan2(s.z, s.x)/(2*Math.PI) + 0.5;
-    const v = Math.asin(Math.max(-1,Math.min(1,s.y)))/Math.PI + 0.5;
-    const sx = u*W, sy = (1-v)*H;                  // (1-v): CanvasTexture flips Y
-    const col = elDeg < 16 ? '255,200,140' : '255,250,236';   // warm near the horizon
-    g.globalCompositeOperation = 'lighter';
-    for (const ox of [-W, 0, W]){                  // wrap the glow across the seam
-      const gr = g.createRadialGradient(sx+ox, sy, 0, sx+ox, sy, W*0.16);
-      gr.addColorStop(0.00, 'rgba('+col+',1)');
-      gr.addColorStop(0.045,'rgba('+col+',0.95)');
-      gr.addColorStop(0.30, 'rgba('+col+',0.14)');
-      gr.addColorStop(1.00, 'rgba('+col+',0)');
-      g.fillStyle = gr; g.fillRect(0,0,W,H);
-    }
-    g.globalCompositeOperation = 'source-over';
-  }
+  // The equirect canvas is now ONLY the gradient. Stars + the sun are real 3D objects
+  // (_buildStarField / sunSprite, built below) -- which is what fixed the blurry star
+  // blobs and the pinched sun-cone at the zenith that the canvas approach produced.
   const tex=new THREE.CanvasTexture(cv);
   tex.mapping=THREE.EquirectangularReflectionMapping; tex.colorSpace=THREE.SRGBColorSpace;
   return tex;
@@ -175,7 +227,8 @@ let reflectiveMats = new Set();   // materials that should get the room probe as
 let roomEnv = null, reflRT = null, reflCam = null;
 // toggle sky vs flat slate (Draft uses slate + no IBL for a fast clay look)
 function setSky(on){ scene.background = on ? skyTex : SLATE; scene.environment = (on && !envDropped) ? envTex : null;
-  if (typeof ground !== 'undefined' && ground) ground.visible = on && !!bounds; }
+  if (typeof updateGroundVisible === 'function') updateGroundVisible();
+  if (typeof updateSkyElements === 'function') updateSkyElements(); }
 // rebuild the sky + image-based lighting for the current sun, and re-tint the sun light
 // (its DIRECTION is applied every frame in updateClip from sunDir()).
 function applySun(){
@@ -191,20 +244,60 @@ function applySun(){
   // gracefully, so this adds punch without blowing them to white.
   sun.intensity = (0.8 + 4.6*Math.max(0, Math.min(1, sunStrength))) * above;
   sun.color.setRGB(1.0, sunEl < 18 ? 0.85 : 0.95, sunEl < 18 ? 0.72 : 0.90);  // warmer when low
+  if (typeof updateSkyElements === 'function') updateSkyElements();   // move/fade the 3D sun + stars
 }
 
 const sun = new THREE.DirectionalLight(0xfff2e0, 3.0);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);   // 2048 keeps GPU memory modest (4096 + the
 sun.shadow.bias = -0.0004;            // half-float AO composer can exhaust some GPUs)
-sun.shadow.normalBias = 0.04;
-sun.shadow.radius = 3;                 // soft (PCF) shadow edges
+sun.shadow.normalBias = 0.06;         // a touch more = no peter-panning at the softer radius
+sun.shadow.radius = 5;                 // softer PCF penumbra (was 3) -- gentler, more natural edges
+sun.shadow.blurSamples = 16;           // sample the wider penumbra evenly (avoids a banded edge)
 scene.add(sun, sun.target);
 // sky/ground ambient. Forward-lit (no half-float), so it always works -- if the
 // image-based env lighting turns out broken on a GPU, we drop the env and lean
 // on a brighter version of this.
 const hemi = new THREE.HemisphereLight(0xbcd0e6, 0x6b6256, 0.45);   // interior fill so deep
 scene.add(hemi);                                                     // (sunless) walls aren't black
+
+// Sky objects (built now that the scene exists). A star field + a billboard sun.
+// updateSkyElements() = STYLE (opacity/color/visibility) for the current sun.
+// positionSkyObjects() = per-frame PLACEMENT (centre on camera, scale to just inside the
+// current far plane) so they're never clipped and read as infinitely far.
+const starField = _buildStarField(); scene.add(starField);
+const sunMat = new THREE.SpriteMaterial({ map: _sunSprite(), transparent: true, depthWrite: false,
+  depthTest: true, blending: THREE.AdditiveBlending });
+const sunSprite = new THREE.Sprite(sunMat); sunSprite.frustumCulled = false; sunSprite.userData.__env = true;
+scene.add(sunSprite);
+let sunWorldDir = new THREE.Vector3(0, 1, 0);   // updated by updateSkyElements
+let sunSizeFactor = 0.10;                        // angular size of the sun sprite (fraction of sky radius)
+function updateSkyElements(){
+  const onSky = (scene.background !== SLATE);
+  const starAmt = Math.max(0, Math.min(1, (-sunEl - 2)/8));        // fade in once the sun is below the horizon
+  starField.material.opacity = starAmt;
+  starField.visible = onSky && starAmt > 0.01;
+  sunWorldDir.copy(sunDir());
+  const lowf = Math.max(0, Math.min(1, (16 - sunEl)/18));         // 1 when low, 0 when high
+  sunMat.color.setRGB(1.0, 1.0 - 0.10*lowf, 1.0 - 0.30*lowf);     // warm near the horizon
+  sunMat.opacity = 0.9 * Math.max(0, Math.min(1, (sunEl + 2)/6)); // fade out at/below the horizon
+  sunSizeFactor = 0.085 + 0.05*lowf;                             // a touch bigger/softer when low (sunset bloom)
+  sunSprite.visible = onSky && sunEl > -2;
+}
+// Keep the sky sphere centred on the camera and just inside the (per-frame, model-fitted)
+// far plane. Called every frame AFTER updateClip + applyCameraToThree.
+function positionSkyObjects(){
+  const skyR = Math.max(10, camera.far * 0.9);
+  starField.position.copy(camera.position);
+  starField.scale.setScalar(skyR);                               // unit-sphere geometry -> radius skyR
+  sunSprite.position.copy(camera.position).addScaledVector(sunWorldDir, skyR);
+  const sc = skyR * sunSizeFactor;
+  sunSprite.scale.set(sc, sc, 1);
+  // ground dissolves into the sky between ~0.55 and ~0.92 of the (model-fitted) far plane
+  groundFade.s.value = camera.far * 0.55;
+  groundFade.e.value = camera.far * 0.92;
+}
+updateSkyElements();   // initial style; positionSkyObjects() runs in the frame loop (after `camera` exists)
 
 // ---- ground plane -----------------------------------------------------------
 // The building was floating in the bright sky with nothing under it -- a big part
@@ -214,6 +307,20 @@ scene.add(hemi);                                                     // (sunless
 // model element: added straight to the scene (not `root`), so it stays out of
 // selection, visibility, bounds and the element list.
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x9298a0, roughness: 0.98, metalness: 0.0 });
+// Fade the ground to transparent with distance FROM THE CAMERA so it dissolves into the sky
+// toward the horizon -- no visible plane edge, "a pedestal that goes on forever". Camera-
+// relative (not the plane's fixed rim) so the dissolve always finishes before the far plane
+// (no hard clip line) and tracks the view like haze. Range set per-frame from camera.far
+// in positionSkyObjects(). Uses vViewPosition (camera-space position) whose length = distance.
+groundMat.transparent = true;
+const groundFade = { s: { value: 100 }, e: { value: 200 } };
+groundMat.onBeforeCompile = (sh) => {
+  sh.uniforms.uFadeS = groundFade.s; sh.uniforms.uFadeE = groundFade.e;
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', '#include <common>\nuniform float uFadeS;\nuniform float uFadeE;')
+    .replace('#include <dithering_fragment>',
+             'gl_FragColor.a *= 1.0 - smoothstep(uFadeS, uFadeE, length(vViewPosition));\n#include <dithering_fragment>');
+};
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), groundMat);
 ground.rotation.x = -Math.PI / 2;     // lay flat on XZ, +Y up
 ground.receiveShadow = true;
@@ -221,13 +328,26 @@ ground.castShadow = false;
 ground.visible = false;               // shown once a model is placed (and only on sky modes)
 ground.userData.__env = true;
 scene.add(ground);
+// User "Show ground" toggle (panel chk_ground -> 'ground' message). The ground sits BELOW
+// the whole model so it never hides underground plumbing/foundations -- it's a clean
+// reference floor, not real grade (real grade would have to cut through the model and
+// occlude the very things being reviewed). Actual visibility also requires a sky mode + a
+// loaded model, so this combines all three conditions in one place.
+let groundOn = true;
+function updateGroundVisible(){
+  if (ground) ground.visible = groundOn && (scene.background !== SLATE) && !!bounds;
+}
+function setGround(on){ groundOn = !!on; updateGroundVisible(); }
 function placeGround(){
   if (!bounds) return;
   const span = Math.max(bounds.span || bounds.radius * 2, 4);
   ground.scale.set(span * 12, span * 12, 1);   // reads as "the ground", covers the shadow frustum
-  const y = (bounds.minY !== undefined ? bounds.minY : bounds.center.y - bounds.radius) - span * 0.001;
-  ground.position.set(bounds.center.x, y, bounds.center.z);
-  ground.visible = (scene.background !== SLATE);   // hidden in Draft's flat-slate clay mode
+  // Place at the TRUE bottom of all geometry (boxMin.y = the model AABB min, below every
+  // element) so nothing -- pipes, footings -- ever pokes under or is hidden by the ground.
+  const baseY = (bounds.boxMin ? bounds.boxMin.y
+              : (bounds.minY !== undefined ? bounds.minY : bounds.center.y - bounds.radius));
+  ground.position.set(bounds.center.x, baseY - span * 0.001, bounds.center.z);
+  updateGroundVisible();               // hidden in Draft's flat-slate clay mode or if toggled off
 }
 
 const camera = new THREE.PerspectiveCamera(60, 2, 0.05, 50000);
@@ -252,11 +372,25 @@ const n8ao = new N8AOPass(scene, camera,
   Math.max(2, renderer.domElement.width), Math.max(2, renderer.domElement.height));
 try {
   n8ao.setQualityMode('Medium');            // good/cheap; we drop to Low on weak GPUs later
-  n8ao.configuration.aoRadius = 1.5;        // metres; contact shading in corners/where things meet
+  n8ao.configuration.aoRadius = 1.8;        // metres; a touch wider = richer contact shading
   n8ao.configuration.distanceFalloff = 1.0;
-  n8ao.configuration.intensity = 3.0;       // AO strength
+  n8ao.configuration.intensity = 3.3;       // AO strength (a bit stronger)
   n8ao.configuration.halfRes = false;       // full-res avoids the sky-darkening half-res issue
+  // REFINE-WHILE-IDLE: accumulate AO samples across frames while the camera is still, so it
+  // converges to a clean, smooth, high-sample result (like Enscape/Lumion settling) without
+  // paying that cost every frame. N8AO auto-resets the accumulation the instant the camera
+  // moves, so there's no ghosting -- moving looks like normal Medium AO, idle looks far better.
+  n8ao.configuration.accumulate = true;
 } catch(e){}
+// ANTIALIAS the Realistic path. The renderer's antialias:true only smooths the DEFAULT
+// framebuffer (Shaded). Realistic goes through N8AO, which renders the scene into its own
+// beautyRenderTarget -- created WITHOUT multisampling, so every edge there is jagged/grainy.
+// Turning on MSAA for that target makes Realistic as crisp as Shaded. Set via .samples so we
+// don't edit the vendored addon; it survives N8AO.setSize(). If a GPU can't multisample this
+// target the composer would black out, and verifyRender() already self-heals to the plain
+// (antialiased) render -- so this only ever IMPROVES quality, never breaks the view.
+const AA_SAMPLES = 4;                        // matches a typical antialias:true (4x); GPU-cheap
+try { if (n8ao.beautyRenderTarget) n8ao.beautyRenderTarget.samples = AA_SAMPLES; } catch(e){}
 composer.addPass(n8ao);
 // NO OutputPass: N8AOPass already outputs a finished image (scene + AO + tone mapping +
 // sRGB). Adding OutputPass applied a SECOND sRGB encode, which lifted the midtones and made
@@ -459,24 +593,91 @@ function disposeModel(){
   scene.remove(root);
   root.traverse(o => { if (o.isMesh){ if (o.geometry) o.geometry.dispose(); if (o.material){ if (o.material.map) o.material.map.dispose(); o.material.dispose(); } } });
   root = null; elements = []; pickables = [];
-  edgeLines = []; edgesBuilt = false;   // edge overlays were children of the meshes -> gone with root
   clearSelection(); clearMarkers();
 }
 
-// "Show edges" (Revit shaded-with-edges look): thin dark lines on sharp edges, built
-// lazily on first enable as children of each mesh (so they inherit transform AND hide
-// with the mesh's visibility). No post-processing -> works on any GPU.
-let edgeLines = [], edgesBuilt = false, edgesOn = false;
-const edgeMat = new THREE.LineBasicMaterial({ color: 0x2b3340, transparent: true, opacity: 0.5 });
-function buildEdges(){
-  if (edgesBuilt || !pickables.length) return;
-  edgesBuilt = true;
-  for (const p of pickables){
-    try { const ls = new THREE.LineSegments(new THREE.EdgesGeometry(p.geometry, 30), edgeMat);
-      ls.visible = edgesOn; ls.raycast = function(){}; p.add(ls); edgeLines.push(ls); } catch(e){}
-  }
+// "Show edges" (Revit shaded-with-edges look). SCREEN-SPACE edge detection: render the
+// MODEL's depth to an offscreen target, then a fullscreen pass draws thin dark lines where
+// the depth JUMPS (silhouettes / where elements meet) or the surface NORMAL breaks (creases,
+// room corners). Cost scales with screen resolution, not triangle count, and adds almost no
+// GPU memory -- so it behaves the same on a 50k-tri model and on the merged multi-million-tri
+// model, where the old per-element line geometry was impossible (merged away + far too heavy).
+// Off by default => zero cost until enabled. Only MODEL meshes carry EDGE_LAYER, so the
+// ground/sky are excluded from the depth pass => no false horizon line, edges on the model only.
+const EDGE_LAYER = 1;
+let edgesOn = false, edgeDepthRT = null;
+function ensureEdgeRT(w, h){
+  if (edgeDepthRT && edgeDepthRT.width === w && edgeDepthRT.height === h) return;
+  if (edgeDepthRT){ if (edgeDepthRT.depthTexture) edgeDepthRT.depthTexture.dispose(); edgeDepthRT.dispose(); }
+  edgeDepthRT = new THREE.WebGLRenderTarget(w, h, { depthBuffer: true });
+  edgeDepthRT.depthTexture = new THREE.DepthTexture(w, h, THREE.UnsignedIntType);
 }
-function setEdges(on){ edgesOn = on; if (on) buildEdges(); for (const l of edgeLines) l.visible = on; }
+const _edgeScene = new THREE.Scene();
+const _edgeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const _edgeMat = new THREE.RawShaderMaterial({
+  uniforms: {
+    tDepth:       { value: null },
+    texel:        { value: new THREE.Vector2() },
+    uProjInv:     { value: new THREE.Matrix4() },
+    depthThresh:  { value: 0.03 },   // relative depth jump => silhouettes / where elements meet
+    normalThresh: { value: 0.12 },   // 1 - dot(normal) => creases / corners (ignores gentle curves)
+    edgeColor:    { value: new THREE.Color(0x2b3340) },
+    edgeOpacity:  { value: 0.55 }
+  },
+  vertexShader:
+    'attribute vec3 position; attribute vec2 uv; varying vec2 vUv;' +
+    'void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader:
+    'precision highp float;' +
+    'uniform sampler2D tDepth; uniform vec2 texel; uniform mat4 uProjInv;' +
+    'uniform float depthThresh; uniform float normalThresh; uniform vec3 edgeColor; uniform float edgeOpacity;' +
+    'varying vec2 vUv;' +
+    'float rd(vec2 uv){ return texture2D(tDepth, uv).x; }' +                       // window depth [0,1]
+    'vec3 vp(vec2 uv, float d){ vec4 c = vec4(uv*2.0-1.0, d*2.0-1.0, 1.0); vec4 v = uProjInv*c; return v.xyz/v.w; }' +
+    'void main(){' +
+    '  float dC = rd(vUv); if (dC > 0.9999){ discard; }' +                        // sky/empty: no edge
+    '  vec2 ox = vec2(texel.x,0.0), oy = vec2(0.0,texel.y);' +
+    '  float dR=rd(vUv+ox), dL=rd(vUv-ox), dU=rd(vUv+oy), dD=rd(vUv-oy);' +
+    '  vec3 pC=vp(vUv,dC), pR=vp(vUv+ox,dR), pL=vp(vUv-ox,dL), pU=vp(vUv+oy,dU), pD=vp(vUv-oy,dD);' +
+    '  float zc = -pC.z;' +                                                        // eye distance
+    '  float jump = max(max(abs(pR.z-pC.z),abs(pL.z-pC.z)),max(abs(pU.z-pC.z),abs(pD.z-pC.z)))/zc;' +
+    '  vec3 nC=normalize(cross(pR-pC,pU-pC));' +                                   // normals from depth
+    '  vec3 nL=normalize(cross(pC-pL,pU-pC));' +                                   // (flat planes => constant
+    '  vec3 nD=normalize(cross(pR-pC,pC-pD));' +                                   //  normal => no false edge)
+    '  float crease = max(1.0-dot(nC,nL), 1.0-dot(nC,nD));' +
+    '  float edge = max(step(depthThresh, jump), step(normalThresh, crease));' +
+    '  if (edge < 0.5){ discard; }' +
+    '  gl_FragColor = vec4(edgeColor, edgeOpacity);' +
+    '}',
+  transparent: true, depthTest: false, depthWrite: false
+});
+_edgeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _edgeMat));
+function renderEdgeDepth(){
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  ensureEdgeRT(w, h);
+  const prevMask = camera.layers.mask;
+  camera.layers.set(EDGE_LAYER);                 // model meshes only -> no ground/sky edges
+  renderer.setRenderTarget(edgeDepthRT);
+  renderer.clear();                              // depth cleared to far (1.0)
+  renderer.render(scene, camera);                // real materials => _vis discard + clip respected
+  camera.layers.mask = prevMask;
+  renderer.setRenderTarget(null);
+}
+function renderEdgeOverlay(){
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  _edgeMat.uniforms.tDepth.value = edgeDepthRT.depthTexture;
+  _edgeMat.uniforms.texel.value.set(1.0/w, 1.0/h);
+  _edgeMat.uniforms.uProjInv.value.copy(camera.projectionMatrixInverse);
+  renderer.setRenderTarget(null);
+  const prevAutoClear = renderer.autoClear;
+  renderer.autoClear = false;                    // blend lines OVER the rendered frame
+  renderer.render(_edgeScene, _edgeCam);
+  renderer.autoClear = prevAutoClear;
+}
+function setEdges(on){ edgesOn = !!on; }
+// debug hook (headless preview can't drive the rAF loop): manually run the edge passes
+window.__edges = { depth: renderEdgeDepth, overlay: renderEdgeOverlay, mat: _edgeMat, setOn: setEdges,
+                   isOn: function(){ return edgesOn; } };
 
 // Walk up from a hit mesh to the nearest ancestor carrying an element, and return
 // its WRAPPER ({obj,meta,box,center,...}) -- the display code (showHover/
@@ -508,6 +709,10 @@ function onLoaded(gltf){
       const mat = o.material;
       if (mat){
         mat.side = THREE.DoubleSide;
+        // sharpen every texture slot at grazing angles (mipmaps + anisotropy)
+        for (const t of [mat.map, mat.normalMap, mat.roughnessMap, mat.metalnessMap, mat.aoMap, mat.emissiveMap]){
+          if (t){ t.anisotropy = MAX_ANISO; t.needsUpdate = true; }
+        }
         mat.envMapIntensity = 1.1;      // let the sky show in the surface
         // Respect the real per-material metalness the exporter now carries
         // (clamp guards against bad data); older exports report 0 = dielectric.
@@ -537,6 +742,7 @@ function onLoaded(gltf){
         }
         mat.needsUpdate = true;
       }
+      o.layers.enable(EDGE_LAYER);   // include in the screen-space edge depth pass
       pickables.push(o);
     }
   });
@@ -804,6 +1010,7 @@ function buildMerged(){
     mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.frustumCulled = false;             // spans the whole model; per-mesh culling is moot
     mesh.userData.__merged = true;
+    mesh.layers.enable(EDGE_LAYER);         // include in the screen-space edge depth pass
     mergedMeshes.push(mesh);
     mergedRoot.add(mesh);
     for (const e of els) e.mergedMesh = mesh;
@@ -1141,6 +1348,7 @@ function handleMessage(data){
     else if (cmd==='sun'){ const p=arg.split(',').map(parseFloat);
       if (p.length>=3 && !isNaN(p[0])){ sunEl=p[0]; sunAz=p[1]; sunStrength=p[2]; applySun(); } }
     else if (cmd==='edges'){ setEdges(arg==='1'); }
+    else if (cmd==='ground'){ setGround(arg==='1'); }
     else if (cmd==='kd'){ navKeyDown(arg); }   // nav key forwarded from the WPF host
     else if (cmd==='ku'){ navKeyUp(arg); }
   } catch(err){ showHint('Error: '+(err&&err.message?err.message:err)); }
@@ -1249,10 +1457,12 @@ function frame(t){
   updateFly();
   updateClip();
   applyCameraToThree();
+  positionSkyObjects();   // centre stars/sun on the camera, inside the current far plane
   reportCam(t);
   resize();
   if (aoEnabled && composerOK && root){ composer.render(); blitComposerToScreen(); }
   else renderer.render(scene, camera);
+  if (edgesOn && (root || mergedRoot)){ renderEdgeDepth(); renderEdgeOverlay(); }
 }
 showHint('Ready. Export & load a model to begin.');
 requestAnimationFrame(frame);

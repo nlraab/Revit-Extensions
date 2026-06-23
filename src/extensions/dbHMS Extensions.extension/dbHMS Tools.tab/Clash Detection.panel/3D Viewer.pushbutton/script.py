@@ -171,6 +171,8 @@ class ViewerForm(forms.WPFWindow):
         self.sl_sun_direction.ValueChanged += self._on_sun_changed
         self.chk_edges.Checked   += self._on_edges_changed
         self.chk_edges.Unchecked += self._on_edges_changed
+        self.chk_ground.Checked   += self._on_ground_changed
+        self.chk_ground.Unchecked += self._on_ground_changed
         self.chk_clash_markers.Checked   += self._on_clash_filter_changed
         self.chk_clash_markers.Unchecked += self._on_clash_filter_changed
         self.txt_clash_search.TextChanged += self._on_clash_filter_changed
@@ -643,17 +645,35 @@ class ViewerForm(forms.WPFWindow):
         self._post("look:{0:.3f}".format(self.sl_look.Value))
 
     def _push_sun(self):
-        """Push the environment sun (from Time of day / direction / strength sliders)
-        to the render as 'sun:<elevation>,<azimuth>,<strength0..1>'. Time of day drives
-        a real arc: the sun rises on one side (~6am), peaks high at noon, and sets on
-        the OTHER side (~6pm), going below the horizon at night. 'Sun direction' sets the
-        noon bearing (which way the building faces), and time sweeps +/-90 deg around it."""
+        """Push the environment sun to the render as 'sun:<elevation>,<azimuth>,
+        <strength0..1>'. The Time-of-day slider is remapped so MOST of its travel
+        positions the sun during the DAY: the middle ~76% sweeps sunrise -> noon ->
+        sunset (the part actually used), and only the outer ~12% on each end dips
+        through twilight to full night (pre-dawn on the left, after dusk on the right).
+        It still reaches complete night at both extremes, just without spending half
+        the slider there. 'Sun direction' sets the noon bearing; time sweeps the sun
+        E -> S -> W across the daytime span."""
         try:
             import math
-            t = self.sl_time_of_day.Value
-            frac = (t - 6.0) / 12.0                      # 0 at 6am, 1 at 6pm; <0 / >1 = night
-            el = math.sin(frac * math.pi) * 78.0         # negative at night (sun below horizon)
-            az = self.sl_sun_direction.Value + (frac - 0.5) * 180.0   # sweep E -> S -> W
+            sl = self.sl_time_of_day
+            lo = float(sl.Minimum); hi = float(sl.Maximum)
+            p = (float(sl.Value) - lo) / (hi - lo) if hi > lo else 0.5   # 0..1 slider position
+            EDGE = 0.12              # fraction of each end given to twilight -> night
+            NIGHT_DEPTH = 40.0       # how far below the horizon the very ends reach (deg)
+            PEAK = 78.0              # noon sun elevation
+            base_az = self.sl_sun_direction.Value
+            if p < EDGE:                                # pre-dawn: deep night -> sunrise
+                nf = p / EDGE                           # 0 at far left, 1 at sunrise
+                el = -NIGHT_DEPTH * (1.0 - nf)
+                az = base_az - 90.0
+            elif p > 1.0 - EDGE:                        # after dusk: sunset -> deep night
+                nf = (p - (1.0 - EDGE)) / EDGE          # 0 at sunset, 1 at far right
+                el = -NIGHT_DEPTH * nf
+                az = base_az + 90.0
+            else:                                       # daytime arc across the middle
+                df = (p - EDGE) / (1.0 - 2.0 * EDGE)    # 0 sunrise -> 1 sunset
+                el = math.sin(df * math.pi) * PEAK
+                az = base_az + (df - 0.5) * 180.0
             strength = self.sl_sun_strength.Value / 100.0
             self._post("sun:{0:.1f},{1:.1f},{2:.3f}".format(el, az, strength))
         except Exception:
@@ -670,6 +690,15 @@ class ViewerForm(forms.WPFWindow):
 
     def _on_edges_changed(self, sender, args):
         self._push_edges()
+
+    def _push_ground(self):
+        try:
+            self._post("ground:" + ("1" if self.chk_ground.IsChecked else "0"))
+        except Exception:
+            pass
+
+    def _on_ground_changed(self, sender, args):
+        self._push_ground()
 
     # --- Pop-out / full screen ----------------------------------------
 
@@ -833,6 +862,7 @@ class ViewerForm(forms.WPFWindow):
             self._push_quality()   # re-sync the tier in case it changed pre-load
             self._push_sun()       # apply the current time-of-day / sun settings
             self._push_edges()     # apply the current edges toggle
+            self._push_ground()    # apply the current ground toggle
             return
 
     # --- render quality -----------------------------------------------

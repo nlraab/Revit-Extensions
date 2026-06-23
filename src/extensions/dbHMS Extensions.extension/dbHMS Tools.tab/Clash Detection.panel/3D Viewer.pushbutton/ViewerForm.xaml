@@ -233,12 +233,8 @@
                                         <ComboBoxItem Content="Gradient"/>
                                         <ComboBoxItem Content="Sky + horizon" IsSelected="True"/>
                                     </ComboBox>
-                                    <TextBlock Text="Ground (coming)" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                    <ComboBox x:Name="cmb_ground" IsEnabled="False">
-                                        <ComboBoxItem Content="None" IsSelected="True"/>
-                                        <ComboBoxItem Content="Plane"/>
-                                        <ComboBoxItem Content="Grid"/>
-                                    </ComboBox>
+                                    <CheckBox x:Name="chk_ground" Content="Show ground" IsChecked="True" Margin="0,8,0,0"/>
+                                    <TextBlock Text="Sits below the whole model, so it never hides underground plumbing." Style="{StaticResource HelperText}" Margin="0,2,0,0"/>
                                 </StackPanel>
                             </StackPanel>
                         </Expander>
