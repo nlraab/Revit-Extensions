@@ -659,9 +659,10 @@ def _basename(p):
         return str(p)
 
 
-def _texture_debug_line(src_doc, mat, rgb, embedded):
-    """One human-readable diagnostic line for a material's texture resolution."""
+def _texture_debug_line(src_doc, mat, rgb, embedded, metallic=0.0):
+    """One human-readable diagnostic line for a material's texture + metalness resolution."""
     name = _safe(lambda: mat.Name, '?')
+    cls = (_safe(lambda: mat.MaterialClass, '') or '')
     out = []
     try:
         aid = mat.AppearanceAssetId
@@ -678,8 +679,9 @@ def _texture_debug_line(src_doc, mat, rgb, embedded):
         factor = "%.2f,%.2f,%.2f" % (rgb[0], rgb[1], rgb[2]) if rgb else "?"
     except Exception:
         factor = "?"
-    return ("TEX '{0}' factor=({1}) embedded={2} chosenSlot='{3}' chosenFile='{4}' all={5}"
-            .format(name, factor, 'yes' if embedded else 'no',
+    return ("TEX '{0}' class='{1}' metallic={2} factor=({3}) embedded={4} "
+            "chosenSlot='{5}' chosenFile='{6}' all={7}"
+            .format(name, cls, metallic, factor, 'yes' if embedded else 'no',
                     chosen_slot, _basename(chosen_path) if chosen_path else None, allb))
 
 
@@ -758,8 +760,9 @@ def _material_for_element(el, tex_cache=None):
 
     Real base colour + transparency + a roughness guess from Smoothness, plus a
     base-color texture data: URI when `tex_cache` is supplied (resolved once per
-    material id and cached there; without a cache, texture is None). metallic
-    stays 0 (the Metal schema comes later).
+    material id and cached there; without a cache, texture is None). metallic is
+    driven by Revit's Material Class (metals read as metal/reflective; nothing is
+    faked metallic).
     """
     rgb, alpha, roughness, metallic, texture = None, 1.0, 0.85, 0.0, None
     try:
@@ -777,6 +780,13 @@ def _material_for_element(el, tex_cache=None):
             sm = _safe(lambda: mat.Smoothness, None)        # 0..100
             if sm is not None:
                 roughness = min(1.0, max(0.04, 1.0 - (sm / 100.0)))
+            # metallic straight from Revit's classification -- a material the user filed
+            # under "Metal" reads as metal (so steel/ducts reflect); everything else stays
+            # dielectric. Never invented from geometry or category guesses.
+            cls = ((_safe(lambda: mat.MaterialClass, '') or '') + ' ' +
+                   (_safe(lambda: mat.MaterialCategory, '') or '')).lower()
+            if 'metal' in cls:
+                metallic = 1.0
             if tex_cache is not None:
                 mid = _safe(lambda: eid_int(mat.Id), 0)
                 if mid in tex_cache:
@@ -787,7 +797,7 @@ def _material_for_element(el, tex_cache=None):
                     if len(TEXTURE_DEBUG) < 120:   # capped diagnostic, one line per material
                         try:
                             TEXTURE_DEBUG.append(
-                                _texture_debug_line(src_doc, mat, rgb, bool(texture)))
+                                _texture_debug_line(src_doc, mat, rgb, bool(texture), metallic))
                         except Exception:
                             pass
                 # When a base-colour texture is present, the TEXTURE is the colour -- glTF
