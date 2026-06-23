@@ -242,6 +242,24 @@ DEFAULT_SYSTEM_PROMPT = (
     "tell you what each one does. Use them aggressively when the user asks about the model; "
     "don't guess when a tool can tell you.\n"
     "\n"
+    "YOU CAN DO ANYTHING IN REVIT. Beyond the dedicated tools, you have "
+    "exec_revit_python: it runs IronPython 2.7 against the live model, so the WHOLE Revit "
+    "API is available to you, not just the menu. Capability decision:\n"
+    "  - If a dedicated tool fits the request, prefer it (cleaner validation, confirmation, "
+    "and output).\n"
+    "  - For ANYTHING not covered by a dedicated tool, write code with exec_revit_python "
+    "rather than telling the user you can't. You are NOT limited to the dedicated tools. "
+    "'I can't do that' is almost never true - if the Revit API can do it, you can.\n"
+    "  - GROUND YOUR CODE. The Revit API changes across versions and you WILL misremember "
+    "signatures. Before writing non-trivial code against a class you're unsure of, call "
+    "revit_api_lookup(type_name) for the exact methods/signatures in THIS version, or "
+    "introspect live in a read (result = dir(element)). Verifying beats guessing.\n"
+    "  - SAFETY: mark writes_model=true for code that changes the model (false reads are "
+    "always rolled back). Use dry_run=true to preview a risky write before committing. Real "
+    "writes show the user a confirmation dialog with your code. Open your own Transaction "
+    "inside the code for edits; an outer TransactionGroup we manage auto-reverts on any error.\n"
+    "  - IronPython 2.7 rules apply (see UNITS / no f-strings / ElementId .Value). \n"
+    "\n"
     "Rules - these caused most past mistakes; follow them strictly:\n"
     "\n"
     "1. NAMES, NOT IDS. Refer to Revit things by human name in prose. Sheets: number ('M-101'). "
@@ -11090,21 +11108,428 @@ def _tool_create_dependent_view(doc, input_dict):
             "parent_view_id": _eid_int(view.Id)}
 
 
-# ---- Tool registry ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Code execution + API grounding (v4.12) - the "do anything" layer
+# ---------------------------------------------------------------------------
 #
-# FUTURE / DEFERRED — `exec_revit_python` escape hatch tool. Idea: one
-# meta-tool that runs arbitrary IronPython in our context (`doc`,
-# `uidoc`, all Autodesk.Revit.DB classes pre-loaded), captures stdout
-# + a `result` value, surfaces exceptions cleanly. Lets Claude answer
-# long-tail questions / one-off ops we never built dedicated tools
-# for, without expanding TOOL_DEFS forever. KEEP all pre-built tools
-# for confirmations + transactions + cached schemas; exec_revit_python
-# is purely the escape hatch. Hold until we finish the current
-# roadmap, then add it as the start of the workspace-polish tier
-# (v4.14 or so).
+# This is the architectural pivot away from "hand-define every tool". The
+# dedicated tools above stay (they carry validation + confirmation +
+# clean undo for the common, dangerous operations). exec_revit_python is
+# the escape hatch: it runs arbitrary IronPython against the live model,
+# so Claude can do ANYTHING the Revit API exposes, not just our menu.
+#
+# Three pieces make this safe + reliable:
+#   1. exec_revit_python      - run code, wrapped in a TransactionGroup we
+#                               roll back on error / dry-run / read.
+#   2. revit_api_lookup       - reflect the LIVE RevitAPI assembly for
+#                               version-exact method signatures so Claude
+#                               grounds its code instead of hallucinating.
+#   3. dir()/introspection    - available inside exec for runtime probing.
+
+
+def _jsonable(val, _depth=0):
+    """Best-effort conversion of an arbitrary Python / .NET value to a
+    JSON-serializable form for returning from exec_revit_python. Revit
+    elements collapse to {element_id, name}; enumerables are listed
+    (capped); everything else falls back to str()."""
+    if val is None or isinstance(val, (bool, int, float)):
+        return val
+    if isinstance(val, str):
+        return val[:4000]
+    try:
+        if isinstance(val, unicode):  # noqa: F821 - IronPython 2.7 only
+            return val[:4000]
+    except NameError:
+        pass
+    if _depth > 4:
+        return str(val)[:2000]
+    if isinstance(val, dict):
+        out = {}
+        for k, v in list(val.items())[:200]:
+            out[str(k)] = _jsonable(v, _depth + 1)
+        return out
+    if isinstance(val, (list, tuple)):
+        return [_jsonable(v, _depth + 1) for v in list(val)[:500]]
+    # Revit Element?
+    try:
+        if hasattr(val, "Id") and hasattr(val, "Category"):
+            return {"element_id": _eid_int(val.Id), "name": _safe_name(val)}
+    except Exception:
+        pass
+    # ElementId?
+    try:
+        if isinstance(val, ElementId):
+            return {"element_id": _eid_int(val)}
+    except Exception:
+        pass
+    # Generic .NET enumerable
+    try:
+        items = []
+        for i, v in enumerate(val):
+            if i >= 500:
+                break
+            items.append(_jsonable(v, _depth + 1))
+        if items:
+            return items
+    except Exception:
+        pass
+    return str(val)[:2000]
+
+
+def _resolve_revit_type(type_name):
+    """Resolve a short or dotted Revit API type name (e.g. 'Wall',
+    'ViewSheet', 'Structure.AnalyticalModel') to its .NET System.Type
+    by reflecting the loaded Revit namespaces. Returns None if not
+    found."""
+    if not type_name:
+        return None
+    import Autodesk.Revit.DB as _DB
+    import Autodesk.Revit.UI as _UI
+    mods = [_DB, _UI]
+    for sub in ("Structure", "Mechanical", "Plumbing", "Electrical",
+                "Architecture", "Analysis"):
+        try:
+            mods.append(__import__("Autodesk.Revit.DB." + sub,
+                                   fromlist=[sub]))
+        except Exception:
+            pass
+    short = type_name.split(".")[-1]
+    import System as _System
+    for mod in mods:
+        obj = getattr(mod, short, None)
+        if obj is None:
+            continue
+        try:
+            return clr.GetClrType(obj)
+        except Exception:
+            try:
+                if isinstance(obj, _System.Type):
+                    return obj
+            except Exception:
+                pass
+    return None
+
+
+def _tool_revit_api_lookup(doc, input_dict):
+    """Reflect the live RevitAPI assembly and return the public methods
+    + properties (with parameter/return types) of a class, for the
+    EXACT installed Revit version. This is how Claude grounds its
+    exec_revit_python code instead of guessing signatures that may not
+    exist in this version."""
+    inp = input_dict or {}
+    type_name = (inp.get("type_name") or "").strip()
+    member_filter = (inp.get("member_contains") or "").lower()
+    if not type_name:
+        return {"error": "type_name is required (e.g. 'Wall', 'ViewSheet', 'Document')."}
+
+    clr_type = _resolve_revit_type(type_name)
+    if clr_type is None:
+        return {"error": ("Could not find a Revit API type named '{}'. Try "
+                          "the exact class name, e.g. 'FilteredElementCollector', "
+                          "'ViewSheet', 'Level'.").format(type_name)}
+
+    methods = []
+    props = []
+    try:
+        for m in clr_type.GetMethods():
+            try:
+                if not m.IsPublic:
+                    continue
+                nm = m.Name
+                if nm.startswith("get_") or nm.startswith("set_") or nm.startswith("add_") or nm.startswith("remove_"):
+                    continue
+                if member_filter and member_filter not in nm.lower():
+                    continue
+                params = []
+                for p in m.GetParameters():
+                    try:
+                        params.append("{} {}".format(p.ParameterType.Name, p.Name))
+                    except Exception:
+                        params.append("?")
+                static = "static " if m.IsStatic else ""
+                methods.append("{}{}({}) -> {}".format(
+                    static, nm, ", ".join(params), m.ReturnType.Name))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        for p in clr_type.GetProperties():
+            try:
+                nm = p.Name
+                if member_filter and member_filter not in nm.lower():
+                    continue
+                rw = ""
+                try:
+                    rw = " {get;%s}" % (" set;" if p.CanWrite else "")
+                except Exception:
+                    pass
+                props.append("{} {}{}".format(p.PropertyType.Name, nm, rw))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    methods = sorted(set(methods))[:250]
+    props = sorted(set(props))[:250]
+    return {
+        "type":            clr_type.FullName,
+        "method_count":    len(methods),
+        "property_count":  len(props),
+        "methods":         methods,
+        "properties":      props,
+    }
+
+
+def _confirm_code_execution(description, code):
+    """Show a confirmation dialog with the code Claude wants to run.
+    Returns True if the user approves. Runs on the UI thread (called
+    from inside execute_tool via the action handler)."""
+    subtitle = description or "Claude wants to run custom Revit code on your model."
+    # Show the code in the intro area (monospace-ish via the dialog).
+    intro = code if len(code) <= 4000 else (code[:4000] + "\n...[truncated]")
+    try:
+        return _show_confirmation(
+            "Run custom Revit code?",
+            subtitle,
+            [], [],
+            intro_text=intro,
+            confirm_label="Run code",
+            destructive=True,
+            footnote=("This is AI-generated code running directly against "
+                      "your model. Review it above. Any error auto-rolls "
+                      "back, but a successful-but-wrong edit will commit."))
+    except Exception:
+        # If the dialog itself fails, fail safe = do NOT run.
+        return False
+
+
+def _tool_exec_revit_python(doc, input_dict):
+    """Run arbitrary IronPython 2.7 against the live Revit model.
+
+    Safety model:
+      - Everything runs inside a TransactionGroup we manage.
+      - writes_model=False (default): the group is ROLLED BACK after
+        running, so a read/query can never persist a change even if the
+        code accidentally mutates something. The computed `result` +
+        stdout are still returned.
+      - writes_model=True, dry_run=True: run, then ROLL BACK - preview
+        what would happen without committing.
+      - writes_model=True, dry_run=False: show a confirmation dialog with
+        the code; on approval, run and ASSIMILATE (persist as one undo
+        step). On any exception: roll back.
+
+    The code's namespace has doc, uidoc, uiapp, app, DB, UI, clr,
+    revit/forms/script, plus helpers. Assign to `result` to return a
+    value; print() is captured too."""
+    if doc is None:
+        return {"error": "No active Revit document."}
+    inp = input_dict or {}
+    code = inp.get("code")
+    if not code or not str(code).strip():
+        return {"error": "code is required (a string of IronPython 2.7)."}
+    code = str(code)
+    description  = (inp.get("description") or "").strip()
+    writes_model = bool(inp.get("writes_model", False))
+    dry_run      = bool(inp.get("dry_run", False))
+
+    # Confirmation only for real (non-dry-run) writes.
+    if writes_model and not dry_run:
+        if not _confirm_code_execution(description, code):
+            return {"cancelled": True,
+                    "note": "User declined to run the code."}
+
+    # Build the execution namespace.
+    import Autodesk.Revit.DB as _DB
+    import Autodesk.Revit.UI as _UI
+    ns = {}
+    ns["doc"]   = doc
+    ns["uidoc"] = revit.uidoc
+    try:
+        ns["uiapp"] = __revit__          # pyRevit injects this builtin
+    except Exception:
+        try:
+            from pyrevit import HOST_APP
+            ns["uiapp"] = HOST_APP.uiapp
+        except Exception:
+            ns["uiapp"] = None
+    try:
+        ns["app"] = doc.Application
+    except Exception:
+        ns["app"] = None
+    ns["DB"]   = _DB
+    ns["UI"]   = _UI
+    ns["clr"]  = clr
+    ns["revit"]  = revit
+    ns["forms"]  = forms
+    ns["script"] = script
+    # Frequently used classes + our helpers, so common code is terse.
+    ns["XYZ"] = XYZ
+    ns["ElementId"] = ElementId
+    ns["Transaction"] = Transaction
+    ns["TransactionGroup"] = TransactionGroup
+    ns["FilteredElementCollector"] = FilteredElementCollector
+    ns["BuiltInCategory"] = BuiltInCategory
+    ns["BuiltInParameter"] = BuiltInParameter
+    ns["eid_int"]  = _eid_int
+    ns["make_eid"] = _make_eid
+    ns["safe_name"] = _safe_name
+    ns["result"] = None
+
+    # stdout capture (StringIO module name differs Py2 vs Py3).
+    try:
+        from StringIO import StringIO as _SIO   # IronPython 2.7
+    except ImportError:
+        from io import StringIO as _SIO         # CPython 3 (test parse)
+    import sys as _sys
+    buf = _SIO()
+    old_stdout = _sys.stdout
+
+    exec_error = None
+    tb_text = None
+    tg = TransactionGroup(doc, "AI code: {}".format(
+        (description or "exec")[:40]))
+    started = False
+    try:
+        tg.Start()
+        started = True
+    except Exception as e:
+        return {"error": "Could not start TransactionGroup: {}".format(e)}
+
+    try:
+        _sys.stdout = buf
+        try:
+            exec(code, ns)
+        except Exception as e:
+            exec_error = e
+            tb_text = traceback.format_exc()
+    finally:
+        _sys.stdout = old_stdout
+
+    persisted = False
+    try:
+        if exec_error is not None or dry_run or (not writes_model):
+            tg.RollBack()
+        else:
+            tg.Assimilate()
+            persisted = True
+    except Exception as e:
+        # Last-ditch: try to roll back so we never leave a half state.
+        try:
+            tg.RollBack()
+        except Exception:
+            pass
+        if exec_error is None:
+            exec_error = e
+            tb_text = "TransactionGroup finalize failed: {}".format(e)
+
+    captured = buf.getvalue() or ""
+    if len(captured) > 12000:
+        captured = captured[:12000] + "\n...[stdout truncated]"
+
+    if exec_error is not None:
+        return {
+            "error":     "Code raised {}: {}".format(
+                type(exec_error).__name__, exec_error),
+            "traceback": tb_text,
+            "stdout":    captured,
+        }
+
+    return {
+        "ran":          True,
+        "writes_model": writes_model,
+        "dry_run":      dry_run,
+        "persisted":    persisted,
+        "stdout":       captured,
+        "result":       _jsonable(ns.get("result")),
+    }
+
+
+# ---- Tool registry ---------------------------------------------------------
 
 # API-side tool definitions sent to Anthropic on every request.
 TOOL_DEFS = [
+    # ---- Code execution + API grounding (v4.12) - the escape hatch --------
+    {
+        "name": "exec_revit_python",
+        "description": (
+            "Run arbitrary IronPython 2.7 code against the live Revit "
+            "model. This lets you do ANYTHING the Revit API exposes - use "
+            "it whenever no dedicated tool fits the request.\n"
+            "\n"
+            "In scope automatically: doc, uidoc, uiapp, app, DB (full "
+            "Autodesk.Revit.DB), UI (Autodesk.Revit.UI), clr, revit/forms/"
+            "script (pyRevit), plus XYZ, ElementId, Transaction, "
+            "TransactionGroup, FilteredElementCollector, BuiltInCategory, "
+            "BuiltInParameter, and helpers eid_int(id)/make_eid(int)/"
+            "safe_name(el).\n"
+            "\n"
+            "Return data by assigning to `result` (any value - elements, "
+            "lists, dicts, numbers; we serialize). print() output is also "
+            "captured and returned as `stdout`.\n"
+            "\n"
+            "RULES:\n"
+            "- IronPython 2.7 ONLY: no f-strings, no 1_000 separators, "
+            "Python-2 syntax. Use .format().\n"
+            "- Revit 2024+: ElementId uses .Value, not .IntegerValue. Use "
+            "eid_int(x) to read an id as int, make_eid(n) to build one.\n"
+            "- For model edits, open your own transaction: `t = "
+            "Transaction(doc, 'name'); t.Start(); ...; t.Commit()` (or "
+            "`with revit.Transaction('name'):`). Everything is wrapped in "
+            "an outer TransactionGroup we manage, so any error auto-rolls-"
+            "back all your changes.\n"
+            "- Set writes_model=true when the code creates/edits/deletes. "
+            "Default false = read/query, and reads are ALWAYS rolled back "
+            "so they can never accidentally persist a change.\n"
+            "- Set dry_run=true to preview a write: it runs then rolls "
+            "back, so you see the result/stdout/errors without committing. "
+            "Use it to de-risk anything you're unsure about.\n"
+            "- A real write (writes_model=true, dry_run=false) shows the "
+            "user a confirmation dialog with your code; if they decline "
+            "you get {cancelled:true}.\n"
+            "- DON'T GUESS THE API. If you're unsure a method/signature "
+            "exists in this Revit version, call revit_api_lookup first, or "
+            "introspect in a read: result = dir(some_element). The Revit "
+            "API changes across versions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code":         {"type": "string",
+                                 "description": "IronPython 2.7 source. Assign to `result` to return data."},
+                "description":  {"type": "string",
+                                 "description": "One-line plain-English summary of what the code does (shown to the user on write-confirmation)."},
+                "writes_model": {"type": "boolean",
+                                 "description": "True if the code modifies the model. Default false (read-only, auto-rolled-back)."},
+                "dry_run":      {"type": "boolean",
+                                 "description": "True to preview a write without committing (runs then rolls back)."},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "revit_api_lookup",
+        "description": (
+            "Reflect the LIVE RevitAPI assembly for the exact installed "
+            "Revit version and return a class's public methods + "
+            "properties with their parameter/return types. Call this "
+            "BEFORE writing exec_revit_python code against an unfamiliar "
+            "class, so you use real signatures instead of guessing ones "
+            "that may not exist in this version. type_name is the class "
+            "name, e.g. 'Wall', 'ViewSheet', 'FilteredElementCollector', "
+            "'Level', 'Document'. Optional member_contains filters the "
+            "results to members whose name contains that substring."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type_name":       {"type": "string"},
+                "member_contains": {"type": "string"},
+            },
+            "required": ["type_name"],
+        },
+    },
+
     {
         "name": "get_document_info",
         "description": (
@@ -13836,6 +14261,9 @@ TOOL_DEFS = [
 
 # Dispatch table: tool name -> implementation function.
 TOOL_IMPLS = {
+    # Code execution + API grounding (v4.12) - the escape hatch
+    "exec_revit_python":         _tool_exec_revit_python,
+    "revit_api_lookup":          _tool_revit_api_lookup,
     # Read-only (v2.0 + v3.2 + v3.3)
     "get_document_info":         _tool_get_document_info,
     "list_views":                _tool_list_views,
@@ -14679,6 +15107,17 @@ def summarize_tool_result(result):
             if len(msg) > 80:
                 msg = msg[:80] + "..."
             return "error: " + msg
+
+        # v4.12 - code execution + API grounding
+        if "ran" in result and "writes_model" in result:
+            if result.get("dry_run"):
+                return "ran code (dry run, rolled back)"
+            if result.get("persisted"):
+                return "ran code (changes committed)"
+            return "ran code (read-only)"
+        if "method_count" in result and "property_count" in result:
+            return "API: {} methods, {} props".format(
+                result["method_count"], result["property_count"])
 
         # Write tools
         if "created_count" in result:
