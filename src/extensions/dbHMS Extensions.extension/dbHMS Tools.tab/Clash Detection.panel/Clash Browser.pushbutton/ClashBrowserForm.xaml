@@ -439,13 +439,10 @@
                                 <ComboBoxItem Content="Structural"/>
                             </ComboBox>
 
-                            <UniformGrid Columns="2" Margin="0,12,0,0">
+                            <UniformGrid Columns="1" Margin="0,12,0,0">
                                 <Button x:Name="btn_show_3d" Content="Show in 3D"
                                         Style="{StaticResource SecondaryButton}"
-                                        MinWidth="0" Margin="0,0,3,0"/>
-                                <Button x:Name="btn_walkthrough_here" Content="Walkthrough Here"
-                                        Style="{StaticResource SecondaryButton}"
-                                        MinWidth="0" Margin="3,0,0,0"/>
+                                        MinWidth="0"/>
                             </UniformGrid>
                             <UniformGrid Columns="1" Margin="0,6,0,0">
                                 <Button x:Name="btn_history" Content="History"

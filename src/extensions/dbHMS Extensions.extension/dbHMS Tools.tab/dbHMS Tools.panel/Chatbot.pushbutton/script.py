@@ -47,7 +47,7 @@ __doc__    = ('Engineering assistant that can read your Revit model and '
 # CRITICAL for modeless v2.5: keeps this script's IronPython engine alive
 # after script.py exits. Without it, Revit fatal-crashes when invoking
 # our IExternalEventHandler.Execute() because the class definition got
-# torn down. Same convention Walkthrough.pushbutton uses.
+# torn down. Standard convention for pyRevit modeless / ExternalEvent tools.
 __persistentengine__ = True
 
 import os

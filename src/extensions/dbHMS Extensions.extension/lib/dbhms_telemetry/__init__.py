@@ -29,9 +29,9 @@ Public API:
     dbhms_telemetry.start(tool_name, script_path=None) -> Session
     dbhms_telemetry.end(session, status='completed', error=None)
         - Lower-level pair for tools whose entry point is a modeless
-          `Show()` (e.g. Clash Detection's Walkthrough). Call
-          `start()` near the top, then hook `Window.Closed` to call
-          `end()` with the real shutdown time.
+          `Show()` (the form outlives the script). Call `start()` near
+          the top, then hook `Window.Closed` to call `end()` with the
+          real shutdown time.
 
 Storage:
     Events append to `<NETWORK_ROOT>/<YYYY>/<MM>/<YYYY-MM-DD>_<USER>.jsonl`

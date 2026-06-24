@@ -11,7 +11,7 @@ clicks different clashes; the view itself is persistent.
 Isometric (orthographic) rather than perspective: orthographic views are
 trivially rotatable in Revit's view cube without weird foreshortening, and
 SetSectionBox + ZoomToFit just works without explicit camera positioning.
-A perspective variant for the Walkthrough use case can come later.
+A perspective variant could be added later if a tool needs one.
 
 Revit imports are inside function bodies so this module parses cleanly in
 CPython 3 for the test suite.

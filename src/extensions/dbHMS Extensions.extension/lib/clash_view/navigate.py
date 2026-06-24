@@ -8,7 +8,7 @@ box in host coordinates, finding/creating the persistent Clash Navigator
 element(s) so the Properties panel shows them.
 
 Every Revit-API call lives here and in the geometry / threed_view
-submodules; Browser / Walkthrough / Reports scripts only call show_clash
+submodules; Browser / Reports scripts only call show_clash
 (plus the future capture-viewpoint helpers) and never touch the API
 directly. That keeps version-compat handling (ElementId, link transforms)
 in one place.

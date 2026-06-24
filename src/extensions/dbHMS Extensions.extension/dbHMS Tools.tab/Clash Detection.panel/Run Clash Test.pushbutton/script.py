@@ -703,8 +703,8 @@ class RunClashTestForm(forms.WPFWindow):
 
     def _on_open_settings(self, sender, args):
         """Close this Run Clash Test form, then auto-launch the
-        Settings toolbar button via Revit's ribbon. Same AdWindows
-        approach as Browser → Walkthrough Here.
+        Settings toolbar button via Revit's ribbon (the AdWindows
+        ribbon-walk approach used elsewhere in this extension).
         """
         launched = self._post_settings_command()
         self.Close()

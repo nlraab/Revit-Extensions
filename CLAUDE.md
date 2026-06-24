@@ -102,15 +102,15 @@ with dbhms_telemetry.session(__title__, script_path=__file__):
     SettingsForm().ShowDialog()
 ```
 
-**Modeless tools** (e.g. `Walkthrough.pushbutton`, where `Show()`
-returns immediately): the context manager would close the session
-before the user is done. Instead use the lower-level pair: open the
-session before constructing the form, attach `dbhms_telemetry.end()`
-to the form's `Closed` event, and wrap construction in a try/except
-that flips status to `failed` on error. Reference implementation
-lives in
-`dbHMS Tools.tab/Clash Detection.panel/Walkthrough.pushbutton/script.py`
-— copy that block, don't reinvent it.
+**Modeless tools** (where `Show()` returns immediately, so the form
+outlives the script): the `session()` context manager would close the
+session before the user is done. Instead use the lower-level pair: open
+the session before constructing the form, attach `dbhms_telemetry.end()`
+to the form's `Closed` event, and wrap construction in a try/except that
+flips status to `failed` on error. (There is no modeless tool in the repo
+right now — the old Walkthrough tool was removed once the web-based 3D
+Viewer replaced it — so there's no live reference; follow the steps above
+if you add one.)
 
 The `test_every_pushbutton_records_telemetry` integrity test enforces
 this: every `script.py` under both panels must `import dbhms_telemetry`
@@ -306,8 +306,8 @@ User-facing dialogs:
   shared lib helper that renders a friendly dbHMS-branded modal dialog
   (slate header bar, blue "ⓘ" glyph, OK button styled as PrimaryButton).
   This replaces `pyrevit.forms.alert(message, title=title)` for any
-  popup that just reports state ("Export complete", "Walkthrough is
-  queued", "View created OK"). pyRevit's `forms.alert` paints the
+  popup that just reports state ("Export complete", "View created OK").
+  pyRevit's `forms.alert` paints the
   Windows yellow-warning-triangle icon even on success messages, which
   reads as failure to users. The `dbhms_ui` dialog drops that and
   matches the rest of the firm's UI. Lives at

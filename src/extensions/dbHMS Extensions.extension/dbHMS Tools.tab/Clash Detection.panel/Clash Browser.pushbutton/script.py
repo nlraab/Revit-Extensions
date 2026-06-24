@@ -7,9 +7,8 @@ panel's dropdown), trade reassignments, and posted comments persist back
 to clashes.json immediately, with a history entry recording who did
 what and when.
 
-Buttons that need viewport navigation (Show in 3D, Save Viewpoint,
-Walkthrough Here, History) still pop "coming soon" - those depend on
-clash_view modules that haven't landed yet.
+"Show in 3D" navigates to the selected clash in Revit's own 3D view
+(via the clash_view package).
 
 If no clashes have been detected yet, the form shows an empty state with
 a hint to open Run Clash Test.
@@ -206,10 +205,8 @@ class ClashBrowserForm(forms.WPFWindow):
         self.cmb_detail_trade.SelectionChanged  += self._on_trade_changed
         self.cmb_group_by.SelectionChanged       += self._on_group_changed
 
-        # Show in 3D and Save Viewpoint are wired against the clash_view
-        # package (Iterations 3 and 6). Walkthrough Here / History and the
-        # bulk-action buttons still need their respective backends, so
-        # they're left on the placeholder until those iterations land.
+        # "Show in 3D" navigates to the clash in Revit's own 3D view, and
+        # Save Viewpoint are wired against the clash_view package.
         self.btn_show_3d.Click       += self._on_show_in_3d
         self.btn_history.Click        += self._on_show_history
         # Bulk action bar (visible when 2+ rows selected) — Iteration 9.
@@ -220,9 +217,6 @@ class ClashBrowserForm(forms.WPFWindow):
         self.btn_bulk_resolve.Click  += self._on_bulk_resolve
         for btn_name in ('btn_bulk_group',):
             getattr(self, btn_name).Click += self._on_coming_soon
-        # Walkthrough Here (Iter 13) — hands the selected clash off to
-        # the modeless Walkthrough form via a per-project command file.
-        self.btn_walkthrough_here.Click += self._on_walkthrough_here
         # Filter presets (Iteration 11). Built-ins always show; user
         # saves go under them. Right-click a user preset to delete it.
         self.btn_save_preset.Click += self._on_save_preset
@@ -981,237 +975,6 @@ class ClashBrowserForm(forms.WPFWindow):
     # for any clashes missing one), so there's no need for the manual
     # save flow. `clash_view.viewpoint.capture_for_clash` is still
     # available as a library function if a future tool needs it.
-
-    def _on_walkthrough_here(self, sender, args):
-        """Hand the selected clash off to the modeless Walkthrough form.
-
-        Writes a tiny "fly to here" command file that the Walkthrough
-        consumes either on its next launch or via its slow polling
-        timer (if already running). The user has to click the
-        Walkthrough toolbar button if the form isn't open yet — we
-        can't launch another pyRevit script directly from here without
-        breaking pyRevit's own script-lifecycle invariants.
-
-        Pre-condition: the selected clash must have a saved viewpoint
-        (otherwise we don't know where to fly to). If missing, prompt
-        the user to Save Viewpoint first.
-        """
-        from clash_view import walkthrough_handoff
-        selected = list(self.dg_clashes.SelectedItems)
-        if not selected:
-            dbhms_ui.info("Select a clash from the list first.",
-                        title='Walkthrough Here')
-            return
-        if len(selected) > 1:
-            dbhms_ui.info(
-                "Walkthrough Here flies to one clash. Select just one "
-                "row, then try again.",
-                title='Walkthrough Here',
-            )
-            return
-        if not self._project_hash:
-            dbhms_ui.info("No active project — can't queue a walkthrough.",
-                        title='Walkthrough Here')
-            return
-        clash = selected[0].Source
-        viewpoints = clash.get('viewpoints') or []
-        viewpoint = viewpoints[0] if viewpoints else None
-        if not viewpoint:
-            dbhms_ui.info(
-                "This clash has no saved viewpoint yet. Click Save "
-                "Viewpoint first, then try again.",
-                title='Walkthrough Here',
-            )
-            return
-        cmd = walkthrough_handoff.make_pending_fly_to(clash, viewpoint)
-        if cmd is None:
-            dbhms_ui.info(
-                "The saved viewpoint for this clash is malformed. "
-                "Re-save it from the Browser and try again.",
-                title='Walkthrough Here',
-            )
-            return
-        try:
-            ok = walkthrough_handoff.write_pending(self._project_hash, cmd)
-        except Exception as ex:
-            dbhms_ui.info("Couldn't queue: {}".format(ex),
-                        title='Walkthrough Here')
-            return
-        if not ok:
-            dbhms_ui.info("Couldn't write the pending command file.",
-                        title='Walkthrough Here')
-            return
-        # Try to launch the Walkthrough button automatically via
-        # Revit's PostCommand API — after the Browser closes,
-        # PostCommand fires the queued command, opening the Walkthrough
-        # form. The form's Loaded handler then auto-opens the view +
-        # consumes the pending file + flies the camera. True one-click.
-        seq = clash.get('seq') or '?'
-        self.txt_status.Text = (
-            "Queued for Walkthrough: Clash #{} — launching...".format(seq))
-        launched = self._post_walkthrough_command()
-        self.Close()
-        if not launched:
-            # Posting failed (Revit didn't recognize the command id).
-            # Tell the user to click the toolbar button manually so the
-            # queued file still gets used — the file's still on disk
-            # waiting for the next Walkthrough form launch.
-            dbhms_ui.info(
-                "Walkthrough is queued for Clash #{}. Click the "
-                "Walkthrough toolbar button to fly there now."
-                .format(seq),
-                title='Walkthrough Here',
-            )
-
-    def _post_walkthrough_command(self):
-        """Try to auto-launch the Walkthrough toolbar button so the
-        Walkthrough form opens after this Browser script returns.
-
-        Two strategies, tried in order:
-
-          1. **Revit PostCommand API.** Standard for postable commands;
-             works for pyRevit-registered commands when the id format
-             matches. Brittle because pyRevit's command id depends on
-             extension/tab/panel naming and version.
-
-          2. **AdWindows ribbon walk.** Autodesk.Windows is the
-             low-level UI framework Revit's ribbon is built on. We walk
-             the ribbon's tab → panel → item tree looking for the
-             Walkthrough button by display text and call its
-             `CommandHandler.Execute()`. Bypasses the command id system
-             entirely — works whenever the ribbon has the button visible.
-
-        Returns True if either strategy succeeded; False if both
-        failed. Caller falls back to a popup instructing the user.
-        """
-        if self._post_via_revit_command():
-            return True
-        if self._post_via_adwindows_ribbon():
-            return True
-        return False
-
-    def _post_via_revit_command(self):
-        try:
-            from Autodesk.Revit.UI import RevitCommandId
-            from pyrevit import revit
-        except Exception:
-            return False
-        candidates = [
-            "CustomCtrl_%CustomCtrl_%Clash Detection%Clash Detection%Walkthrough",
-            "CustomCtrl_%Clash Detection%Clash Detection%Walkthrough",
-            "dbhmsextensions_clashdetection_clashdetection_walkthrough",
-        ]
-        for cid_str in candidates:
-            try:
-                cid = RevitCommandId.LookupCommandId(cid_str)
-                if cid is None:
-                    continue
-                revit.uiapp.PostCommand(cid)
-                return True
-            except Exception:
-                continue
-        return False
-
-    def _post_via_adwindows_ribbon(self):
-        """Walk Revit's actual ribbon and click the Walkthrough button
-        programmatically. AdWindows is the Autodesk WPF-based ribbon
-        framework — every Revit ribbon button lives in this tree as a
-        `RibbonButton` with a `CommandHandler.Execute(...)` method.
-        """
-        try:
-            import clr
-            clr.AddReference("AdWindows")
-            from Autodesk.Windows import ComponentManager
-        except Exception:
-            return False
-        try:
-            ribbon = ComponentManager.Ribbon
-        except Exception:
-            return False
-        if ribbon is None:
-            return False
-        # Walk every tab/panel/item looking for a button with text
-        # "Walkthrough" (matching what __title__ produces on the
-        # ribbon — `__title__ = 'Walk-\nthrough'` so the displayed
-        # text contains "Walk" + newline + "through").
-        try:
-            for tab in ribbon.Tabs:
-                try:
-                    for panel in tab.Panels:
-                        # Scope to the Clash Detection PANEL by name
-                        # (it lives inside dbHMS Tools tab now —
-                        # post-Iter-16 restructure — so a tab-title
-                        # filter would miss it). Matching at the panel
-                        # level also defends against any other panel
-                        # eventually adding a "Walkthrough" button.
-                        try:
-                            source = panel.Source
-                            if source is None:
-                                continue
-                            panel_title = str(getattr(source, "Title", "") or "")
-                        except Exception:
-                            continue
-                        if "Clash Detection" not in panel_title:
-                            continue
-                        try:
-                            for item in source.Items:
-                                text = self._ribbon_item_text(item)
-                                if not text:
-                                    continue
-                                # Match "Walkthrough" with possible
-                                # newline / whitespace artifacts from
-                                # the __title__ split.
-                                normalized = text.replace("\n", "") \
-                                                  .replace("\r", "") \
-                                                  .replace("-", "") \
-                                                  .replace(" ", "") \
-                                                  .lower()
-                                if normalized == "walkthrough":
-                                    return self._invoke_ribbon_item(item)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        except Exception:
-            return False
-        return False
-
-    @staticmethod
-    def _ribbon_item_text(item):
-        """Extract the display text of a RibbonItem. Different button
-        types expose it under different property names — Text on a
-        normal button, Cookie / AutomationName as fallbacks.
-        """
-        for attr in ("Text", "AutomationName", "Cookie", "Description"):
-            try:
-                v = getattr(item, attr, None)
-                if v:
-                    return str(v)
-            except Exception:
-                continue
-        return None
-
-    @staticmethod
-    def _invoke_ribbon_item(item):
-        """Call `item.CommandHandler.Execute()` to fire the button as
-        if the user clicked it. The `Execute` overload takes
-        `(parameter)` so we pass the item itself."""
-        try:
-            handler = getattr(item, "CommandHandler", None)
-            if handler is None:
-                return False
-            try:
-                handler.Execute(item)
-                return True
-            except Exception:
-                # Some handlers expect (parameter) only.
-                try:
-                    handler.Execute(None)
-                    return True
-                except Exception:
-                    return False
-        except Exception:
-            return False
 
     def _on_show_history(self, sender, args):
         """Pop a modal sub-window listing the selected clash's audit

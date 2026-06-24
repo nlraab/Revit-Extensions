@@ -46,10 +46,11 @@ import System
 from System.Windows import (
     TextWrapping, TextAlignment, Thickness, CornerRadius,
     HorizontalAlignment, VerticalAlignment, FontWeights, Visibility,
+    GridLength, GridUnitType,
 )
 from System.Windows.Controls import (
     TextBlock, StackPanel, CheckBox, Border, Button, Grid as WpfGrid,
-    ScrollViewer, ScrollBarVisibility, TextBox,
+    ScrollViewer, ScrollBarVisibility, TextBox, ColumnDefinition,
 )
 from System.Windows.Input import Mouse, Cursors
 from System.Windows.Media import SolidColorBrush, Color
@@ -59,11 +60,13 @@ import dbhms_ui
 import dbhms_telemetry
 
 from clash_export import revit_geometry
+import clash_share
 
 
 SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'ViewerForm.xaml')
 MODEL_VIS_XAML = os.path.join(SCRIPT_DIR, 'ModelVisibilityForm.xaml')
+SUBCAT_XAML = os.path.join(SCRIPT_DIR, 'SubcategoryPickerForm.xaml')
 WEB_DIR    = os.path.join(SCRIPT_DIR, 'web')
 WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')   # file:// init trigger + fallback
 APP_PAGE   = 'viewer3.html'                          # the page served over the virtual host (three.js)
@@ -162,6 +165,7 @@ class ViewerForm(forms.WPFWindow):
         self.btn_close.Click      += self._on_close
         self.btn_export.Click     += self._on_export
         self.btn_load_last.Click  += self._on_load_last
+        self.btn_open_browser.Click += self._on_share
         self.btn_popout.Click     += self._on_popout
         self.btn_fullscreen.Click += self._on_fullscreen
         self.sl_speed.ValueChanged += self._on_speed_changed
@@ -171,8 +175,12 @@ class ViewerForm(forms.WPFWindow):
         self.sl_sun_direction.ValueChanged += self._on_sun_changed
         self.chk_edges.Checked   += self._on_edges_changed
         self.chk_edges.Unchecked += self._on_edges_changed
+        self.chk_perf.Checked   += self._on_perf_changed
+        self.chk_perf.Unchecked += self._on_perf_changed
         self.chk_ground.Checked   += self._on_ground_changed
         self.chk_ground.Unchecked += self._on_ground_changed
+        self.chk_minimap.Checked   += self._on_minimap_changed
+        self.chk_minimap.Unchecked += self._on_minimap_changed
         self.chk_clash_markers.Checked   += self._on_clash_filter_changed
         self.chk_clash_markers.Unchecked += self._on_clash_filter_changed
         self.txt_clash_search.TextChanged += self._on_clash_filter_changed
@@ -189,6 +197,9 @@ class ViewerForm(forms.WPFWindow):
         self._status_chks = []
         self._kind_chks = []
         self._refresh_tuning_labels()
+        # Show this project's saved viewpoints immediately on open (they persist to disk),
+        # not only after a model loads -- so they're clearly still there across Revit restarts.
+        self._build_viewpoints_list()
 
         # Attach the web panel after the window is laid out, so the host
         # Border has a real size for WebView2 to initialize into.
@@ -404,16 +415,29 @@ class ViewerForm(forms.WPFWindow):
         if doc is None:
             dbhms_ui.info("No active Revit document to export.", title='3D Viewer')
             return
-        if not forms.alert(
-                "Export the full model (your model plus loaded links) to the "
-                "3D viewer?\n\nOn very large models this can take a while, and "
-                "Revit will be busy until it finishes.",
-                title='3D Viewer', yes=True, no=True):
-            return
         try:
             view = doc.ActiveView
         except Exception:
             view = None
+
+        # Optional: let the user hide host subcategories (e.g. equipment Clearances) from this
+        # export. Only prompts when the checkbox is on; otherwise everything exports as before.
+        hide_subcats = []
+        if self.chk_pick_subcats.IsChecked:
+            try:
+                Mouse.OverrideCursor = Cursors.Wait
+                groups = _gather_host_subcategories(doc)
+            finally:
+                Mouse.OverrideCursor = None
+            if not groups:
+                dbhms_ui.info("No subcategories were found to choose from. Exporting everything.",
+                              title='3D Viewer')
+            else:
+                picker = SubcategoryPickerForm(groups)
+                picker.Owner = self
+                if not picker.ShowDialog():
+                    return   # user cancelled the picker -> cancel the export too
+                hide_subcats = picker.hidden_ids
 
         Mouse.OverrideCursor = Cursors.Wait
         result = None
@@ -426,7 +450,7 @@ class ViewerForm(forms.WPFWindow):
             # geometry-API exporter on ANY failure so an export always succeeds.
             try:
                 from clash_export import custom_export
-                ce = custom_export.export_view(doc, path)
+                ce = custom_export.export_view(doc, path, hide_subcats=hide_subcats)
                 if ce.get("elements", 0) > 0 and ce.get("bytes", 0) > 0:
                     result = {"path": path, "asset_extras": None, "stats": {
                         "elements": ce["elements"], "host_elements": ce["elements"],
@@ -524,6 +548,147 @@ class ViewerForm(forms.WPFWindow):
             dbhms_ui.info(
                 "The 3D panel isn't ready yet. Give it a moment after opening "
                 "the tool, then try again.", title='3D Viewer')
+
+    # --- share to browser --------------------------------------------
+
+    def _collect_clash_rows(self, doc):
+        """Read this project's clashes into the lightweight row dicts the
+        standalone viewer embeds (label / host-feet point / trade / status /
+        kind / search haystack). Mirrors the reader in `_load_clashes` but
+        returns the list instead of driving the panel UI. Raises
+        SharedFolderNotConfigured so the caller can decide how to handle it."""
+        rows = []
+        from clash_core import persistence, project, browser_filters
+        ph = project.project_hash_for(doc) if doc is not None else None
+        data = persistence.read_clashes(ph) if ph else {"clashes": []}
+        names = {}
+        try:
+            lib = persistence.read_global_test_library()
+            for t in (lib.get("tests") or []):
+                if t.get("id"):
+                    names[t["id"]] = t.get("name", "")
+        except Exception:
+            pass
+        for i, c in enumerate(data.get("clashes") or []):
+            mp = c.get("midpoint")
+            if not mp or len(mp) < 3:
+                continue
+            a = (c.get("ref_a") or {}).get("category") or "?"
+            b = (c.get("ref_b") or {}).get("category") or "?"
+            seq = c.get("seq") or (i + 1)
+            status = c.get("status") or "Open"
+            rows.append({
+                "label":  "#{0}  {1} x {2}  -  {3}".format(seq, a, b, status),
+                "point":  [float(mp[0]), float(mp[1]), float(mp[2])],
+                "trade":  c.get("assignee") or "-",
+                "status": status,
+                "kind":   (c.get("kind") or "hard").lower(),
+                "haystack": browser_filters.build_search_haystack(
+                    c, names.get(c.get("test_id"), "")),
+            })
+        return rows
+
+    def _share_out_path(self, doc):
+        """Where the shareable HTML is written. Prefer the project's shared
+        clash folder (on the network, where PMs already have reach); fall back
+        to a local folder if the shared root isn't configured."""
+        name = _safe_title(doc) + "_3D_review.html"
+        try:
+            from clash_core import persistence, project
+            ph = project.project_hash_for(doc)
+            share_dir = os.path.join(persistence.project_dir(ph), "share")
+            if not os.path.isdir(share_dir):
+                os.makedirs(share_dir)
+            return os.path.join(share_dir, name)
+        except Exception:
+            local = os.path.join(_DATA_ROOT, "share")
+            try:
+                if not os.path.isdir(local):
+                    os.makedirs(local)
+            except Exception:
+                pass
+            return os.path.join(local, name)
+
+    def _on_share(self, sender, args):
+        """Package the last export + this project's clashes into one
+        self-contained HTML a PM can double-click in any browser (no Revit, no
+        server, no internet) and walk the clashes from."""
+        from pyrevit import revit
+        doc = revit.doc
+        if doc is None:
+            dbhms_ui.info("No active Revit document.", title='Share to browser')
+            return
+        glb = self._export_path(doc)
+        if not os.path.isfile(glb):
+            dbhms_ui.info(
+                "Export the model first.\n\nClick \"Export & Load Model\" (or "
+                "\"Load Last Export\"), then Open in Browser.",
+                title='Share to browser')
+            return
+
+        size_bytes = os.path.getsize(glb)
+        if size_bytes > clash_share.bundle.WARN_MODEL_BYTES:
+            if not forms.alert(
+                "This model is {0:.0f} MB. The shareable file embeds the whole "
+                "model, so it will be large and may open slowly in a browser.\n\n"
+                "Create it anyway?".format(size_bytes / (1024.0 * 1024.0)),
+                    title='Large model', yes=True, no=True):
+                return
+
+        try:
+            rows = self._collect_clash_rows(doc)
+        except Exception:
+            # Shared folder not configured, or any read error: still share the
+            # model, just without the clash list.
+            _log("share: clash read failed\n{0}".format(traceback.format_exc()))
+            rows = []
+        viewpoints = []
+        try:
+            for vp in self._read_viewpoints():
+                viewpoints.append({"name": vp.get("name") or "View",
+                                   "pos": vp.get("pos"), "yaw": vp.get("yaw"),
+                                   "pitch": vp.get("pitch")})
+        except Exception:
+            viewpoints = []
+
+        out_path = self._share_out_path(doc)
+        Mouse.OverrideCursor = Cursors.Wait
+        error = None
+        nbytes = 0
+        try:
+            from datetime import datetime
+            gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+            nbytes = clash_share.bundle.build_share_html(
+                WEB_DIR, glb, rows, viewpoints,
+                doc.Title or "Model", gen, out_path)
+        except Exception:
+            error = traceback.format_exc()
+        finally:
+            Mouse.OverrideCursor = None
+
+        if error is not None:
+            _log("share: EXCEPTION\n{0}".format(error))
+            dbhms_ui.info("Couldn't build the shareable file:\n\n{0}".format(error),
+                          title='Share to browser')
+            return
+
+        out_mb = nbytes / (1024.0 * 1024.0)
+        self.txt_status.Text = "Shareable file saved ({0:.0f} MB).".format(out_mb)
+        dbhms_ui.info(
+            "Saved a self-contained 3D viewer that opens in any web browser - no "
+            "Revit, no internet.\n\n"
+            "Clashes included: {0}\nFile size: {1:.0f} MB\n\nFile:\n{2}\n\n"
+            "Put it on a shared folder your project managers can reach, or send "
+            "it to them. They just double-click it.".format(
+                len(rows), out_mb, out_path),
+            title='Share to browser')
+        try:
+            os.startfile(out_path)   # open it in their default browser as a check
+        except Exception:
+            try:
+                os.startfile(os.path.dirname(out_path))
+            except Exception:
+                pass
 
     def _load_into_panel(self, path):
         """Tell the panel to load the exported .glb. With the virtual host
@@ -691,6 +856,15 @@ class ViewerForm(forms.WPFWindow):
     def _on_edges_changed(self, sender, args):
         self._push_edges()
 
+    def _push_perf(self):
+        try:
+            self._post("perf:" + ("1" if self.chk_perf.IsChecked else "0"))
+        except Exception:
+            pass
+
+    def _on_perf_changed(self, sender, args):
+        self._push_perf()
+
     def _push_ground(self):
         try:
             self._post("ground:" + ("1" if self.chk_ground.IsChecked else "0"))
@@ -699,6 +873,15 @@ class ViewerForm(forms.WPFWindow):
 
     def _on_ground_changed(self, sender, args):
         self._push_ground()
+
+    def _push_minimap(self):
+        try:
+            self._post("minimap:" + ("1" if self.chk_minimap.IsChecked else "0"))
+        except Exception:
+            pass
+
+    def _on_minimap_changed(self, sender, args):
+        self._push_minimap()
 
     # --- Pop-out / full screen ----------------------------------------
 
@@ -863,6 +1046,8 @@ class ViewerForm(forms.WPFWindow):
             self._push_sun()       # apply the current time-of-day / sun settings
             self._push_edges()     # apply the current edges toggle
             self._push_ground()    # apply the current ground toggle
+            self._push_perf()      # apply the current performance-mode toggle
+            self._push_minimap()   # apply the current floor-plan minimap toggle
             return
 
     # --- render quality -----------------------------------------------
@@ -1163,9 +1348,18 @@ class ViewerForm(forms.WPFWindow):
             tb.FontSize = 11
             panel.Children.Add(tb)
         else:
-            for vp in vps:
+            for index, vp in enumerate(vps):
+                name = vp.get("name") or "View"
+                # row: fly-to button (fills) + a small delete (X) button on the right
+                row = WpfGrid()
+                row.Margin = Thickness(0, 0, 0, 3)
+                c0 = ColumnDefinition(); c0.Width = GridLength(1, GridUnitType.Star)
+                c1 = ColumnDefinition(); c1.Width = GridLength.Auto
+                row.ColumnDefinitions.Add(c0)
+                row.ColumnDefinitions.Add(c1)
+
                 btn = Button()
-                btn.Content = vp.get("name") or "View"
+                btn.Content = name
                 btn.HorizontalAlignment = HorizontalAlignment.Stretch
                 btn.HorizontalContentAlignment = HorizontalAlignment.Left
                 btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
@@ -1173,17 +1367,45 @@ class ViewerForm(forms.WPFWindow):
                 btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
                 btn.BorderThickness = Thickness(1)
                 btn.Padding = Thickness(8, 4, 8, 4)
-                btn.Margin = Thickness(0, 0, 0, 3)
+                btn.Margin = Thickness(0, 0, 4, 0)
                 btn.FontSize = 11
                 btn.Cursor = Cursors.Hand
                 payload = json.dumps({"pos": vp.get("pos"), "yaw": vp.get("yaw"),
                                       "pitch": vp.get("pitch")})
                 btn.Click += (lambda s, a, pl=payload: self._post("viewpose:" + pl))
-                panel.Children.Add(btn)
+                WpfGrid.SetColumn(btn, 0)
+                row.Children.Add(btn)
+
+                dbtn = Button()
+                dbtn.Content = "X"   # delete glyph (ASCII-safe)
+                dbtn.ToolTip = "Delete this saved view"
+                dbtn.Width = 26
+                dbtn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
+                dbtn.Foreground = SolidColorBrush(Color.FromRgb(0x9B, 0x2C, 0x2C))
+                dbtn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
+                dbtn.BorderThickness = Thickness(1)
+                dbtn.Padding = Thickness(0, 4, 0, 4)
+                dbtn.FontSize = 11
+                dbtn.Cursor = Cursors.Hand
+                dbtn.Click += (lambda s, a, i=index, nm=name: self._on_delete_viewpoint(i, nm))
+                WpfGrid.SetColumn(dbtn, 1)
+                row.Children.Add(dbtn)
+
+                panel.Children.Add(row)
         try:
             self.brd_viewpoints.Child = panel
         except Exception:
             _log("build_viewpoints_list: {0}".format(traceback.format_exc()))
+
+    def _on_delete_viewpoint(self, index, name):
+        if not forms.alert("Delete the saved view '{0}'?".format(name),
+                           title='Delete saved view', yes=True, no=True):
+            return
+        vps = self._read_viewpoints()
+        if 0 <= index < len(vps):
+            del vps[index]
+            self._write_viewpoints(vps)
+            self._build_viewpoints_list()
 
     def _build_filter_ui(self, json_text):
         """Build the model -> categories visibility tree from what the render
@@ -1412,6 +1634,110 @@ class ModelVisibilityForm(forms.WPFWindow):
                                for n, c in self._cat_checks.items())
         self.ws_states = dict((n, bool(c.IsChecked))
                               for n, c in self._ws_checks.items())
+        self.DialogResult = True
+        self.Close()
+
+    def _on_cancel(self, sender, args):
+        self.DialogResult = False
+        self.Close()
+
+
+def _gather_host_subcategories(doc):
+    """[(category_name, [(subcat_name, subcat_id_int), ...]), ...] for HOST model categories
+    that are model categories, have at least one placed instance, and define subcategories.
+    Sorted; lists only what's actually in this model (matches Revit's V/G subcategory list)."""
+    from Autodesk.Revit.DB import FilteredElementCollector, CategoryType
+    from clash_detect._compat import eid_int
+    groups = []
+    try:
+        cats = doc.Settings.Categories
+    except Exception:
+        return groups
+    for cat in cats:
+        try:
+            if cat is None or cat.CategoryType != CategoryType.Model:
+                continue
+            subs = []
+            for sub in cat.SubCategories:
+                try:
+                    subs.append((sub.Name, eid_int(sub.Id)))
+                except Exception:
+                    continue
+            if not subs:
+                continue
+            try:
+                col = (FilteredElementCollector(doc).OfCategoryId(cat.Id)
+                       .WhereElementIsNotElementType())
+                if col.FirstElement() is None:
+                    continue
+            except Exception:
+                continue
+            subs.sort(key=lambda t: t[0].lower())
+            groups.append((cat.Name, subs))
+        except Exception:
+            continue
+    groups.sort(key=lambda t: t[0].lower())
+    return groups
+
+
+class SubcategoryPickerForm(forms.WPFWindow):
+    """Pre-export picker: a category-grouped checklist of host subcategories. Everything starts
+    checked (= keep); the user unchecks what to hide (e.g. Clearances). On Export, hidden_ids is
+    the list of subcategory ElementId ints to hide in the export view."""
+
+    def __init__(self, groups):
+        forms.WPFWindow.__init__(self, SUBCAT_XAML)
+        self.hidden_ids = []
+        self._checks = []          # (checkbox, sub_id_int)
+        self._groups_ui = []       # [{header, children:[(checkbox, search_text)], }]
+        total = 0
+        for cat_name, subs in groups:
+            hdr = TextBlock()
+            hdr.Text = cat_name
+            hdr.FontWeight = FontWeights.SemiBold
+            hdr.Foreground = SolidColorBrush(Color.FromRgb(0x1A, 0x20, 0x2C))
+            hdr.Margin = Thickness(0, 8, 0, 2)
+            self.sp_list.Children.Add(hdr)
+            kids = []
+            for sub_name, sub_id in subs:
+                chk = CheckBox()
+                chk.Content = sub_name
+                chk.IsChecked = True
+                chk.Margin = Thickness(14, 2, 0, 2)
+                self.sp_list.Children.Add(chk)
+                self._checks.append((chk, sub_id))
+                kids.append((chk, (cat_name + " " + sub_name).lower()))
+                total += 1
+            self._groups_ui.append({"header": hdr, "children": kids})
+        try:
+            self.txt_footer.Text = ("{0} subcategories in {1} categories"
+                                    .format(total, len(groups)))
+        except Exception:
+            pass
+        self.btn_all.Click   += (lambda s, a: self._set_all(True))
+        self.btn_none.Click  += (lambda s, a: self._set_all(False))
+        self.btn_export.Click += self._on_export
+        self.btn_cancel.Click += self._on_cancel
+        self.txt_search.TextChanged += self._on_search
+
+    def _set_all(self, state):
+        for chk, _ in self._checks:
+            if chk.Visibility == Visibility.Visible:
+                chk.IsChecked = state
+
+    def _on_search(self, sender, args):
+        q = (self.txt_search.Text or "").strip().lower()
+        for g in self._groups_ui:
+            any_vis = False
+            for chk, txt in g["children"]:
+                vis = (q == "" or q in txt)
+                chk.Visibility = Visibility.Visible if vis else Visibility.Collapsed
+                if vis:
+                    any_vis = True
+            g["header"].Visibility = Visibility.Visible if any_vis else Visibility.Collapsed
+
+    def _on_export(self, sender, args):
+        self.hidden_ids = [sub_id for chk, sub_id in self._checks if not chk.IsChecked]
         self.DialogResult = True
         self.Close()
 

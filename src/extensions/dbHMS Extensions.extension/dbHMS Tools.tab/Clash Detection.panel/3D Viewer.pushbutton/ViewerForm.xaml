@@ -48,10 +48,46 @@
         <Style TargetType="ComboBox">
             <Setter Property="Padding" Value="6,4"/><Setter Property="Height" Value="26"/>
         </Style>
-        <!-- Collapsible section: a card with an Expander whose header is the section title -->
+        <!-- Collapsible section: a card with an Expander whose header is the section title.
+             Custom template so the arrow points RIGHT when open and DOWN when closed. -->
         <Style x:Key="SectionExpander" TargetType="Expander">
             <Setter Property="IsExpanded" Value="True"/>
             <Setter Property="Foreground" Value="#1A202C"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <DockPanel LastChildFill="True">
+                            <ToggleButton DockPanel.Dock="Top" Focusable="False" Cursor="Hand"
+                                          OverridesDefaultStyle="True"
+                                          IsChecked="{Binding Path=IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock x:Name="arrow" Text="&#x25B6;" FontSize="11" Foreground="#4A5568"
+                                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <ContentPresenter VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="False">
+                                                <Setter TargetName="arrow" Property="Text" Value="&#x25BC;"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <ContentPresenter ContentSource="Header"/>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="body" DockPanel.Dock="Bottom" Visibility="Collapsed" Margin="0,2,0,0"/>
+                        </DockPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="body" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
@@ -81,8 +117,8 @@
                            HorizontalAlignment="Left"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_open_browser" Content="Open in Browser"
-                            Style="{StaticResource SecondaryButton}" IsEnabled="False"
-                            ToolTip="Coming soon: open this viewer in a plain browser to share with PMs / contractors."/>
+                            Style="{StaticResource SecondaryButton}"
+                            ToolTip="Save a self-contained copy of this model + its clashes that opens in any web browser, so PMs can review without Revit. Export the model first."/>
                     <Button x:Name="btn_popout" Content="Pop Out Render"
                             Style="{StaticResource SecondaryButton}"
                             ToolTip="Move the 3D view into its own window for a second screen."/>
@@ -112,6 +148,10 @@
                             <StackPanel Margin="0,6,0,0">
                                 <TextBlock Text="Export the Revit model once, then fly through it here."
                                            Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+                                <CheckBox x:Name="chk_pick_subcats" Content="Choose subcategories to hide"
+                                          Margin="0,0,0,2"/>
+                                <TextBlock Text="When on, Export first lets you hide things like equipment Clearances. Off = export everything."
+                                           Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
                                 <Button x:Name="btn_export" Content="Export &amp; Load Model"
                                         Style="{StaticResource PrimaryButton}"
                                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
@@ -120,11 +160,6 @@
                                         Style="{StaticResource SecondaryButton}"
                                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                         MinWidth="0" Margin="0,0,0,8" Padding="12,6"/>
-                                <TextBlock Text="Export scope" Style="{StaticResource FieldLabel}"/>
-                                <ComboBox x:Name="cmb_scope" IsEnabled="False">
-                                    <ComboBoxItem Content="Whole model + links" IsSelected="True"/>
-                                    <ComboBoxItem Content="Active view only"/>
-                                </ComboBox>
                                 <TextBlock x:Name="txt_stats" Text="No model loaded yet."
                                            Style="{StaticResource HelperText}" Margin="0,8,0,0"/>
                             </StackPanel>
@@ -186,7 +221,9 @@
                                         Style="{StaticResource SecondaryButton}" IsEnabled="False"
                                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                         MinWidth="0" Margin="0,0,0,6" Padding="12,6"/>
-                                <CheckBox x:Name="chk_minimap" Content="Floor-plan minimap" IsEnabled="False"/>
+                                <CheckBox x:Name="chk_minimap" Content="Floor-plan minimap" IsChecked="True"/>
+                                <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
+                                           Text="Live plan of the floor you're on, with a marker for where you are and which way you're looking. Drag the grip to enlarge it."/>
                             </StackPanel>
                         </Expander>
                     </Border>
@@ -201,24 +238,14 @@
                                     <ComboBoxItem Content="Draft"/>
                                     <ComboBoxItem Content="Shaded" IsSelected="True"/>
                                     <ComboBoxItem Content="Realistic"/>
-                                    <ComboBoxItem Content="Ultra"/>
                                 </ComboBox>
                                 <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
-                                           Text="Draft = fast flat fly-through. Shaded = lit, real material colors. Realistic / Ultra add sky lighting, shadows and reflections (coming next)."/>
-                                <TextBlock Text="Background" Style="{StaticResource FieldLabel}"/>
-                                <ComboBox x:Name="cmb_background" IsEnabled="False">
-                                    <ComboBoxItem Content="Dark" IsSelected="True"/>
-                                    <ComboBoxItem Content="Light"/>
-                                </ComboBox>
-                                <TextBlock Text="Color elements by" Style="{StaticResource FieldLabel}"/>
-                                <ComboBox x:Name="cmb_color_by" IsEnabled="False">
-                                    <ComboBoxItem Content="Discipline" IsSelected="True"/>
-                                    <ComboBoxItem Content="Category"/>
-                                    <ComboBoxItem Content="Material"/>
-                                    <ComboBoxItem Content="Clash status"/>
-                                </ComboBox>
+                                           Text="Draft = fast flat fly-through. Shaded = lit, real material colors. Realistic adds sky lighting, shadows and reflections."/>
                                 <CheckBox x:Name="chk_edges" Content="Show edges" Margin="0,8,0,0"/>
                                 <CheckBox x:Name="chk_section_box" Content="Section box" IsEnabled="False"/>
+                                <CheckBox x:Name="chk_perf" Content="Performance mode (smoother)" Margin="0,3,0,0"/>
+                                <TextBlock Style="{StaticResource HelperText}" Margin="0,2,0,0"
+                                           Text="Renders a touch below native for a higher frame rate. Best for the popped-out, full-screen view."/>
                                 <TextBlock Text="Environment" Style="{StaticResource SectionHeader}" Margin="0,12,0,4"/>
                                 <StackPanel>
                                     <TextBlock Text="Time of day" Style="{StaticResource HelperText}"/>
@@ -227,12 +254,6 @@
                                     <Slider x:Name="sl_sun_strength" Minimum="0" Maximum="100" Value="70"/>
                                     <TextBlock Text="Sun direction" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
                                     <Slider x:Name="sl_sun_direction" Minimum="0" Maximum="360" Value="135"/>
-                                    <TextBlock Text="Sky (coming)" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
-                                    <ComboBox x:Name="cmb_sky" IsEnabled="False">
-                                        <ComboBoxItem Content="Solid"/>
-                                        <ComboBoxItem Content="Gradient"/>
-                                        <ComboBoxItem Content="Sky + horizon" IsSelected="True"/>
-                                    </ComboBox>
                                     <CheckBox x:Name="chk_ground" Content="Show ground" IsChecked="True" Margin="0,8,0,0"/>
                                     <TextBlock Text="Sits below the whole model, so it never hides underground plumbing." Style="{StaticResource HelperText}" Margin="0,2,0,0"/>
                                 </StackPanel>

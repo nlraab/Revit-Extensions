@@ -71,7 +71,6 @@ class ExtensionIntegrityTests(unittest.TestCase):
             "Test Library.pushbutton",
             "Reports.pushbutton",
             "Settings.pushbutton",
-            "Walkthrough.pushbutton",
             "3D Viewer.pushbutton",
         }
         actual = {p.name for p in CLASH_PANEL.glob("*.pushbutton")}
@@ -280,8 +279,8 @@ class ExtensionIntegrityTests(unittest.TestCase):
     def test_every_pushbutton_records_telemetry(self):
         # Every pushbutton script.py must wire dbhms_telemetry. The CLAUDE.md
         # rule is: import the module and call either session() (modal tools)
-        # or start() (modeless tools, e.g. Walkthrough). This test fails the
-        # build if a new pushbutton ships without telemetry.
+        # or start() (modeless tools). This test fails the build if a new
+        # pushbutton ships without telemetry.
         panels = (DBHMS_PANEL, CLASH_PANEL)
         for panel in panels:
             for pushbutton_dir in panel.glob("*.pushbutton"):

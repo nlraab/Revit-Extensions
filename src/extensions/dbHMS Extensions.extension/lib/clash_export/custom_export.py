@@ -31,7 +31,7 @@ import time
 
 from clash_export.mesh import Mesh
 from clash_export.gltf import GlbWriter
-from clash_detect._compat import eid_int
+from clash_detect._compat import eid_int, make_eid
 
 FT_TO_M = 0.3048
 
@@ -383,12 +383,14 @@ def _view_offset(doc, view):
     return ((mnx + mxx) / 2.0, (mny + mxy) / 2.0, (mnz + mxz) / 2.0)
 
 
-def _make_export_view(doc):
+def _make_export_view(doc, hide_subcats=None):
     """Create a fresh, throwaway isometric 3D view with EVERYTHING on (all model
     categories, all worksets, links) at Fine detail, for a complete export that
     doesn't depend on the user's active view (works even from a sheet/2D view).
-    Visibility is then controlled entirely inside the web viewer. Returns the
-    view, or None if creation failed."""
+    Visibility is then controlled entirely inside the web viewer. `hide_subcats`
+    is an optional list of subcategory ElementId ints to turn OFF in the export
+    view (host-model only), so e.g. equipment Clearances stay out of the .glb.
+    Returns the view, or None if creation failed."""
     from Autodesk.Revit.DB import (View3D, ViewFamilyType, ViewFamily,
                                    FilteredElementCollector, ViewDetailLevel,
                                    Transaction, WorksetKind, WorksetVisibility,
@@ -422,6 +424,19 @@ def _make_export_view(doc):
                         pass
         except Exception:
             pass
+        # Hide the subcategories the user opted to drop (host model only). CustomExporter
+        # honours the view's V/G, so hidden subcategories simply aren't exported.
+        if hide_subcats:
+            hidden = 0
+            for sid in hide_subcats:
+                try:
+                    cid = make_eid(sid)
+                    if v3.CanCategoryBeHidden(cid):
+                        v3.SetCategoryHidden(cid, True)
+                        hidden += 1
+                except Exception:
+                    pass
+            _log("export: hid {0} of {1} requested subcategories".format(hidden, len(hide_subcats)))
         t.Commit()
         _log("export: created dedicated all-on Fine 3D view")
         return v3
@@ -434,16 +449,17 @@ def _make_export_view(doc):
         return None
 
 
-def export_view(doc, out_path, lod=8, asset_extras=None):
+def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None):
     """Export the WHOLE model (everything on) to a .glb via CustomExporter, using
     a dedicated throwaway 3D view so it works from any context and captures all
-    geometry (visibility is controlled in the viewer). Returns a stats dict;
-    raises on hard failure so the caller can fall back to the old path."""
+    geometry (visibility is controlled in the viewer). `hide_subcats` optionally
+    turns off host subcategories (e.g. Clearances) for this export. Returns a stats
+    dict; raises on hard failure so the caller can fall back to the old path."""
     if not _HAVE_REVIT:
         raise RuntimeError("CustomExporter unavailable (no Revit API)")
     from Autodesk.Revit.DB import CustomExporter
 
-    temp_view = _make_export_view(doc)
+    temp_view = _make_export_view(doc, hide_subcats=hide_subcats)
     if temp_view is None:
         raise RuntimeError("could not create an export 3D view")
     src = temp_view

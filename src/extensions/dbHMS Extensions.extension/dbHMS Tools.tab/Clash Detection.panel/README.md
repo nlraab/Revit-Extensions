@@ -108,6 +108,21 @@ What's implemented and runs against real Revit + persistence:
     - Per-column widths tuned for typical content
   Atomic-rename writes, Unicode-safe (XML escaping). Validated end-to-end
   against openpyxl in the test suite — the file opens cleanly in Excel.
+- `lib/clash_share/bundle.py` — packs the 3D Viewer into ONE self-contained
+  `.html` so a project manager can double-click it in any browser (no Revit,
+  no server, no internet) and walk the clashes. `build_share_html(web_dir,
+  glb_path, clashes, viewpoints, project, generated, out_path)`: a
+  double-clicked `file://` page can't fetch sibling files (browser CORS), so
+  it inlines everything — each three.js engine module becomes a `data:` URL in
+  the page's import map (relative `import`s rewritten to flat import-map keys,
+  since relative specifiers can't resolve against a `data:` URL), the model is
+  embedded as base64, and the clash list + saved viewpoints ride along as JSON.
+  `web/viewer3.html` detects the absence of Revit's WebView2 host ("standalone
+  mode") and builds an in-page overlay — nav help, the clash list with
+  Trade/Status/Search filters + click-to-fly, markers, saved views, and
+  model/category show-hide — wired to the SAME viewer functions the WPF panel
+  drives in Revit. One renderer, two front ends. The 3D Viewer's **Open in
+  Browser** button writes the file into `<shared>/<project-hash>/share/`.
 - `lib/clash_view/viewpoint.py` — two capture entry points:
   `generate_for_all(uidoc, clash_dicts, role_map, project_hash, captured_by,
   log, only_missing=True)` — batch-generates viewpoint thumbnails for every
@@ -276,106 +291,10 @@ Wired forms:
       24 unit tests.
   All three formats pop up the file in Explorer (selected, ready to
   right-click → Send to) after a successful export.
-- **Walkthrough** (Iter 12) — free-fly through the building with WASD +
-  mouse-look, for coordination meetings. The first cut shipped a
-  guided clash-tour and was wrong scope — clash review belongs in the
-  Browser. The current build is a real free-fly walkthrough where you
-  fly through walls and ceilings looking for equipment, toggle
-  disciplines on/off, and save bookmark camera positions for the
-  meeting moderator to click through.
-  **Click "Open Walkthrough View"** → creates / activates the
-  dedicated `dbHMS Walkthrough` perspective view. **Click into the
-  Look Pad** (the dark area on the right of the form) to capture
-  mouse + keyboard. Cursor hides; the green "● ACTIVE" pill appears
-  in the header. Then:
-    - **WASD** — walk forward / back / strafe (always horizontal,
-      regardless of camera pitch — pressing W while looking at the
-      floor doesn't drive you into it)
-    - **Q / E** — move down / up along world Z (so "up" always means
-      "toward the sky", not "toward where the camera is looking")
-    - **Mouse drag** — yaw + pitch (yaw rotates around world Z so the
-      horizon stays level; pitch is clamped to ±88° so you can't flip
-      upside down)
-    - **Shift / Ctrl** — speed up (3×) / slow down (¼×) on the fly
-    - **Esc** — release mouse capture
-  **Speed slider** sets the base movement speed (2–60 ft/s, 15 default).
-  Modifier keys multiply on top.
-  **Visibility checkboxes** in the left card — Mechanical / Electrical /
-  Plumbing / Fire Protection / Architectural / Structural — toggle each
-  discipline's full set of categories together so during a meeting you
-  can hide architectural and see all the MEP, then turn arch back on for
-  context. The discipline → category map lives in
-  `walkthrough_view.DISCIPLINE_CATEGORIES` and is editable.
-  **Bookmarks** save the current camera (position + forward + up) under
-  a name. Persisted at `<shared>/<project-hash>/walkthrough_bookmarks.json`
-  via the same atomic-rename pattern as filter_presets. Per-project, on
-  the shared root — the whole team sees the same set, so a moderator
-  can prep "RTU-1 east", "Lobby", "Mech room corridor" the night before
-  and click through them on the call. Double-click a bookmark to snap
-  the camera to it; Delete key removes the selected one (with confirm).
-  **Render** captures the current view to a 1920×1080 PNG at 300 DPI
-  (`walkthrough_render.render_stop`) at
-  `<shared>/<project-hash>/walkthrough_renders/clash-view-<timestamp>.png`.
-  Same module the clash-stop renders used.
-  **Architecture:** modeless WPF (`__persistentengine__ = True` keeps
-  the IronPython engine alive after script.py exits — without this,
-  Revit fatal-crashes when invoking `Execute()` on a torn-down handler
-  class with `ExceptionCode=0xe0434352`). All Revit-API calls (view
-  create, camera set, discipline toggle, render) route through one
-  shared `IExternalEventHandler` so they land on Revit's UI thread in
-  a valid API context. WPF click handlers fire on the WPF thread and
-  can't legally call `Transaction.Start()` directly.
-  **Motion loop:** a `DispatcherTimer` ticks every ~33 ms (30 fps).
-  Each tick reads the pressed-keys set + accumulated mouse-look delta,
-  runs `walkthrough_motion.step` + `walkthrough_motion.look` to
-  compute a new camera state, and queues an ExternalEvent to apply
-  it. Mouse capture inside the look pad hides the cursor and recenters
-  it after every move so the user can drag indefinitely without
-  hitting screen edges.
-  **Honest limit:** the dedicated view is currently a minimum-viable
-  config (Realistic + Fine detail + cleared template). Sun, shadows,
-  ambient lighting, gradient background, and category-noise hiding
-  were stripped after they fatal-crashed Revit 2026 on first
-  view-create — they need to be added back one at a time, each with
-  testing, once we have a stable bones. A per-step debug log at
-  `%TEMP%\\dbhms_walkthrough.log` records every config call so the
-  next crash leaves a clear last-call-attempted line. None of this
-  reaches Enscape fidelity (the Revit viewport is Autodesk's own
-  rasterizer; without an external real-time renderer we can't hit
-  PBR / GI / SSR) — the goal is "much better than default Revit on a
-  projector," not photoreal.
-- **Walkthrough Here — Browser → Walkthrough handoff** (Iter 13) — the
-  Browser's **Walkthrough Here** button is now wired. Click a clash row
-  → click the button → the Walkthrough flies to that clash's saved
-  viewpoint. Bridges the two tools: Browser owns clash review, Walkthrough
-  owns spatial navigation.
-  Cross-script handoff is file-based — the Browser writes a small
-  `walkthrough_pending.json` at `<shared>/<project-hash>/` containing
-  the target's camera state; the Walkthrough form reads-and-clears it.
-  This works regardless of whether the Walkthrough form is currently
-  open: the form picks the file up either via its `_open_view`
-  completion path (cold-launch case) OR via a slow polling timer
-  (every ~2s while running) for the case where it was already open.
-  Last-write-wins — if the user clicks Walkthrough Here on multiple
-  clashes in quick succession, the most recent one is where the camera
-  lands.
-  Pure-data persistence layer is `clash_view.walkthrough_handoff`,
-  symmetric with `filter_presets` and `walkthrough_bookmarks`:
-  atomic-rename JSON write, defensive read (corrupt / missing →
-  None), no Revit imports. The Walkthrough form's polling timer is
-  separate from the 30 fps motion tick — it ticks at 0.5 Hz so we're
-  not hitting disk 30×/sec for a feature that triggers maybe a few
-  times per meeting.
-  Pre-condition the Browser enforces: the clash must have a saved
-  viewpoint already. If missing, the button alerts "Click Save
-  Viewpoint first" and refuses to queue. Walkthrough Here has no
-  meaning without a target camera state.
 
 Stubs / mockups still:
 
 - ~~**Reports** — form renders; Export BCF pops "coming soon."~~ (Done — see Wired forms.)
-- ~~**Walkthrough** — launcher renders; Enter Walkthrough pops "coming soon."~~
-  (Done — see Walkthrough entry under Wired forms.)
 - ~~**Clash Browser filter presets** — visual-only mockup buttons.~~ (Done — see
   Filter presets entry under Wired forms below.)
 - **Bulk operations in Browser** (Iter 9): the bulk-action bar appears
@@ -398,12 +317,6 @@ Stubs / mockups still:
   right. Read-only; data comes straight from `clash_dict['history']`,
   formatted via `clash_core.history_format`. Empty state shows a hint
   when a clash has no recorded history yet.
-- ~~**Walkthrough Here** button in Browser — pops "coming soon".~~ (Done
-  in Iter 13 — see Browser → Walkthrough handoff entry under Wired
-  forms.)
-- **Walkthrough Xbox controller (XInput)** — deferred. P/Invoke against
-  `xinput1_4.dll`, DispatcherTimer at 60 Hz; own iteration. WASD +
-  mouselook covers the use case for now.
 - **Clearance clashes** — not started; folders + stubs in place.
 
 ### Identity / merge model (the key new bit)
@@ -444,7 +357,7 @@ pushbuttons in this order (controlled by the `layout:` key in
 | 3 | **Test Library** | Edit the firm-wide library of clash test definitions plus per-project overrides. |
 | 4 | **Reports** | Export filtered clashes as a BCF 2.1 file. |
 | 5 | **Settings** | First-run wizard, shared-folder path, per-project preferences. |
-| 6 | **Walkthrough** | Full-screen 3D, two modes: clash-by-clash navigator (with section box) and free-fly with Xbox controller / mouse + keyboard. |
+| 6 | **3D Viewer** | Web-tech 3D model viewer in a pyRevit window: snapshot glTF export, in-tool category / workset toggles, fly through the model, share in a browser. |
 
 ---
 
@@ -474,9 +387,10 @@ src/extensions/dbHMS Extensions.extension/
             Settings.pushbutton/
                 script.py
                 icon.png
-            Walkthrough.pushbutton/
+            3D Viewer.pushbutton/
                 script.py
                 icon.png
+                web/                         <- web-tech 3D viewer assets
     lib/                                     <- extension-level shared modules
         clash_core/
             __init__.py
@@ -502,16 +416,14 @@ src/extensions/dbHMS Extensions.extension/
             threed_view.py                   <- find or create the navigator view
             viewpoint.py                     <- batch + single viewpoint capture
             snapshot.py                      <- thumbnail PNG export (~800 px)
-            walkthrough_motion.py            <- WASD step + mouse-look math (pure data)
-            walkthrough_bookmarks.py         <- per-project saved camera positions (pure data)
-            walkthrough_handoff.py           <- Browser→Walkthrough fly-here handoff (pure data)
-            walkthrough_view.py              <- create/configure dbHMS Walkthrough view
-            walkthrough_render.py            <- 1920px high-quality render export
         clash_report/
             __init__.py
             bcf.py                           <- BCF 2.1 zip builder
             excel_summary.py                 <- native XLSX builder (no openpyxl dep)
             html.py                          <- self-contained HTML summary (Iter 14)
+        clash_share/                         <- 3D Viewer browser-share packer
+            __init__.py
+            bundle.py                        <- inline engine + model -> 1 standalone .html
         dbhms_ui/                            <- shared friendly popup (Iter 15)
             __init__.py
             dialogs.py                       <- info(message, title=...)
@@ -795,331 +707,6 @@ each instance, not just the link type once.
 
 ---
 
-## Walkthrough mode
-
-Free-fly through the building with WASD + mouse-look, for coordination
-meetings where the team needs to walk the model and inspect equipment.
-Clash review belongs in the Browser; the Walkthrough is intentionally
-**not** a clash-stop tour.
-
-The first build (Iter 12) shipped a guided clash-stop tour and was
-wrong scope — it duplicated Browser functionality without adding the
-free-fly capability the team actually needs. The current build is the
-free-fly redesign.
-
-### Architecture (modeless)
-
-This is the only modeless WPF window in the extension. The Browser,
-Reports, Settings, etc. are all modal (`ShowDialog`); the Walkthrough
-must be modeless because Revit's viewport keeps redrawing while the
-camera updates each frame, and a modal window would block Revit's UI
-thread.
-
-Modeless requires three load-bearing pieces:
-
-1. **`__persistentengine__ = True`** at the top of script.py. Without
-   this, pyRevit tears down the IronPython engine when script.py
-   exits, the `_WalkthroughHandler` class definition disappears, and
-   when the user clicks any button Revit fatal-crashes invoking
-   `Execute()` on a now-dead class. Symptom is `ExceptionCode=0xe0434352`
-   in the journal a second or two after the click, with no Python
-   output. This is the single most important line in the script.
-
-2. **Pin the wrapper alive.** A module-level `_ACTIVE_WINDOW = win`
-   prevents Python GC from collecting the WPF wrapper (and its event
-   handlers) after `Show()` returns. WPF keeps the underlying Window
-   alive on its own; the pin is for the Python side.
-
-3. **Marshal Revit-API calls onto the API thread.** WPF click handlers
-   and DispatcherTimer ticks fire on the WPF UI thread, which is NOT
-   a valid Revit API context. One shared `IExternalEventHandler`
-   (`_WalkthroughHandler`) services every Revit-touching action;
-   handlers set `pending_action` + `kwargs` on it then call
-   `external_event.Raise()`, and Revit invokes `Execute(app)` on its
-   own thread when free. Completion callbacks marshal back onto the
-   WPF dispatcher (`Dispatcher.BeginInvoke(System.Action(...))`) so
-   any UI updates run on the WPF thread.
-
-### Motion: WASD + mouse-look
-
-Pure-data math lives in `clash_view.walkthrough_motion`:
-
-* `step(camera, keys, speed_fps, dt_seconds, world_up=True)` — given
-  the current camera tuple `(position, forward, up)` + the set of
-  pressed motion keys + speed + elapsed time, returns the new camera.
-  W/S walk along the camera's forward projected onto XY (so pressing
-  W while looking at the floor doesn't drive you into it). A/D strafe
-  along the right vector projected onto XY. Q/E by default move along
-  world +Z/-Z (so "up" always means "toward the sky", not "toward
-  where the camera is looking"); pass `world_up=False` for camera-up
-  vertical. Diagonal motion is normalized so W+D doesn't travel √2×
-  faster than W alone.
-* `look(camera, dx_pixels, dy_pixels, sensitivity)` — applies mouse-
-  drag deltas. Yaw rotates forward around world Z (no roll, horizon
-  stays level). Pitch is around the right vector and clamped to ±88°
-  so the camera can't flip upside down. Up vector is recomputed after
-  pitch so the orientation stays a valid rigid frame.
-* Rotations use Rodrigues' formula, vectors are renormalized after
-  each operation so numerical drift doesn't compound.
-
-Pure-data, fully unit-tested under CPython.
-
-### The motion loop
-
-The form runs a `DispatcherTimer` at ~33 ms (30 fps). Each tick:
-
-1. Detect whether any movement input is active (`has_input` = keys
-   pressed OR a non-zero mouse delta).
-2. **No input:** update the last-tick clock and, if we're currently in
-   the cheap "fast navigation" display style and the camera has been
-   still for longer than `_STOP_DEBOUNCE` (0.3 s), queue an `end_motion`
-   to snap the view back to full quality. Then return.
-3. **Input:** record `_last_input_time`; measure `dt` from the last
-   tick's wall-clock time (so movement is distance-per-second regardless
-   of frame-rate hiccups).
-4. Read `Keyboard.Modifiers` for Shift / Ctrl → multiply base speed by
-   3× / ¼× respectively.
-5. Run `walkthrough_motion.step` with the pressed keys + speed + dt.
-6. Run `walkthrough_motion.look` with the accumulated mouse deltas;
-   reset the deltas to zero.
-7. Update the cached camera state and queue a `set_camera` ExternalEvent,
-   passing `enter_fast=True` on the *first* frame of a movement burst.
-
-The Revit-side `_set_camera` handler opens a transaction, optionally
-drops the view to the fast display style (`enter_fast`), calls
-`SetOrientation(ViewOrientation3D(...))`, commits, then forces one
-`uidoc.RefreshActiveView()`. The transaction commit alone is cheap
-(~1 ms even on a large model).
-
-**The repaint, and the LOD fix (the big lag fix).** A committed
-transaction that changes the active view doesn't reliably repaint it on
-its own while a 30 fps timer is flooding the UI thread — WM_PAINT is the
-lowest-priority Win32 message, so it gets starved and the picture only
-updates when motion stops. So we must force the repaint every frame with
-`uidoc.RefreshActiveView()` — an *immediate, synchronous* repaint on the
-UI thread.
-
-The catch: at full presentation quality (Realistic + Fine) that forced
-repaint measured **~1073 ms per frame** on a large model (the commit was
-~1 ms — the redraw was 99.7% of every frame), profiled via the per-frame
-timings in `walkthrough.log`. Because a pyRevit modeless window shares
-Revit's UI thread, that 1 s repaint froze the keyboard, mouse, and the
-30 fps timer — the "1-2 fps, unusable, controls feel dead" symptom.
-Native orbit stays smooth on the same model because Revit renders a
-*simplified* model while you move and snaps back to full quality when you
-stop. There is no public API for Revit's interactive LOD render, so we
-reproduce the behavior ourselves.
-
-**What we do (LOD / "do what native orbit does"):** while the camera is
-actively moving, the view runs in a cheap display *style* — `Shaded`,
-while keeping `Fine` detail (`walkthrough_view.enter_fast_navigation`).
-Detail stays `Fine` on purpose: this is a clash-detection view, so the
-user must see real pipe/duct wall thickness, which `Coarse`/`Medium`
-collapse to single lines; `Fine` measured no noticeable cost over
-`Medium` on the heavy model, and the display style is where the real
-savings are. Every motion frame is then cheap, so the forced
-`RefreshActiveView` stays well inside
-the frame budget and the controls stay smooth. The moment movement stops
-(debounced 0.3 s), `end_motion` →
-`walkthrough_view.exit_fast_navigation` → `configure_for_first_run`
-restores full presentation quality (firm template, or the Realistic +
-Fine fallback). So the simplified look is visible *only while you're
-actively flying*; the instant you stop, the view goes back to full
-quality.
-
-**Critically, `end_motion` does NOT force a repaint.** Committing the
-display-style change marks the view dirty, and Revit then repaints it at
-full quality on its own next-idle cycle — the same asynchronous,
-non-blocking path native orbit uses when you let go of the mouse. An
-earlier version forced a synchronous `RefreshActiveView()` here; on a
-heavy model that immediate full-quality redraw is ~1 s and runs on the
-shared UI thread, so it locked the user out of moving again until it
-finished ("I stop and can't move for a second while it renders").
-Handing the snap-back repaint to Revit removes that lockout: the
-simplified frame lingers a beat, then Revit sharpens it on its own,
-exactly like native, and the controls never freeze. We force the repaint
-only *during* motion (where it's cheap in the fast style and needed to
-beat WM_PAINT starvation), never on stop.
-
-Two cases for restoring quality:
-
-- **No template (fallback projects, incl. the heavy model that exposed
-  the bug):** the display style is freely settable, so it's a clean
-  `Realistic ↔ Shaded` swap each burst. No template work, no flicker
-  beyond the style change.
-- **Template projects (`dbHMS Walkthrough` applied):** if the template
-  locks the display style, `enter_fast_navigation` detaches the template
-  for the duration of the motion and `configure_for_first_run` re-applies
-  it on stop. That re-attach is a Visibility/Graphics recompute, so there
-  is a brief flicker at the start and end of a movement burst on template
-  projects. Acceptable tradeoff — those projects weren't the laggy ones,
-  and full fidelity is restored the instant you stop.
-
-`Shaded` (display style) + `Fine` (detail level) is the current
-navigate-quality choice. The display style is what's cheapened for speed;
-detail stays `Fine` so pipe/duct thickness is visible for clash review.
-The display style can be dialed lighter (e.g. `Wireframe`) if more
-smoothness is ever needed — that's a one-line change in
-`enter_fast_navigation` — but do not drop the detail level below `Fine`
-without a reason, since that's the geometry a clash review depends on.
-
-**Continuous-fly mode (the `chk_continuous_fly` toggle).** Even with the
-snap-back handed to Revit, on a very heavy model the brief churn each time
-you pause-and-resume can still feel like friction. The "Smooth fly mode
-(stay simplified)" checkbox removes it entirely: while it's on, the form
-sets `self._continuous_fly = True`, which makes the motion loop *skip the
-`end_motion` snap-back* — the view stays in the cheap `Shaded` display
-style (still at `Fine` detail) the whole time you're in the walkthrough. Flying is continuously
-smooth and stopping is instant, because there is never a full-quality
-re-render to wait for. The tradeoff is that the model always looks
-simplified (Shaded) while the toggle is on. Toggling it ON drops to the
-cheap style immediately (`set_camera` with `enter_fast=True`); toggling it
-OFF restores full quality at once (`end_motion`) and the normal LOD
-behavior resumes. Aimed at heavy models where smoothness beats fidelity;
-off by default so light models keep full-quality stills on stop.
-
-This exists because the underlying platform limit is real: a pyRevit tool
-can only move the camera via `View3D.SetOrientation`, which is a
-transactional document edit that forces a repaint. Revit's own native
-orbit/walk uses a separate interactive navigation engine (no transaction,
-GPU LOD) that is **not exposed to the API**, so a tool-driven camera can
-never be quite as smooth as native at full quality. Continuous-fly mode is
-the closest we get from inside Revit: keep every frame cheap, all the
-time. The genuinely native-smooth alternatives are all outside a pyRevit
-tool — a 3Dconnexion SpaceMouse (drives native nav, stays in the Revit
-viewport, full quality) or a real-time engine like Twinmotion / D5 Render
-(WASD + gamepad, but a separate synced window).
-
-The hot path also uses a cached view reference (no per-frame
-`FilteredElementCollector`) and does no per-frame logging, both of which
-were adding avoidable cost to every frame.
-
-Frame rate target is 30 fps because faster (60 fps tick) queues
-ExternalEvents faster than Revit can drain them on dense MEP models —
-the queue backs up, the camera lags input, and users feel like they're
-fighting the controls. 30 fps + light per-tick work keeps up cleanly.
-
-### Mouse capture inside the look pad
-
-Click into the dark "Look Pad" area on the right of the form:
-1. The look pad calls `CaptureMouse()` so MouseMove events keep flowing
-   even when the cursor leaves the look pad's bounds.
-2. The cursor is hidden (`Mouse.OverrideCursor = getattr(Cursors, 'None')`
-   — `Cursors.None` is a syntax error in Python because `None` is a
-   keyword).
-3. The window grabs keyboard focus so WASD KeyDown fires.
-4. On every MouseMove, the delta from the captured-origin point is
-   accumulated, then the system cursor is recentered to the origin via
-   `System.Windows.Forms.Cursor.Position`. This gives the user
-   unlimited dragging room.
-5. Esc, mouse-up, or LostMouseCapture releases everything cleanly.
-
-The "● ACTIVE" pill in the header turns green while captured so the
-user can see the mode at a glance.
-
-### Visibility — discipline buckets
-
-`walkthrough_view.DISCIPLINE_CATEGORIES` maps each discipline name
-(Mechanical / Electrical / Plumbing / Fire Protection / Architectural /
-Structural) to a list of `BuiltInCategory` name strings. Toggling a
-checkbox calls `set_discipline_visible(doc, view, name, visible)` which
-loops the categories and calls `view.SetCategoryHidden` on each (gated
-by `view.CanCategoryBeHidden`).
-
-Strings instead of direct `BuiltInCategory` references keep the module
-parsing in CPython for the test suite — the enum lookup happens at
-runtime via `getattr(BuiltInCategory, name, None)`. A category that
-doesn't exist in the current Revit version is silently skipped.
-
-The bucket map is editable; if a category needs to move (e.g. cable
-tray feels like Electrical but ends up under Mechanical in some
-firms' templates), it's a one-line fix.
-
-### Bookmarks
-
-`clash_view.walkthrough_bookmarks` is a pure-data persistence layer
-mirroring `clash_core.filter_presets`:
-
-* `make_bookmark(name, position, forward, up, ...)` — builds a fresh
-  bookmark dict with a synthetic `bm-<10char-hex>` id, ISO timestamp,
-  and the camera state.
-* `read_bookmarks(project_hash)` — list of dicts; empty on missing /
-  corrupt file (defensive — same "missing == empty" behavior as
-  filter_presets).
-* `write_bookmarks` / `append_bookmark` / `delete_bookmark` /
-  `rename_bookmark` — atomic-rename writes (write to .tmp, rename
-  onto path) so a crash mid-write can't truncate the JSON.
-
-Path: `<shared>/<project-hash>/walkthrough_bookmarks.json` — per-project
-on the shared root, so the whole team sees the same bookmark set. A
-meeting moderator can prep "RTU-1 east", "Lobby", "Mech room corridor"
-the night before and click through them on the call. Double-click in
-the Bookmarks ListBox jumps the camera; Delete key removes the selected
-one (with a yes/no confirm).
-
-Saved bookmarks are full camera state (position + forward + up); the
-jump action snaps the camera to that pose. v1 doesn't do eased
-interpolation between bookmarks — instant snap is fine for meeting use
-and the tour-style flight code from the previous iteration was deleted
-when the tour itself got removed.
-
-### Render export
-
-`clash_view.walkthrough_render.render_stop` wraps `Document.ExportImage`
-with high-quality settings (`PixelSize = 1920`,
-`ImageResolution.DPI_300`, `ZoomFitType.FitToPage`,
-`ExportRange.SetOfViews` pointed at the Walkthrough view). Output goes
-to `<shared>/<project-hash>/walkthrough_renders/clash-view-<timestamp>.png`.
-
-Timestamped filenames (not keyed by anything else) because the user
-often renders the same view multiple times during a meeting at
-different camera angles — each capture lands as a new file rather than
-overwriting.
-
-ExportImage occasionally appends a suffix to the filename it actually
-writes; `_resolve_actual_path` finds and renames it onto the intended
-path so the caller gets a stable result.
-
-### The dedicated view (and the Revit 2026 view-config crash)
-
-`clash_view.walkthrough_view.get_or_create_walkthrough_view` finds or
-creates a `dbHMS Walkthrough` perspective View3D in a single
-transaction. Falls back to isometric if `View3D.CreatePerspective`
-fails (some Revit 2026 ViewFamilyType configurations reject perspective).
-
-**Currently a minimum-viable config:** clear view template + Realistic
-display style (with ShadingWithEdges fallback) + Fine detail. That's
-it. Sun + shadows + ambient lighting + gradient background + ~20
-noise-category hides were stripped after they native-crashed Revit 2026
-on first view-create. They need to come back one at a time, each
-verified, once we have a stable bones.
-
-A per-step debug log at `%TEMP%\\dbhms_walkthrough.log` records every
-configuration call so the next crash leaves a clear "last call
-attempted" line. `walkthrough_view.log_path()` exposes the path.
-
-Deleting the view from the Project Browser is a clean reset — the
-next Open Walkthrough View re-creates it with these settings.
-
-### What's still deferred
-
-* **Eased bookmark transitions.** v1 snaps; eased flight (the math from
-  the deleted `walkthrough_camera`) could come back as a one-time
-  optional smooth-jump.
-* **XInput / Xbox controller polling.** P/Invoke against
-  `xinput1_4.dll`, `DispatcherTimer` at 60 Hz. The motion math doesn't
-  care about input source, so adding controller support is just an
-  input-binding layer.
-* **Visual fidelity restoration** — sun, shadows, AO, gradient sky,
-  category noise hiding. Each needs a Revit-2026 verification pass
-  with the debug log in hand.
-* **Photoreal rendering.** The Revit viewport is rasterized by
-  Autodesk's engine; without an external real-time renderer (Enscape /
-  Twinmotion / D5) we can't reach Enscape-level fidelity. The 1920px
-  Render export is the slide-deck path.
-
----
-
 ## BCF reports
 
 Targeting **BCF 2.1**, not 3.0. Justification:
@@ -1266,8 +853,6 @@ without restructuring:
 4. **Cross-project rollups** - read every `<project-hash>/clashes.json`
    under the shared root and produce firm-wide stats.
 5. **BCF 3.0** if a consultant asks for it.
-6. **External-renderer integration** for the walkthrough (e.g. Enscape /
-   Twinmotion live link with our clash markers overlaid).
 
 ---
 
