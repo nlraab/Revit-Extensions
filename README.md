@@ -19,7 +19,7 @@ Revit Extensions/
     extensions/
       dbHMS Extensions.extension/
         dbHMS Tools.tab/
-          dbHMS Tools.panel/                <- general productivity tools
+          BIM Tools.panel/                  <- general productivity tools
             AlignViews.pushbutton/
             Revisions Manager.pushbutton/
             Sheet Manager.pushbutton/

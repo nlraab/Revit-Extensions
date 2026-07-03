@@ -12,10 +12,15 @@ Strategy (matches Navisworks behavior):
     canonical order before hashing. Swapping ref_a and ref_b yields the
     same fingerprint.
   - Spatial bucket: round the midpoint to the nearest SPATIAL_BUCKET_FT
-    on each axis. Tiny geometry shifts (re-routing a duct an inch) keep
-    the same fingerprint; moving it 5 ft creates a new clash. This also
-    distinguishes "same pair clashing in two different places" - a long
-    pipe crossing a wall twice produces two separate clashes.
+    (1 ft) on each axis. Shifts within the same 1-ft bucket keep the
+    fingerprint; drifting across a bucket boundary re-keys the clash
+    (surfacing as auto-resolved + new in the same run - the "compound
+    churn" event lib/clash_group's successor adoption exists to heal).
+    This also distinguishes "same pair clashing in two different
+    places" - a long pipe crossing a wall twice produces two separate
+    clashes. DO NOT change this constant on a live project: every
+    existing clash would re-fingerprint and detach from its status,
+    comments, and history (decision D1, CLASH_GROUPING_DESIGN.md).
   - Test ID: clashes from different tests get different fingerprints,
     even if the same pair fires both. Matches how Navisworks reports
     per-test results separately.

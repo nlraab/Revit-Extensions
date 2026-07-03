@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>dbHMS xeokit viewer (Phase 1 spike)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  #bar { background: #2D3748; color: #fff; padding: 8px 14px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  #bar .title { font-size: 15px; font-weight: 600; }
+  #bar .wm { margin-left: auto; font-size: 18px; font-weight: 600; opacity: .9; }
+  #bar .wm .a { color: #00BFFF; } #bar .wm .d { color: #7A8FA6; font-weight: 300; }
+  select, button { font: 13px "Segoe UI", sans-serif; padding: 5px 9px; border-radius: 5px; border: 1px solid #4A5568; }
+  button { background: #2B6CB0; color: #fff; border: 0; cursor: pointer; }
+  button.sec { background: #EDF2F7; color: #2D3748; border: 1px solid #CBD5E0; }
+  #stats { font-size: 12px; color: #CBD5E0; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #c { flex: 1; height: 100%; background: #eef2f6; }
+  #side { width: 300px; flex-shrink: 0; background: #F7FAFC; border-left: 1px solid #E2E8F0; padding: 12px; overflow: auto; font-size: 13px; }
+  #side h3 { margin: 0 0 8px; font-size: 13px; color: #1A202C; }
+  #side .row { margin: 3px 0; color: #2D3748; word-break: break-all; }
+  #side .row b { color: #4A5568; font-weight: 600; }
+  #side .fk { font-family: Consolas, monospace; font-size: 11px; color: #2B6CB0; }
+  #side .tools { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .muted { color: #718096; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <span class="title">dbHMS 3D (xeokit)</span>
+    <select id="models"><option>loading model list...</option></select>
+    <button id="load">Load</button>
+    <span id="stats"></span>
+    <span class="wm"><span class="a">db</span><span class="d"> | </span><span class="a">HMS</span></span>
+  </div>
+  <div id="main">
+    <canvas id="c"></canvas>
+    <div id="side">
+      <h3>Element</h3>
+      <div id="info" class="muted">Click an element to inspect it.</div>
+      <div class="tools" id="tools" style="display:none">
+        <button class="sec" id="isolate">Isolate</button>
+        <button class="sec" id="xray">X-ray others</button>
+        <button class="sec" id="showall">Show all</button>
+        <button class="sec" id="fit">Fit</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module">
+import { Viewer, GLTFLoaderPlugin } from "https://esm.sh/@xeokit/xeokit-sdk@2.6.0";
+
+const $ = (id) => document.getElementById(id);
+const info = $("info"), statsEl = $("stats");
+
+const viewer = new Viewer({ canvasId: "c", transparent: false });
+viewer.scene.camera.eye = [0, 0, 20];
+viewer.scene.camera.perspective.far = 100000;   // large models sit far from origin
+const loader = new GLTFLoaderPlugin(viewer);
+window.viewer = viewer;
+
+let model = null;         // current SceneModel
+let idInfo = {};          // fed_key -> {category,name,level,model}
+let selected = null;      // currently highlighted entity
+const HILITE = [0.15, 0.85, 0.30];
+
+// ---- read glb JSON chunk in-browser to map node.name (fed_key) -> extras ----
+function parseGlbInfo(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a .glb");
+  const jsonLen = dv.getUint32(12, true);
+  const jsonText = new TextDecoder().decode(new Uint8Array(buf, 20, jsonLen));
+  const gltf = JSON.parse(jsonText);
+  const map = {}; let named = 0;
+  (gltf.nodes || []).forEach((n) => {
+    const ex = n.extras || {};
+    const key = n.name || ex.fed_key;
+    if (key) { map[key] = ex; if (n.name) named++; }
+  });
+  return { map, named, total: (gltf.nodes || []).length };
+}
+
+async function fetchModelList() {
+  try {
+    const html = await (await fetch("./?_=" + Date.now())).text();
+    const names = Array.from(html.matchAll(/href="([^"]+\.glb)"/gi)).map((m) => decodeURIComponent(m[1]));
+    const sel = $("models"); sel.innerHTML = "";
+    if (!names.length) { sel.innerHTML = "<option>(no .glb files found)</option>"; return; }
+    names.forEach((n) => { const o = document.createElement("option"); o.value = n; o.textContent = n; sel.appendChild(o); });
+    const want = new URLSearchParams(location.search).get("model");
+    if (want) { const hit = names.find((n) => n.indexOf(want) >= 0); if (hit) sel.value = hit; }
+  } catch (e) { $("models").innerHTML = "<option>(could not list models)</option>"; }
+}
+
+function clearSelection() {
+  if (selected) { try { selected.colorize = null; } catch (e) {} selected = null; }
+}
+
+function showInfo(entity) {
+  const ex = idInfo[entity.id] || {};
+  const has = Object.keys(ex).length > 0;
+  info.innerHTML = has
+    ? `<div class="row"><b>Category</b> ${ex.category || "?"}</div>
+       <div class="row"><b>Name</b> ${ex.name || "?"}</div>
+       <div class="row"><b>Level</b> ${ex.level || "-"}</div>
+       <div class="row"><b>Model</b> ${ex.model || "?"}</div>
+       <div class="row"><b>fed_key</b><br><span class="fk">${entity.id}</span></div>`
+    : `<div class="row muted">This model was exported before ids were added, so no element info. It still renders (good for the performance check).</div>
+       <div class="row"><b>entity id</b><br><span class="fk">${entity.id}</span></div>`;
+  $("tools").style.display = "flex";
+}
+
+function pick(entity) {
+  clearSelection();
+  selected = entity;
+  try { entity.colorize = HILITE; } catch (e) {}
+  showInfo(entity);
+}
+
+viewer.cameraControl.on("picked", (e) => { if (e && e.entity) pick(e.entity); });
+viewer.cameraControl.on("pickedNothing", () => { clearSelection(); info.textContent = "Click an element to inspect it."; $("tools").style.display = "none"; });
+
+function eachObject(fn) { if (model && model.objects) Object.keys(model.objects).forEach((k) => fn(model.objects[k], k)); }
+$("isolate").onclick = () => { if (!selected) return; eachObject((o) => o.visible = (o.id === selected.id)); };
+$("xray").onclick = () => { if (!selected) return; eachObject((o) => o.xrayed = (o.id !== selected.id)); };
+$("showall").onclick = () => { eachObject((o) => { o.visible = true; o.xrayed = false; }); };
+$("fit").onclick = () => { try { viewer.cameraFlight.flyTo(selected || model); } catch (e) {} };
+
+async function loadModel(name) {
+  if (!name || name.indexOf(".glb") < 0) return;
+  if (model) { model.destroy(); model = null; }
+  clearSelection(); idInfo = {}; info.textContent = "loading " + name + " ...";
+  statsEl.textContent = "";
+  const t0 = performance.now();
+  const url = "./" + encodeURIComponent(name) + "?v=" + Date.now();
+  let buf;
+  try { buf = await (await fetch(url)).arrayBuffer(); }
+  catch (e) { info.textContent = "could not fetch " + name; return; }
+  const mb = (buf.byteLength / 1048576).toFixed(1);
+  try { const parsed = parseGlbInfo(buf); idInfo = parsed.map;
+        statsEl.textContent = mb + " MB, parsing " + parsed.total + " nodes (" + parsed.named + " keyed)..."; }
+  catch (e) { info.textContent = "glb parse failed: " + e; return; }
+
+  model = loader.load({ id: "m", src: url });
+  model.on("loaded", () => {
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    const n = (model.entityList && model.entityList.length) || 0;
+    statsEl.textContent = `${mb} MB | ${n.toLocaleString()} elements | loaded in ${secs}s`;
+    info.innerHTML = '<span class="muted">Loaded. Click any element.</span>';
+    try { viewer.cameraFlight.jumpTo(model); } catch (e) {}
+  });
+  model.on("error", (e) => { info.textContent = "load error: " + e; });
+}
+
+window.__dbg = { pick, get model(){ return model; }, get idInfo(){ return idInfo; } };
+$("load").onclick = () => loadModel($("models").value);
+await fetchModelList();
+if (new URLSearchParams(location.search).get("model")) loadModel($("models").value);
+</script>
+</body>
+</html>

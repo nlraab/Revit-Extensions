@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_ROOT = ROOT / "src" / "extensions" / "dbHMS Extensions.extension"
 
-DBHMS_PANEL = EXTENSION_ROOT / "dbHMS Tools.tab" / "dbHMS Tools.panel"
+DBHMS_PANEL = EXTENSION_ROOT / "dbHMS Tools.tab" / "BIM Tools.panel"
 # Clash Detection used to be its own tab; it now lives as a panel
 # inside dbHMS Tools.tab (Iter 16 restructure — single-tab layout).
 CLASH_PANEL = EXTENSION_ROOT / "dbHMS Tools.tab" / "Clash Detection.panel"
@@ -72,6 +72,7 @@ class ExtensionIntegrityTests(unittest.TestCase):
             "Reports.pushbutton",
             "Settings.pushbutton",
             "3D Viewer.pushbutton",
+            "Clash Detection.pushbutton",
         }
         actual = {p.name for p in CLASH_PANEL.glob("*.pushbutton")}
         self.assertTrue(

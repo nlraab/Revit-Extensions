@@ -1,0 +1,12 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Clash Detection"
+        Height="1000" Width="1720"
+        MinHeight="560" MinWidth="900"
+        WindowStartupLocation="CenterScreen"
+        Background="#1A202C"
+        ResizeMode="CanResizeWithGrip">
+    <!-- The entire UI (header, clash grid, 3D pane, inspector) lives in the web
+         page rendered by WebView2. This Border is just the render host. -->
+    <Border x:Name="brd_viewport" Background="#1A202C"/>
+</Window>

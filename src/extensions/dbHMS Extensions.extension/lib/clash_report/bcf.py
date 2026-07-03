@@ -129,6 +129,255 @@ def build_bcf_zip(project_meta, clashes, viewpoints_dir, out_path,
 
 
 # ---------------------------------------------------------------------------
+# Group topics (Layer C: one BCF topic per issue-group, not per clash)
+# ---------------------------------------------------------------------------
+
+def build_group_bcf_zip(project_meta, groups, clashes, viewpoints_dir,
+                        out_path, group_predicate=None, project_name=None):
+    """Write a BCF 2.1 zip with ONE topic per GROUP (the coordination
+    issue), instead of one per raw clash.
+
+    This is the shape a coordinator hands a consultant: a rated corridor
+    wall's 14 sleeve crossings become a single "Penetrations - rated wall"
+    topic, not 14. Each topic's Description carries the member roster
+    (clash seqs + one-line reasons); the snapshot is the group's
+    representative clash view.
+
+    Args:
+        project_meta     - project.json dict (display_name + project_hash).
+        groups           - the clashes.json `groups` list. MergedInto
+                           tombstones are skipped automatically.
+        clashes          - the `clashes` list, used to resolve member
+                           rosters, reasons, and the rep viewpoint.
+        viewpoints_dir   - folder of <clash-id>.png snapshots (may be None).
+        out_path         - destination .bcfzip.
+        group_predicate  - optional callable(group_dict) -> bool. Only
+                           groups returning True export. None = all
+                           non-tombstone groups.
+        project_name     - project.bcfp name; falls back to display_name.
+
+    Returns the count of topics written.
+    """
+    if not out_path:
+        raise ValueError("out_path is required")
+    project_meta = project_meta or {}
+    groups = groups or []
+    by_id = {}
+    for c in (clashes or []):
+        if isinstance(c, dict) and c.get('id'):
+            by_id[c['id']] = c
+
+    export = []
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        # Skip tombstones and dissolved/empty groups: an ungroup leaves a
+        # Resolved record with member_ids=[], which would otherwise export
+        # as a meaningless empty topic in the consultant's file.
+        if g.get('status') == 'MergedInto':
+            continue
+        if not (g.get('member_ids') or []):
+            continue
+        if group_predicate is not None:
+            try:
+                if not group_predicate(g):
+                    continue
+            except Exception:
+                continue
+        export.append(g)
+
+    name = (project_name or project_meta.get('display_name')
+            or "dbHMS Clash Export")
+    project_guid = project_meta.get('project_hash') or _uuid.uuid4().hex
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    fd, tmp_path = tempfile.mkstemp(suffix='.bcfzip.tmp', dir=out_dir or None)
+    os.close(fd)
+
+    written = 0
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('bcf.version', _build_version_xml())
+            zf.writestr('project.bcfp', _build_project_xml(name, project_guid))
+            for g in export:
+                if _write_group_topic_to_zip(zf, g, by_id, viewpoints_dir):
+                    written += 1
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        os.rename(tmp_path, out_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+    return written
+
+
+def _write_group_topic_to_zip(zf, group, clashes_by_id, viewpoints_dir):
+    """Write one group's topic folder into the zip. Returns True/False."""
+    gid = group.get('id')
+    if not gid:
+        return False
+    topic_guid = _ensure_guid(gid)
+    folder = topic_guid + '/'
+
+    members = [clashes_by_id[m] for m in (group.get('member_ids') or [])
+               if m in clashes_by_id]
+
+    # Representative clash: the stored rep, else the highest-score member.
+    rep = clashes_by_id.get(group.get('rep_clash_id'))
+    if rep is None and members:
+        rep = max(members, key=lambda c: (
+            (c.get('importance') or {}).get('score') or 0))
+
+    rep_vp = None
+    if rep is not None:
+        vps = rep.get('viewpoints') or []
+        rep_vp = vps[0] if vps else None
+    viewpoint_guid = _ensure_guid(
+        (rep_vp.get('id') if rep_vp else None) or _uuid.uuid4().hex)
+
+    # A snapshot PNG exists on disk if the rep clash was captured.
+    png_path = None
+    if rep is not None and viewpoints_dir:
+        cand = os.path.join(viewpoints_dir, '{}.png'.format(rep.get('id')))
+        if os.path.isfile(cand):
+            png_path = cand
+
+    markup_xml = _build_group_markup_xml(
+        group, members, topic_guid, viewpoint_guid,
+        has_snapshot=(png_path is not None))
+    zf.writestr(folder + 'markup.bcf', markup_xml)
+
+    if png_path is not None:
+        # BCF references the snapshot from a Viewpoints element, which
+        # needs a .bcfv. Reuse the rep clash's camera when it has one;
+        # otherwise write a minimal VisualizationInfo so receivers that
+        # require the file still find it.
+        if rep_vp is not None:
+            zf.writestr(folder + 'viewpoint.bcfv',
+                        _build_viewpoint_xml(rep_vp, viewpoint_guid))
+        else:
+            zf.writestr(folder + 'viewpoint.bcfv',
+                        _serialize(ET.Element('VisualizationInfo',
+                                              {'Guid': viewpoint_guid})))
+        zf.write(png_path, folder + 'snapshot.png')
+
+    return True
+
+
+def _build_group_markup_xml(group, members, topic_guid, viewpoint_guid,
+                            has_snapshot):
+    root = ET.Element('Markup')
+    topic = ET.SubElement(root, 'Topic', {
+        'Guid': topic_guid,
+        'TopicType': 'Clash',
+        'TopicStatus': _bcf_status(group.get('status')),
+    })
+    _add_text_element(topic, 'Title',
+                      group.get('title') or 'Coordination issue')
+    # BCF 2.1 markup.xsd fixes the Topic child ORDER: Title, Priority?,
+    # Index?, Labels*, CreationDate, ... Emitting Index before Priority
+    # makes a strict validator (Solibri, buildingSMART) reject the topic.
+    rollup = group.get('rollup') or {}
+    prio = _band_priority(rollup.get('band'))
+    if prio:
+        _add_text_element(topic, 'Priority', prio)
+
+    seq = group.get('seq')
+    if seq is not None:
+        _add_text_element(topic, 'Index', str(seq))
+
+    for label in _group_labels(group, rollup):
+        _add_text_element(topic, 'Labels', label)
+
+    created_date, created_author = _earliest_history(group)
+    _add_text_element(topic, 'CreationDate', created_date)
+    _add_text_element(topic, 'CreationAuthor', created_author)
+    modified_date, modified_author = _latest_history(group)
+    if modified_date and modified_date != created_date:
+        _add_text_element(topic, 'ModifiedDate', modified_date)
+        _add_text_element(topic, 'ModifiedAuthor', modified_author)
+
+    assignee = group.get('assignee')
+    if assignee:
+        _add_text_element(topic, 'AssignedTo', assignee)
+
+    description = _build_group_description(group, members, rollup)
+    if description:
+        _add_text_element(topic, 'Description', description)
+
+    for comment_dict in (group.get('comments') or []):
+        _add_comment_element(root, comment_dict,
+                             viewpoint_guid if has_snapshot else None)
+
+    if has_snapshot:
+        viewpoints_el = ET.SubElement(root, 'Viewpoints',
+                                      {'Guid': viewpoint_guid})
+        _add_text_element(viewpoints_el, 'Viewpoint', 'viewpoint.bcfv')
+        _add_text_element(viewpoints_el, 'Snapshot', 'snapshot.png')
+
+    return _serialize(root)
+
+
+def _band_priority(band):
+    """Map an importance band onto a BCF Priority. High/Normal/Low are the
+    values coordination tools accept without a custom extensions.xsd."""
+    return {'Critical': 'High', 'Major': 'Normal', 'Minor': 'Low'}.get(band)
+
+
+def _group_labels(group, rollup):
+    labels = []
+    band = rollup.get('band')
+    if band:
+        labels.append(band)
+    axis = group.get('axis')
+    if axis:
+        labels.append({'cluster': 'Congestion', 'element': 'Element run',
+                       'manual': 'Manual'}.get(axis, axis))
+    return labels
+
+
+def _build_group_description(group, members, rollup):
+    """Roster summary a consultant can act on without our tool: the
+    controlling reason, the open/total counts, then each member clash's
+    seq + one-line reason."""
+    lines = []
+    reason = rollup.get('reason')
+    if reason:
+        lines.append(_safe_str(reason))
+    n_open = rollup.get('n_open')
+    n_total = (rollup.get('n_total')
+               or len(group.get('member_ids') or []) or len(members))
+    if n_open is not None:
+        lines.append(u"{} of {} clash(es) open.".format(n_open, n_total))
+    else:
+        lines.append(u"{} clash(es).".format(n_total))
+    lines.append(u"")
+    lines.append(u"Member clashes:")
+    # Cap the roster so a 155-member rack doesn't produce an unreadable
+    # topic; the count line above already states the true total.
+    shown = 0
+    for c in sorted(members, key=lambda c: -(
+            (c.get('importance') or {}).get('score') or 0)):
+        if shown >= 40:
+            lines.append(u"  ... and {} more".format(len(members) - shown))
+            break
+        imp = c.get('importance') or {}
+        a = (c.get('ref_a') or {}).get('name') or (c.get('ref_a') or {}).get('category') or '?'
+        b = (c.get('ref_b') or {}).get('name') or (c.get('ref_b') or {}).get('category') or '?'
+        lines.append(u"  #{} [{}] {} vs {}{}".format(
+            c.get('seq') or '?', imp.get('band') or '?', a, b,
+            u" - " + _safe_str(imp.get('reason')) if imp.get('reason') else u""))
+        shown += 1
+    return u'\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Per-topic write
 # ---------------------------------------------------------------------------
 

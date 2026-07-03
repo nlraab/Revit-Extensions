@@ -1,0 +1,132 @@
+{
+  "schema": "dbhms.viewrange.meta/1",
+  "units": "meters",
+  "ft_to_m": 0.3048,
+  "offset_ft": [
+    30.0,
+    20.0,
+    18.0
+  ],
+  "model_z_extent_ft": [
+    -15.0,
+    66.0
+  ],
+  "view": {
+    "name": "L2 - Office  Floor Plan",
+    "view_type": "FloorPlan",
+    "is_ceiling_plan": false,
+    "associated_level_id": 102,
+    "associated_level_name": "L2 - Office",
+    "crop_ft": {
+      "min_x": 0.0,
+      "max_x": 60.0,
+      "min_y": 0.0,
+      "max_y": 40.0
+    },
+    "up_dir": [
+      0.0,
+      1.0
+    ]
+  },
+  "levels": [
+    {
+      "id": 101,
+      "name": "L1 - Ground",
+      "elev_ft": 0.0
+    },
+    {
+      "id": 102,
+      "name": "L2 - Office",
+      "elev_ft": 12.0
+    },
+    {
+      "id": 103,
+      "name": "L3 - Office",
+      "elev_ft": 24.0
+    },
+    {
+      "id": 104,
+      "name": "Roof",
+      "elev_ft": 36.0
+    }
+  ],
+  "view_range": {
+    "top": {
+      "level_id": 102,
+      "level_name": "L2 - Office",
+      "offset_ft": 7.5,
+      "abs_ft": 19.5,
+      "sentinel": null
+    },
+    "cut": {
+      "level_id": 102,
+      "level_name": "L2 - Office",
+      "offset_ft": 4.0,
+      "abs_ft": 16.0,
+      "sentinel": null
+    },
+    "bot": {
+      "level_id": 102,
+      "level_name": "L2 - Office",
+      "offset_ft": 0.0,
+      "abs_ft": 12.0,
+      "sentinel": null
+    },
+    "vd": {
+      "level_id": 102,
+      "level_name": "L2 - Office",
+      "offset_ft": 0.0,
+      "abs_ft": 12.0,
+      "sentinel": null
+    }
+  },
+  "sentinels": {
+    "top": {
+      "above": true,
+      "below": false,
+      "unlimited": false
+    },
+    "cut": {
+      "above": false,
+      "below": false,
+      "unlimited": false
+    },
+    "bot": {
+      "above": false,
+      "below": true,
+      "unlimited": false
+    },
+    "vd": {
+      "above": false,
+      "below": true,
+      "unlimited": true
+    }
+  },
+  "sentinel_ids": {
+    "above": -3,
+    "below": -2,
+    "unlimited": -1
+  },
+  "disabled_planes": [],
+  "shell_categories": [
+    "Walls",
+    "Floors",
+    "Roofs",
+    "Columns"
+  ],
+  "hidden_categories": [
+    "Pipes"
+  ],
+  "hidden_worksets": [
+    "Plumbing"
+  ],
+  "host_model": "Sample-MEP.rvt",
+  "template_lock": {
+    "locked": true,
+    "template_name": "MEP - Floor Plan"
+  },
+  "snap": {
+    "enabled": true,
+    "distance_ft": 0.5
+  }
+}

@@ -1,0 +1,1531 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Clash Detection</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; color: #1A202C; background: #F7FAFC; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  #hdr { background: #2D3748; color: #fff; padding: 14px 20px; display: flex; align-items: center; flex-shrink: 0; }
+  #hdr .ttl { font-size: 20px; font-weight: 700; line-height: 1.1; }
+  #hdr .sub { font-size: 12px; color: #CBD5E0; margin-top: 2px; }
+  .chip { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .wm { margin-left: auto; font-family: "Segoe UI", sans-serif; font-size: 32px; font-weight: 700; opacity: .85; line-height: 1; white-space: nowrap; }
+  .wm .a { color: #00BFFF; } .wm .d { color: #7A8FA6; font-weight: 300; }
+  #body { flex: 1; display: flex; min-height: 0; }
+  #nav { width: 132px; flex-shrink: 0; background: #fff; border-right: 1px solid #E2E8F0; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+  .navitem { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; color: #4A5568; cursor: pointer; }
+  .navitem:hover { background: #F7FAFC; }
+  .navitem.on { background: #EBF3FB; color: #185FA5; font-weight: 600; }
+  .navitem svg { width: 18px; height: 18px; flex-shrink: 0; stroke-linecap: round; stroke-linejoin: round; }
+  .lic svg { stroke-linecap: round; stroke-linejoin: round; }
+  #content { flex: 1; min-width: 0; position: relative; }
+  /* visibility (not display) so the 3D canvas keeps its size while other views
+     are active -- lets the inspector capture context snapshots from any tab */
+  .view { position: absolute; inset: 0; display: flex; visibility: hidden; }
+  .view.on { visibility: visible; }
+  button { font: 12px "Segoe UI"; padding: 6px 12px; border-radius: 6px; border: 0; background: #2B6CB0; color: #fff; cursor: pointer; }
+  button.sec { background: #EDF2F7; color: #2D3748; border: 1px solid #CBD5E0; }
+  button:disabled { opacity: .5; cursor: default; }
+  .card { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; }
+  .muted { color: #718096; }
+  h3 { margin: 0 0 8px; font-size: 13px; color: #1A202C; }
+  #view-home { flex-direction: column; overflow: auto; padding: 16px 18px; }
+  .banner { background: #EAF3DE; border: 1px solid #C0DD97; color: #27500A; font-size: 12px; border-radius: 8px; padding: 9px 12px; margin-bottom: 14px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .metric { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px 12px; }
+  .metric .l { font-size: 11px; color: #718096; }
+  .metric .v { font-size: 24px; font-weight: 700; }
+  .metric .d2 { font-size: 10px; color: #A0AEC0; margin-top: 2px; }
+  .home2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #4A5568; margin: 6px 0; }
+  .bar .t { width: 118px; flex-shrink: 0; }
+  .bar .track { flex: 1; height: 9px; background: #F1EFE8; border-radius: 3px; overflow: hidden; }
+  .bar .fill { display: block; height: 9px; background: #2B6CB0; }
+  .launch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .lbtn { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid #CBD5E0; border-radius: 10px; padding: 12px; cursor: pointer; }
+  .lbtn:hover { border-color: #2B6CB0; }
+  .lic { width: 34px; height: 34px; border-radius: 8px; background: #EBF3FB; color: #185FA5; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .lbtn .lt { font-size: 13px; font-weight: 600; } .lbtn .ls { font-size: 11px; color: #718096; }
+  .act { display: flex; justify-content: space-between; font-size: 12px; color: #4A5568; padding: 6px 0; border-bottom: 1px solid #EDF2F7; }
+  #view-clashes { flex-direction: row; }
+  #cl-rail { width: 196px; flex-shrink: 0; border-right: 1px solid #E2E8F0; background: #fff; padding: 12px; overflow: auto; }
+  #cl-rail h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #718096; margin: 14px 0 6px; }
+  #cl-rail h3:first-child { margin-top: 0; }
+  .preset { display: block; width: 100%; text-align: left; background: #F7FAFC; border: 1px solid #E2E8F0; color: #2D3748; border-radius: 7px; padding: 6px 9px; margin-bottom: 4px; font-size: 12px; cursor: pointer; }
+  .preset.on { background: #EBF3FB; border-color: #2B6CB0; color: #185FA5; font-weight: 600; }
+  .fchk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #4A5568; margin: 3px 0; cursor: pointer; }
+  #f-search { width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid #CBD5E0; border-radius: 6px; font: 12px "Segoe UI"; }
+  #f-group { width: 100%; padding: 4px 6px; border: 1px solid #CBD5E0; border-radius: 6px; font: 12px "Segoe UI"; background: #fff; }
+  #cl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #cl-tools { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid #E2E8F0; background: #fff; font-size: 12px; color: #4A5568; }
+  #cl-scroll { flex: 1; overflow: auto; }
+  tr.ghdr td { background: #F1F5F9; font-size: 11px; font-weight: 700; color: #4A5568; text-transform: uppercase; letter-spacing: .4px; padding: 6px 10px; }
+  #ctxbox { width: 100%; border: 1px solid #E2E8F0; border-radius: 8px; background: #eef2f6; margin: 8px 0; overflow: hidden; }
+  #ctxbox img { display: block; width: 100%; }
+  #ctxbox .hint { padding: 18px 10px; text-align: center; font-size: 11px; color: #A0AEC0; }
+  .itemrow { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-bottom: 1px solid #EDF2F7; }
+  .itemrow:last-child { border-bottom: 0; }
+  .sw { width: 10px; height: 10px; border-radius: 3px; margin-top: 3px; flex-shrink: 0; }
+  .cmt { border-bottom: 1px solid #EDF2F7; padding: 6px 0; font-size: 11px; }
+  .cmt .who { color: #4A5568; font-weight: 600; }
+  .cmt .when { color: #A0AEC0; margin-left: 6px; }
+  .icard { background: #fff; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  table.grid { width: 100%; border-collapse: collapse; }
+  table.grid th { position: sticky; top: 0; background: #F7FAFC; text-align: left; font-size: 11px; color: #718096; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid #E2E8F0; }
+  table.grid td { font-size: 12px; padding: 8px 10px; border-bottom: 1px solid #EDF2F7; }
+  table.grid tr { cursor: pointer; }
+  table.grid tr:hover td { background: #F7FAFC; }
+  /* selected must beat hover (declared after) or a click looks like nothing
+     happened until the mouse leaves the row; the accent bar makes the
+     selected row unmistakable even against the hover tint */
+  table.grid tr.sel td, table.grid tr.sel:hover td { background: #EBF8FF; }
+  table.grid tr.sel td:first-child { box-shadow: inset 3px 0 0 #2B6CB0; }
+  #cl-splitter { width: 8px; flex-shrink: 0; cursor: col-resize; background: #E2E8F0; display: flex; align-items: center; justify-content: center; }
+  #cl-splitter::after { content: "\22EE"; color: #718096; font-size: 13px; line-height: 1; }
+  #cl-splitter:hover, #cl-splitter.drag { background: #2B6CB0; }
+  #cl-splitter:hover::after, #cl-splitter.drag::after { color: #fff; }
+  /* rows behave like a list: no text selection on shift/ctrl clicks */
+  #cl-rows { user-select: none; -webkit-user-select: none; }
+  tr.outfilter td { opacity: .5; }
+  /* modern form controls: flat, rounded, custom chevron - still obviously
+     interactive (hover border + focus ring) */
+  select { appearance: none; -webkit-appearance: none; border: 1px solid #CBD5E0; border-radius: 6px;
+           padding: 6px 26px 6px 10px; font: 12.5px "Segoe UI"; background: #fff url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23718096' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 9px center;
+           color: #2D3748; cursor: pointer; }
+  select:hover { border-color: #A0AEC0; }
+  select:focus { outline: none; border-color: #2B6CB0; box-shadow: 0 0 0 2px rgba(43,108,176,.18); }
+  #cl-detail input:not([type=checkbox]) { border: 1px solid #CBD5E0; border-radius: 6px; padding: 6px 10px; font: 12.5px "Segoe UI"; color: #2D3748; }
+  #cl-detail input:not([type=checkbox]):hover { border-color: #A0AEC0; }
+  #cl-detail input:not([type=checkbox]):focus { outline: none; border-color: #2B6CB0; box-shadow: 0 0 0 2px rgba(43,108,176,.18); }
+  #cl-insp { width: 420px; flex-shrink: 0; border-left: 1px solid #E2E8F0; background: #F7FAFC; padding: 14px; overflow: auto; }
+  .kv { font-size: 12px; margin: 4px 0; } .kv b { color: #4A5568; }
+  .brk { display: flex; align-items: center; gap: 8px; font-size: 11px; margin: 5px 0; }
+  .brk .t { width: 92px; color: #4A5568; } .brk .track { flex: 1; height: 7px; background: #E2E8F0; border-radius: 3px; overflow: hidden; }
+  .brk .fill { display: block; height: 7px; background: #2B6CB0; }
+  /* Quiet Ledger row system: color only where it demands action.
+     Groups read as parents by STRUCTURE (chevron column, weight, pill,
+     connectors) - never by row tint (tint reads as a system state). */
+  .railcount { background: #F7FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px 10px; margin-bottom: 4px; font-size: 12px; }
+  .railcount b { font-size: 13.5px; }
+  .railcount a { color: #2B6CB0; text-decoration: none; cursor: pointer; }
+  .railcount .sub { color: #718096; font-size: 11px; margin-top: 2px; }
+  .bandrow { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; margin: 3px 0; border: 1px solid #E2E8F0; border-radius: 5px; cursor: pointer; font-size: 12px; background: #fff; }
+  .bandrow.on { border-color: #2B6CB0; background: #EBF8FF; }
+  .bandrow .n { color: #718096; font-size: 11px; }
+  .stdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 2px; flex-shrink: 0; }
+  .stcell { white-space: nowrap; color: #4A5568; font-size: 12px; }
+  .idcell { color: #718096; font-variant-numeric: tabular-nums; }
+  tr.grow .idcell { color: #2D3748; font-weight: 600; }
+  .chev { color: #718096; cursor: pointer; font-size: 10px; display: inline-block; width: 14px; text-align: center; }
+  .grow { cursor: pointer; }
+  .grow td { padding-top: 10px; padding-bottom: 10px; }
+  .grow .gtitle { font-weight: 600; font-size: 12.5px; }
+  .gpill { background: #EDF2F7; border: 1px solid #E2E8F0; color: #4A5568; border-radius: 9px; padding: 1px 8px; font-size: 11px; margin-left: 8px; white-space: nowrap; font-weight: 400; }
+  .gbadge { font-weight: 600; font-size: 11px; color: #0C447C; margin-left: 8px; }
+  .gbadge.plain { color: #718096; font-weight: 400; }
+  .gdot { color: #D69E2E; margin-left: 6px; font-size: 11px; }
+  .bandtxt { color: #718096; font-size: 12px; white-space: nowrap; }
+  .kindmeta { color: #A0AEC0; }
+  .gmem td { color: #4A5568; }
+  .gmem td:first-child { position: relative; }
+  .gmem .lconn { position: absolute; left: 13px; top: -1px; bottom: 50%; width: 11px; border-left: 1.5px solid #CBD5E0; border-bottom: 1.5px solid #CBD5E0; border-radius: 0 0 0 3px; }
+  .gtools button { margin-right: 6px; }
+  .crumb { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #E2E8F0; border-radius: 6px; padding: 7px 10px; margin-bottom: 10px; font-size: 12px; }
+  .crumb a { color: #2B6CB0; text-decoration: none; font-weight: 600; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb .cnav { margin-left: auto; display: flex; gap: 5px; flex-shrink: 0; }
+  .crumb .cnav button { border: 1px solid #CBD5E0; background: #fff; border-radius: 5px; width: 30px; height: 26px; cursor: pointer;
+                        font-size: 16px; line-height: 1; color: #2B6CB0; font-weight: 700; display: flex; align-items: center; justify-content: center; padding: 0 0 2px 0; }
+  .crumb .cnav button:hover { border-color: #2B6CB0; background: #EBF8FF; }
+  .micro { color: #718096; font-size: 11px; margin: 4px 0 8px; line-height: 1.4; }
+  .mixbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 6px 0 2px; }
+  .progbar { height: 7px; background: #E2E8F0; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .progbar span { display: block; height: 7px; background: #2F855A; }
+  .memrow { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+  .memrow:hover { background: #EBF8FF; }
+  .memrow .bandmini { min-width: 30px; text-align: right; font-weight: 600; font-size: 11px; }
+  .danger { background: #fff; color: #742A2A; border: 1px solid #FC8181; padding: 6px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+  #lightbox { position: fixed; inset: 0; background: rgba(26,32,44,.8); display: none; align-items: center; justify-content: center; z-index: 40; cursor: zoom-out; }
+  #lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 6px; }
+  /* Window resize affordance: WebView2 paints over WPF's native grip
+     (airspace), so the page draws the classic corner dots itself. The
+     window frame already resizes; this is the "you can resize me" cue. */
+  #winGrip { position: fixed; right: 3px; bottom: 3px; width: 14px; height: 14px; pointer-events: none; z-index: 50; opacity: .6;
+    background:
+      radial-gradient(circle at 2.5px 12.5px, #718096 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 12.5px, #718096 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 12.5px, #718096 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 7.5px, #718096 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 7.5px, #718096 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 2.5px, #718096 1.2px, transparent 1.7px); }
+  .agrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #EDF2F7; font-size: 12px; cursor: pointer; }
+  .agrow:last-child { border-bottom: 0; }
+  .agrow .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agrow .muted2 { color: #718096; font-size: 11px; }
+  #view-3d { flex-direction: row; }
+  #td-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #td-tools { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fff; border-bottom: 1px solid #E2E8F0; }
+  #td-status { font-size: 12px; color: #4A5568; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #c { flex: 1; width: 100%; background: #eef2f6; }
+  #td-insp { width: 280px; flex-shrink: 0; border-left: 1px solid #E2E8F0; background: #F7FAFC; padding: 14px; overflow: auto; }
+  .fk { font-family: Consolas, monospace; font-size: 11px; color: #2B6CB0; word-break: break-all; }
+  .placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: #A0AEC0; font-size: 14px; }
+  /* TESTS */
+  #view-tests { flex-direction: column; }
+  #ts-tools { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid #E2E8F0; background: #fff; font-size: 12px; color: #4A5568; }
+  #ts-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+  #ts-scroll { flex: 1; overflow: auto; padding: 14px 18px; }
+  .tcard { display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; }
+  .tcard input { width: 15px; height: 15px; flex-shrink: 0; }
+  .tcard .tn { font-size: 13px; font-weight: 600; }
+  .tcard .td { font-size: 11px; color: #718096; margin-top: 2px; }
+  .tcard .meta { margin-left: auto; text-align: right; flex-shrink: 0; }
+  .tcard .lr { font-size: 10px; color: #A0AEC0; margin-top: 4px; }
+  .kchip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+  .k-hard { background: #FCEBEB; color: #791F1F; } .k-soft { background: #FAEEDA; color: #633806; } .k-clearance { background: #E6F1FB; color: #0C447C; }
+  .schip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; background: #EDF2F7; color: #4A5568; margin-left: 6px; }
+  .s-project { background: #F1E8FA; color: #553C9A; }
+  .runbar { background: #EAF3DE; border: 1px solid #C0DD97; color: #27500A; font-size: 12px; border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; display: none; }
+  .runbar.err { background: #FFF5F5; border-color: #FC8181; color: #742A2A; }
+  /* SETTINGS */
+  #view-settings { flex-direction: column; }
+  #st-scroll { flex: 1; overflow: auto; padding: 16px 18px; max-width: 720px; }
+  .mono { font-family: Consolas, monospace; font-size: 11px; color: #2D3748; word-break: break-all; }
+  .strow { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid #EDF2F7; font-size: 12px; }
+  .strow:last-child { border-bottom: 0; }
+  .strow select { margin-left: auto; padding: 3px 6px; border: 1px solid #CBD5E0; border-radius: 6px; font: 12px "Segoe UI"; background: #fff; }
+  .strow input[type=text] { flex: 1; padding: 5px 8px; border: 1px solid #CBD5E0; border-radius: 6px; font: 12px "Segoe UI"; }
+  .warnbox { background: #FFFBEA; border: 1px solid #D69E2E; color: #744210; font-size: 11px; border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hdr">
+    <div>
+      <div class="ttl">Clash Detection</div>
+      <div class="sub" id="proj">clash coordination</div>
+    </div>
+    <span class="wm"><span class="a">db</span><span class="d"> | </span><span class="a">HMS</span></span>
+  </div>
+  <div id="body">
+    <div id="nav">
+      <div class="navitem on" data-view="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/></svg>Home</div>
+      <div class="navitem" data-view="tests"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M14 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M4 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M14 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/></svg>Test Library</div>
+      <div class="navitem" data-view="clashes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"/><path d="M12 16h.01"/></svg>Clash Browser</div>
+      <div class="navitem" data-view="3d"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4.5l0 9l-8 4.5l-8 -4.5l0 -9l8 -4.5"/><path d="M12 12l8 -4.5"/><path d="M12 12l0 9"/><path d="M12 12l-8 -4.5"/></svg>3D Viewer</div>
+      <div class="navitem" data-view="reports"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h5.697"/><path d="M18 14v4h4"/><path d="M18 11v-4a2 2 0 0 0 -2 -2h-2"/><path d="M8 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/><path d="M18 18m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M8 11h4"/><path d="M8 15h3"/></svg>Reports</div>
+      <div class="navitem" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/></svg>Settings</div>
+    </div>
+    <div id="content">
+      <div class="view on" id="view-home">
+        <div class="banner" id="health-banner">Coordination health. Run a clash test to populate this project.</div>
+        <div class="metrics">
+          <div class="metric" style="border-left:3px solid #2B6CB0"><div class="l">Open</div><div class="v" id="m-open">-</div><div class="d2">need attention</div></div>
+          <div class="metric" style="border-left:3px solid #E53E3E"><div class="l">Critical</div><div class="v" style="color:#A32D2D" id="m-crit">-</div><div class="d2">score &ge; 70</div></div>
+          <div class="metric" style="border-left:3px solid #DD8A0B"><div class="l">Major</div><div class="v" style="color:#854F0B" id="m-maj">-</div><div class="d2">score 40-69</div></div>
+          <div class="metric" style="border-left:3px solid #A0AEC0"><div class="l">Minor</div><div class="v muted" id="m-min">-</div><div class="d2">score &lt; 40</div></div>
+        </div>
+        <div class="home2">
+          <div class="card" style="padding:12px 14px"><h3>Meeting agenda</h3>
+            <div class="muted" style="font-size:11px;margin-bottom:4px">Top open issues (groups roll up their worst member)</div>
+            <div id="agenda"></div>
+          </div>
+          <div class="card" style="padding:12px 14px"><h3>Open by discipline pair</h3><div id="pairbars"></div></div>
+        </div>
+        <h3>Jump to</h3>
+        <div class="launch">
+          <div class="lbtn" data-view="tests"><div class="lic"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M7 4v16l13 -8z"/></svg></div><div><div class="lt">Run a clash test</div><div class="ls">Discipline matrix</div></div></div>
+          <div class="lbtn" data-view="clashes"><div class="lic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5h8"/><path d="M13 9h5"/><path d="M13 15h8"/><path d="M13 19h5"/><path d="M3 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M3 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/></svg></div><div><div class="lt">Open Clash Browser</div><div class="ls" id="l-open">sorted by importance</div></div></div>
+          <div class="lbtn" data-view="3d"><div class="lic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4.5l0 9l-8 4.5l-8 -4.5l0 -9l8 -4.5"/><path d="M12 12l8 -4.5"/><path d="M12 12l0 9"/><path d="M12 12l-8 -4.5"/></svg></div><div><div class="lt">Open 3D Viewer</div><div class="ls">Federated view</div></div></div>
+        </div>
+      </div>
+
+      <div class="view" id="view-clashes">
+        <div id="cl-rail">
+          <div id="f-count" class="railcount"></div>
+          <h3>Presets</h3>
+          <div id="f-presets"></div>
+          <h3>Importance</h3>
+          <div id="f-bands"></div>
+          <h3>Status</h3>
+          <div id="f-status"></div>
+          <h3>Trades</h3>
+          <div id="f-trades"></div>
+          <h3>View by</h3>
+          <select id="f-group">
+            <option value="none">Issues &amp; clashes</option>
+            <option value="pair">Discipline pair</option>
+            <option value="status">Status</option>
+            <option value="owner">Trade</option>
+          </select>
+          <h3>Search</h3>
+          <input id="f-search" placeholder="element, system, #, G#...">
+          <details id="f-adv"><summary class="muted" style="cursor:pointer;font-size:12px;margin-top:10px">Advanced</summary>
+            <div class="fchk" style="margin-top:6px">Score at least
+              <input id="f-minscore" type="number" min="0" max="99" style="width:52px;margin-left:6px" placeholder="0"></div>
+          </details>
+        </div>
+        <div id="cl-main">
+          <div id="cl-tools">
+            <span class="muted" style="font-size:12px">Sorted by importance</span>
+            <span id="cl-banner" class="muted"></span>
+            <span class="gtools" style="margin-left:auto">
+              <button class="sec" id="g-new" disabled title="Pull the selected clashes into a new issue (ctrl/shift-click rows to select several)">New issue from selection</button>
+              <button class="sec" id="g-remove" disabled title="Remove the selected clashes from their issues">Remove from issue</button>
+            </span>
+          </div>
+          <div id="cl-scroll">
+            <table class="grid">
+              <thead><tr><th style="width:24px"></th><th style="width:56px">#</th><th style="width:92px">Importance</th><th style="width:96px">Status</th><th>Description</th><th style="width:118px">Level</th><th style="width:108px">Gap</th><th style="width:96px">Owner</th></tr></thead>
+              <tbody id="cl-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="cl-splitter" title="Drag to resize"></div>
+        <div id="cl-insp">
+          <div id="cl-detail" class="muted">Select a clash or an issue to see details, the importance story, and the context view.</div>
+        </div>
+      </div>
+
+      <div class="view" id="view-3d">
+        <div id="td-main">
+          <div id="td-tools">
+            <button id="loadlast" disabled>Load last export</button>
+            <button class="sec" id="export">Update from Revit</button>
+            <button class="sec" id="showall">Show all</button>
+            <button class="sec" id="fit">Fit</button>
+            <span id="td-status">The model is only needed for viewing (detection runs in Revit). Load the last export, or update it fresh.</span>
+          </div>
+          <canvas id="c"></canvas>
+        </div>
+        <div id="td-insp">
+          <h3>Element</h3>
+          <div id="el-info" class="muted">Click an element in 3D to inspect it.</div>
+          <div id="el-tools" style="display:none; margin-top:12px; gap:6px;">
+            <button class="sec" id="isolate">Isolate</button>
+            <button class="sec" id="xray">X-ray others</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" id="view-tests">
+        <div id="ts-tools">
+          <button class="sec" id="ts-all">All</button>
+          <button class="sec" id="ts-none">None</button>
+          <span class="muted" id="ts-count"></span>
+          <button id="ts-run">Run selected</button>
+          <span id="ts-status"></span>
+        </div>
+        <div id="ts-scroll">
+          <div class="runbar" id="ts-runbar"></div>
+          <div id="ts-cards"></div>
+          <div class="kv muted" id="ts-note" style="margin-top:10px"></div>
+        </div>
+      </div>
+      <div class="view" id="view-reports"><div class="placeholder">Reports (BCF / Excel / HTML) - coming next</div></div>
+      <div class="view" id="view-settings">
+        <div id="st-scroll">
+          <div class="icard">
+            <h3>Clash data folder</h3>
+            <div class="kv muted">This project reads and writes all its clash data in one folder you choose. The folder is remembered inside the Revit model, so everyone who opens the model uses the same folder. Point it at a different folder and you see that folder's data; an empty folder shows nothing.</div>
+            <div class="strow"><span class="muted" style="width:70px">Folder</span><span class="mono" id="st-folder">Not set</span>
+              <button class="sec" id="st-setup" style="margin-left:auto">Set up folder…</button></div>
+            <div class="warnbox" id="st-unlinked" style="display:none">No folder set, so no clash data is shown. Click “Set up folder” and pick this project's clash data folder.</div>
+            <div class="warnbox" id="st-unsaved" style="display:none">The folder is remembered on this machine, but the model hasn't been saved since it was set - <b>save the model</b> so teammates get the folder too.</div>
+          </div>
+          <div class="icard">
+            <h3>Linked model roles</h3>
+            <div class="kv muted">Clash tests only see linked models that are mapped to a role. An unmapped link is skipped, so clashes against its elements are never found.</div>
+            <div id="st-links"></div>
+            <div class="warnbox" id="st-rolewarn" style="display:none">Linked model(s) set to (ignore) are not tested. Re-run your tests after changing a role.</div>
+          </div>
+          <div class="kv muted" id="st-note"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module">
+import { Viewer, GLTFLoaderPlugin } from "./lib/xeokit/xeokit-sdk.es.min.js";
+
+const $ = (id) => document.getElementById(id);
+const HOSTED = !!(window.chrome && window.chrome.webview);
+const toHost = (m) => { try { if (HOSTED) window.chrome.webview.postMessage(m); } catch (e) {} };
+const setStatus = (t) => { $("td-status").textContent = t; };
+
+let currentView = "home";
+function switchView(v) {
+  currentView = v;
+  document.querySelectorAll(".navitem").forEach((n) => n.classList.toggle("on", n.dataset.view === v));
+  document.querySelectorAll(".view").forEach((el) => el.classList.remove("on"));
+  const view = $("view-" + v);
+  if (view) view.classList.add("on");
+  if (v === "3d") setTimeout(() => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} }, 30);
+}
+document.querySelectorAll("[data-view]").forEach((el) => el.addEventListener("click", () => switchView(el.dataset.view)));
+
+const viewer = new Viewer({ canvasId: "c", transparent: false });
+viewer.scene.camera.eye = [0, 0, 20];
+viewer.scene.camera.perspective.far = 200000;
+const loader = new GLTFLoaderPlugin(viewer);
+window.viewer = viewer;
+let model = null, idInfo = {}, selected = null;
+const HILITE = [0.15, 0.85, 0.30];
+
+function parseGlbInfo(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a .glb");
+  const jsonLen = dv.getUint32(12, true);
+  const gltf = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jsonLen)));
+  const map = {};
+  (gltf.nodes || []).forEach((n) => { const ex = n.extras || {}; const k = n.name || ex.fed_key; if (k) map[k] = ex; });
+  return { map, extras: (gltf.asset && gltf.asset.extras) || {}, total: (gltf.nodes || []).length };
+}
+let assetExtras = null;   // offset_ft + ft_to_m from the export, for Revit->viewer coords
+function midToViewer(mid) {
+  // Revit feet Z-up -> viewer meters Y-up, using the export's own transform.
+  if (!mid || !assetExtras || !assetExtras.offset_ft) return null;
+  const o = assetExtras.offset_ft, s = assetExtras.ft_to_m || 0.3048;
+  return [(mid[0] - o[0]) * s, (mid[2] - o[2]) * s, -(mid[1] - o[1]) * s];
+}
+function clashFrameAABB(c, a, b) {
+  // Frame the CLASH NEIGHBORHOOD, not the union of both elements: a 40 ft
+  // pipe clashing a wall at one end would otherwise zoom out to the whole
+  // pipe. A fixed box around the clash point keeps the camera close; when
+  // the elements together are already smaller than that box, frame them.
+  const uni = (a && b) ? unionAABB(a, b) : (a || b).aabb;
+  const mv = midToViewer(c && c.mid);
+  if (!mv) return uni;
+  const PAD = 4 * 0.3048;   // 4 ft half-size neighborhood
+  const uniDiag = Math.hypot(uni[3] - uni[0], uni[4] - uni[1], uni[5] - uni[2]);
+  if (uniDiag <= 2 * PAD * Math.sqrt(3)) return uni;
+  return [mv[0] - PAD, mv[1] - PAD, mv[2] - PAD, mv[0] + PAD, mv[1] + PAD, mv[2] + PAD];
+}
+function eachObject(fn) { if (model && model.objects) Object.keys(model.objects).forEach((k) => fn(model.objects[k])); }
+function clearSel() { if (selected) { try { selected.colorize = null; } catch (e) {} selected = null; } }
+function showElInfo(entity) {
+  const ex = idInfo[entity.id] || {};
+  const has = Object.keys(ex).length > 0;
+  $("el-info").innerHTML = has
+    ? `<div class="kv"><b>Category</b> ${ex.category || "?"}</div><div class="kv"><b>Name</b> ${ex.name || "?"}</div>
+       <div class="kv"><b>Level</b> ${ex.level || "-"}</div><div class="kv"><b>Model</b> ${ex.model || "?"}</div>
+       <div class="kv"><b>id</b><br><span class="fk">${entity.id}</span></div>`
+    : `<div class="kv muted">No element info (older export). Re-export to see details.</div><div class="kv"><span class="fk">${entity.id}</span></div>`;
+  $("el-tools").style.display = "flex";
+}
+function pick(entity) { clearSel(); selected = entity; try { entity.colorize = HILITE; } catch (e) {} showElInfo(entity); }
+viewer.cameraControl.on("picked", (e) => { if (e && e.entity) pick(e.entity); });
+viewer.cameraControl.on("pickedNothing", () => { clearSel(); $("el-info").textContent = "Click an element in 3D to inspect it."; $("el-tools").style.display = "none"; });
+$("isolate").onclick = () => { if (selected) eachObject((o) => o.visible = (o.id === selected.id)); };
+$("xray").onclick = () => { if (selected) eachObject((o) => o.xrayed = (o.id !== selected.id)); };
+$("showall").onclick = () => eachObject((o) => { o.visible = true; o.xrayed = false; o.colorize = null; });
+$("fit").onclick = () => { try { viewer.cameraFlight.flyTo(selected || model); } catch (e) {} };
+
+async function loadFromBuffer(buf, label) {
+  if (model) { model.destroy(); model = null; }
+  clearSel(); idInfo = {};
+  const mb = (buf.byteLength / 1048576).toFixed(1);
+  try { const info = parseGlbInfo(buf); idInfo = info.map; assetExtras = info.extras; } catch (e) { setStatus("glb parse failed: " + e); return; }
+  const t0 = performance.now();
+  model = loader.load({ id: "m", gltf: new Uint8Array(buf) });
+  model.on("loaded", () => {
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    const n = (model.entityList && model.entityList.length) || 0;
+    setStatus(`${label || "model"}: ${mb} MB, ${n.toLocaleString()} elements, loaded in ${secs}s`);
+    $("el-info").innerHTML = '<span class="muted">Loaded. Click any element, or a clash on the Clashes tab.</span>';
+    try { viewer.cameraFlight.jumpTo(model); } catch (e) {}
+    bindSampleClashes();
+    toHost("diag:loaded " + n + " elements in " + secs + "s");
+  });
+  model.on("error", (e) => setStatus("load error: " + e));
+}
+async function loadModelFromUrl(url) { setStatus("Downloading model..."); try { await loadFromBuffer(await (await fetch(url)).arrayBuffer(), url.split("/").pop().split("?")[0]); } catch (e) { setStatus("could not load: " + e); } }
+function b64ToBuf(b64) { const bin = atob(b64), a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a.buffer; }
+function onHostMessage(data) {
+  const s = String(data);
+  if (s.startsWith("url:")) loadModelFromUrl(s.slice(4));
+  else if (s.startsWith("b64:")) { try { loadFromBuffer(b64ToBuf(s.slice(4)), "model"); } catch (e) { setStatus("b64 failed: " + e); } }
+  else if (s.startsWith("status:")) { setStatus(s.slice(7)); $("ts-status").textContent = s.slice(7); }
+  else if (s.startsWith("clashes:")) { try { loadClashes(JSON.parse(s.slice(8))); } catch (e) { setStatus("clashes parse failed: " + e); } }
+  else if (s.startsWith("runinfo:")) { try { applyRunInfo(JSON.parse(s.slice(8))); } catch (e) {} }
+  else if (s.startsWith("groups:")) { try { loadGroups(JSON.parse(s.slice(7))); } catch (e) { setStatus("groups parse failed: " + e); } }
+  else if (s.startsWith("groupdone:")) { try { const r = JSON.parse(s.slice(10)); setStatus(r.ok ? "Group change saved." : ("Group change failed: " + (r.error || "unknown error"))); } catch (e) {} }
+  else if (s.startsWith("tests:")) { try { renderTests(JSON.parse(s.slice(6))); } catch (e) { setStatus("tests parse failed: " + e); } }
+  else if (s.startsWith("rundone:")) { try { onRunDone(JSON.parse(s.slice(8))); } catch (e) { onRunDone({ ok: false, message: "run reply parse failed: " + e }); } }
+  else if (s.startsWith("settings:")) { try { renderSettings(JSON.parse(s.slice(9))); } catch (e) { setStatus("settings parse failed: " + e); } }
+  else if (s.startsWith("model:")) { try { updateModelButtons(JSON.parse(s.slice(6))); } catch (e) {} }
+}
+let modelInfo = null;
+function updateModelButtons(info) {
+  modelInfo = info;
+  const b = $("loadlast");
+  if (info && info.exists) {
+    b.disabled = false;
+    b.textContent = `Load last export (${info.mb} MB · ${info.when})`;
+  } else {
+    b.disabled = true;
+    b.textContent = "Load last export";
+    if (HOSTED) setStatus("No export of this model yet. Click 'Update from Revit' once.");
+  }
+}
+$("loadlast").onclick = () => { if (HOSTED) { setStatus("Loading last export..."); toHost("loadlast"); } };
+if (HOSTED) window.chrome.webview.addEventListener("message", (e) => onHostMessage(e.data));
+$("export").onclick = () => { if (HOSTED) { setStatus("Exporting model from Revit..."); toHost("export"); } else standaloneLoad(); };
+async function standaloneLoad() {
+  try {
+    const html = await (await fetch("./?_=" + Date.now())).text();
+    const names = Array.from(html.matchAll(/href="([^"]+\.glb)"/gi)).map((m) => decodeURIComponent(m[1]));
+    if (!names.length) { setStatus("standalone: no .glb here"); return; }
+    await loadModelFromUrl("./" + encodeURIComponent(names[0]) + "?v=" + Date.now());
+  } catch (e) { setStatus("standalone failed: " + e); }
+}
+
+const SAMPLE = [
+  { id: "s209", seq: 209, score: 98, status: "Open", pair: "Plumbing × Structure", a: "Sanitary 4\"", b: "Concrete beam", level: "L2", owner: "Plumbing", rule: "C1", flags: ["escalate_candidate"],
+    reason: "Gravity SAN 1 vs structure: slope is code-fixed (IPC 704.1), no vertical reroute freedom. May require a structural penetration request.",
+    brk: [{ k: "Mover constraint", v: 15 }, { k: "Size", v: 3 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 6 }] },
+  { seq: 214, score: 94, status: "Open", pair: "HVAC × Structure", a: "Supply duct 30x20", b: "W21 beam", level: "L3", owner: "Mechanical", rule: "C2", id: "s214", gid: "sg-1",
+    reason: "Supply duct 30x20 vs structure: a reroute this large consumes space that is not there; pre-pour / steel-fabrication deadline.",
+    brk: [{ k: "Mover constraint", v: 12 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+  { seq: 231, score: 61, status: "Reviewed", pair: "HVAC × Plumbing", a: "Supply duct 24x20", b: "DCW 4\"", level: "L3", owner: "Plumbing", rule: "M1", id: "s231", gid: "sg-1",
+    reason: "Reroute around a large obstruction: needs a coordinated path, not a nudge.",
+    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+  { id: "s198", seq: 198, score: 61, status: "Open", pair: "Electrical × Structure", a: "Cable tray 24\"", b: "W16 beam", level: "L4", owner: "Electrical", rule: "M2",
+    reason: "Cable tray 24\" must drop or rise around structure; the fix window closes at pour / steel fabrication.",
+    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+  { id: "s244", seq: 244, score: 26, status: "Approved", pair: "HVAC × Architecture", a: "Return duct 16x12", b: "Corridor wall", level: "L2", owner: "Mechanical", rule: "N1", flags: ["penetration_candidate"],
+    reason: "Likely intended penetration through Corridor wall: confirm sleeve / fire damper (IMC 607.4).",
+    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 5 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+  { id: "s187", seq: 187, score: 53, status: "Open", pair: "Electrical × Fire", a: "Conduit 3/4\"", b: "Sprinkler main", level: "L1", owner: "Electrical", rule: "M4",
+    reason: "Congested zone: 27 clashes within 5 ft. Rack-level rework, not a field fix.",
+    brk: [{ k: "Mover constraint", v: 0 }, { k: "Size", v: 3 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 6 }, { k: "Code", v: 0 }] },
+  { id: "s260", seq: 260, score: 13, status: "Open", pair: "Electrical × Electrical", a: "Conduit 3/4\"", b: "Conduit 1\"", level: "L3", owner: "Electrical", rule: "FB", suppressed: true,
+    supReason: "Single small-bore conduits (<= 1 in): field-routed by the installing trade (NBIMS-US V3 5.5.4.8 + Annex A 1.5.1).",
+    reason: "Minor conflict; Conduit 3/4\" reroutes cheaply.",
+    brk: [{ k: "Mover constraint", v: 0 }, { k: "Size", v: 1 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+  { id: "s141", seq: 141, score: 19, status: "Open", pair: "Plumbing × Plumbing", a: "Vent 2\"", b: "Waste 3\"", level: "L1", owner: "Plumbing", rule: "FB", conf: "degraded",
+    reason: "Minor conflict; Vent 2\" reroutes cheaply. (estimated from categories; re-run detection for system/size detail)",
+    brk: [{ k: "Mover constraint", v: 6 }, { k: "Size", v: 1 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+];
+let clashes = [], realData = false, selectedClash = null;
+// Layer C sample: one element-star issue so the standalone page demos the
+// grouped grid, inspector, and agenda card without a host.
+const SAMPLE_GROUPS = [
+  { id: "sg-1", seq: 12, axis: "element", anchor: "Supply duct 30x20",
+    title: "Supply duct 30x20 vs L3 obstructions", titleLocked: false,
+    status: "Open", assignee: "Mechanical", members: ["s214", "s231"], suggested: ["s187"],
+    needsReview: false, created: "2026-06-30T10:00:00Z", comments: [], rep: "s214",
+    rollup: { band: "Critical", score: 94, reason: "Supply duct 30x20 vs structure: a reroute this large consumes space that is not there; pre-pour / steel-fabrication deadline.",
+              level: "L3", n_open: 2, n_resolved: 0, n_suppressed: 0, n_new_run: 1, n_resolved_run: 0, n_reopened_run: 0,
+              drifted: false, congested: false, diameter_ft: 12.0 } },
+];
+
+const STATUS_COLORS = { Open: ["#FCEBEB", "#791F1F"], Reviewed: ["#FAEEDA", "#633806"], Approved: ["#E6F1FB", "#0C447C"], Resolved: ["#EAF3DE", "#27500A"] };
+function band(s) { return s >= 70 ? ["Critical", "#FCEBEB", "#791F1F"] : s >= 40 ? ["Major", "#FAEEDA", "#633806"] : ["Minor", "#F1EFE8", "#444441"]; }
+// Escape model-provided text (element/system names can contain < > " &)
+// before interpolating into innerHTML: 'Duct <Supply>' must not parse as a
+// tag. Safe for attribute values too (quotes escaped).
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+function normalizeRow(r) {
+  return Object.assign({ id: null, thumb: null, mid: null, kind: "hard", catA: "", catB: "", srcA: "host", srcB: "host",
+                         gap: null, contact: null, gapMethod: null, tol: null,
+                         reason: null, brk: null, rule: null, suppressed: false,
+                         supReason: null, conf: null, flags: [], scored: false, gid: null,
+                         first_seen: null, comments: [], fedA: null, fedB: null }, r);
+}
+function fmtDate(iso) { if (!iso) return "-"; try { return new Date(iso).toLocaleDateString(); } catch (e) { return "-"; } }
+function fracInches(v) {
+  // nearest 1/16 inch, reduced (e.g. 0.625 -> 5/8")
+  const six = Math.round(v * 16);
+  if (six <= 0) return '0"';
+  const whole = Math.floor(six / 16); let n = six % 16, d = 16;
+  while (n && n % 2 === 0) { n /= 2; d /= 2; }
+  if (!n) return whole + '"';
+  return (whole ? whole + " " : "") + n + "/" + d + '"';
+}
+function gapCell(c) {
+  // Kind is metadata, not urgency: it rides quietly inside the gap cell
+  // (the old colored HARD chip literally reused the Critical palette).
+  if (c.kind === "clearance") return '<span class="kindmeta">clearance</span>';
+  if (c.kind !== "soft") return "-";
+  if (c.contact) return '<span class="kindmeta">touching</span>';
+  if (c.gap == null) return '<span class="kindmeta">near miss</span>';
+  return `${fracInches(c.gap)}${c.gapMethod === "bbox" ? " (est)" : ""} <span class="kindmeta">&middot; near miss</span>`;
+}
+function softSubtitle(c) {
+  if (c.kind !== "soft") return "";
+  if (c.contact) return '<div class="kv" style="color:#744210">Touching or intersecting (near-miss test).</div>';
+  if (c.gap == null) return "";
+  const needs = c.tol ? `, needs ${c.tol}"` : "";
+  const est = c.gapMethod === "bbox" ? " (estimate)" : "";
+  return `<div class="kv" style="color:#744210">Not touching: ${fracInches(c.gap)} gap${needs}${est}. Near miss, not a collision.</div>`;
+}
+
+// ---- filters: presets + band chips + status/trades + search + advanced ----
+// "Meeting set" is the default and the point: Open+Reviewed, Critical+Major
+// is what a weekly coordination session actually wants on screen.
+const PRESETS = [
+  { id: "meeting",  label: "Meeting set", hint: "Critical + Major, open", statuses: ["Open", "Reviewed"], bands: ["Critical", "Major"] },
+  { id: "active",   label: "Active only", statuses: ["Open", "Reviewed"], bands: null },
+  { id: "newrun",   label: "New this run", statuses: null, bands: null, newest: true },
+  { id: "resolved", label: "Resolved only", statuses: ["Resolved"], bands: null },
+];
+const ALL_STATUSES = ["Open", "Reviewed", "Approved", "Resolved"];
+const ALL_BANDS = ["Critical", "Major", "Minor"];
+const STATUS_DOT = { Open: "#C53030", Reviewed: "#B7791F", Approved: "#2B6CB0", Resolved: "#2F855A" };
+const FILTER = { preset: "meeting", statuses: new Set(["Open", "Reviewed"]), bands: new Set(["Critical", "Major"]),
+                 trades: null, search: "", group: "none", minScore: 0, newest: false, showSuppressed: false };
+
+function applyPreset(pid) {
+  const p = PRESETS.find((x) => x.id === pid); if (!p) return;
+  FILTER.preset = pid;
+  FILTER.statuses = new Set(p.statuses || ALL_STATUSES);
+  FILTER.bands = new Set(p.bands || ALL_BANDS);
+  FILTER.newest = !!p.newest;
+  FILTER.minScore = 0;                       // presets never silently keep a hidden threshold
+  const ms = $("f-minscore"); if (ms) ms.value = "";
+  buildRail(); renderClashes();
+}
+function markCustom() {
+  FILTER.preset = "custom";
+  renderPresets();
+}
+function bandName(c) { return band(c.score)[0]; }
+function renderPresets() {
+  $("f-presets").innerHTML = PRESETS.map((p) =>
+    `<button class="preset ${FILTER.preset === p.id ? "on" : ""}" data-p="${p.id}">${p.label}${p.hint ? ` <span class="muted" style="font-weight:400">${p.hint}</span>` : ""}</button>`).join("")
+    + (FILTER.preset === "custom" ? `<button class="preset on" data-p="custom">Custom <span class="muted" style="font-weight:400">edited below</span></button>` : "");
+  $("f-presets").querySelectorAll("[data-p]").forEach((b) => { if (b.dataset.p !== "custom") b.onclick = () => applyPreset(b.dataset.p); });
+}
+function buildRail() {
+  renderPresets();
+  // band chips render in renderRailCounts (live counts)
+  const trades = Array.from(new Set(clashes.map((c) => c.owner || "(unassigned)"))).sort();
+  $("f-trades").innerHTML = trades.map((t) =>
+    `<label class="fchk"><input type="checkbox" data-tr="${t}" ${!FILTER.trades || FILTER.trades.has(t) ? "checked" : ""}> ${t}</label>`).join("");
+  $("f-trades").querySelectorAll("[data-tr]").forEach((cb) => cb.onchange = () => {
+    const on = Array.from($("f-trades").querySelectorAll("[data-tr]:checked")).map((x) => x.dataset.tr);
+    FILTER.trades = on.length === trades.length ? null : new Set(on);
+    markCustom(); renderClashes();
+  });
+  $("f-status").innerHTML = ALL_STATUSES.map((s) =>
+    `<label class="fchk"><input type="checkbox" data-st="${s}" ${FILTER.statuses.has(s) ? "checked" : ""}> <span class="stdot" style="background:${STATUS_DOT[s]}"></span>${s}</label>`).join("");
+  $("f-status").querySelectorAll("[data-st]").forEach((cb) => cb.onchange = () => {
+    if (cb.checked) FILTER.statuses.add(cb.dataset.st); else FILTER.statuses.delete(cb.dataset.st);
+    markCustom(); renderClashes();
+  });
+  $("f-group").value = FILTER.group;
+  $("f-group").onchange = () => { FILTER.group = $("f-group").value; renderClashes(); };
+  $("f-search").oninput = () => { FILTER.search = $("f-search").value.toLowerCase(); renderClashes(); };
+  const ms = $("f-minscore");
+  if (ms) ms.onchange = () => { FILTER.minScore = parseInt(ms.value, 10) || 0; markCustom(); renderClashes(); };
+}
+function renderRailCounts(shownCount) {
+  // Count block: shown-of-total + suppressed + clear, together with the
+  // filters that cause them.
+  const supN = clashes.filter((c) => c.suppressed).length;
+  // Two links, each with one clear job: the noise toggle (audit what the
+  // engine filtered) and one Reset that puts EVERYTHING back to the
+  // out-of-the-box view (Meeting set, all trades, no search, noise hidden).
+  $("f-count").innerHTML = `<b>Showing ${shownCount.toLocaleString()}</b> <span class="muted">of ${clashes.length.toLocaleString()}</span>
+    <div class="sub">${supN ? `<a id="f-showsup" title="Clashes the engine filtered as modeling noise (self-clashes, fitting seams, tiny conduit pairs). They stay stored and scored - show them to audit.">${FILTER.showSuppressed ? `hide the ${supN} noise rows` : `${supN} hidden as noise - show`}</a> &middot; ` : ""}<a id="f-reset" title="Back to the out-of-the-box view: Meeting set, all trades, no search.">Reset to default</a></div>`;
+  const ss = $("f-showsup");
+  if (ss) ss.onclick = () => { FILTER.showSuppressed = !FILTER.showSuppressed; markCustom(); renderClashes(); };
+  $("f-reset").onclick = () => {
+    FILTER.trades = null; FILTER.search = ""; $("f-search").value = "";
+    FILTER.showSuppressed = false; FILTER.group = "none"; $("f-group").value = "none";
+    applyPreset("meeting");
+  };
+  // Band chips with live counts (facet counts ignore the band filter itself).
+  const counts = { Critical: 0, Major: 0, Minor: 0 };
+  clashes.forEach((c) => {
+    if (c.suppressed && !FILTER.showSuppressed) return;
+    if (!FILTER.statuses.has(c.status)) return;
+    if (FILTER.trades && !FILTER.trades.has(c.owner || "(unassigned)")) return;
+    counts[bandName(c)] += 1;
+  });
+  $("f-bands").innerHTML = ALL_BANDS.map((b) => {
+    const on = FILTER.bands.has(b);
+    const chip = b === "Minor" ? `<span class="bandtxt">Minor</span>`
+      : `<span class="chip" style="background:${b === "Critical" ? "#FCEBEB" : "#FAEEDA"};color:${b === "Critical" ? "#791F1F" : "#633806"}">${b}</span>`;
+    return `<div class="bandrow ${on ? "on" : ""}" data-band="${b}">${chip}<span class="n">${counts[b].toLocaleString()}</span></div>`;
+  }).join("");
+  $("f-bands").querySelectorAll("[data-band]").forEach((el) => el.onclick = () => {
+    const b = el.dataset.band;
+    if (FILTER.bands.has(b)) FILTER.bands.delete(b); else FILTER.bands.add(b);
+    if (!FILTER.bands.size) FILTER.bands = new Set(ALL_BANDS);   // empty = dead end
+    markCustom(); renderClashes();
+  });
+}
+function visibleClashes() {
+  let newest = null;
+  if (FILTER.newest) clashes.forEach((c) => { if (c.first_seen && (!newest || c.first_seen > newest)) newest = c.first_seen; });
+  const bandAll = FILTER.bands.size === ALL_BANDS.length;
+  return clashes.filter((c) => {
+    if (c.suppressed && !FILTER.showSuppressed) return false;
+    if (!FILTER.statuses.has(c.status)) return false;
+    if (!bandAll && !FILTER.bands.has(bandName(c))) return false;
+    if (FILTER.trades && !FILTER.trades.has(c.owner || "(unassigned)")) return false;
+    if (c.score < FILTER.minScore) return false;
+    if (FILTER.newest && newest && c.first_seen !== newest) return false;
+    if (FILTER.search) {
+      const g = c.gid && groupsById[c.gid];
+      const hay = [c.a, c.b, c.pair, c.owner, c.level, String(c.seq),
+                   g ? "g" + g.seq + " " + (g.title || "") : ""].join(" ").toLowerCase();
+      if (hay.indexOf(FILTER.search) < 0) return false;
+    }
+    return true;
+  }).sort((x, y) => y.score - x.score);
+}
+const GROUP_KEY = { pair: (c) => c.pair || "(no pair)", status: (c) => c.status, owner: (c) => c.owner || "(unassigned)" };
+
+// Row color budget: band chip only for Critical/Major (Minor is quiet text
+// unless the user filtered TO Minor alone), status is a dot + label, kind
+// is gray metadata inside the Gap cell. Two colored marks per row, max.
+function bandCell(score, opts) {
+  opts = opts || {};
+  const [bn, bg, fg] = band(score);
+  const supAttr = opts.suppressed ? ` title="${esc(opts.supReason || "Suppressed as noise")}"` : "";
+  const supTag = opts.suppressed ? " · off" : "";
+  const minorOnly = FILTER.bands.size === 1 && FILTER.bands.has("Minor");
+  if (bn === "Minor" && !minorOnly)
+    return `<span class="bandtxt"${supAttr}>${score} Minor${supTag}</span>`;
+  return `<span class="chip" style="background:${bg};color:${fg}"${supAttr}>${score} ${bn}${supTag}</span>`;
+}
+function statusCell(status) {
+  return `<span class="stcell"><span class="stdot" style="background:${STATUS_DOT[status] || "#718096"}"></span> ${status}</span>`;
+}
+function descMeta(c) {
+  const bits = [];
+  if ((c.flags || []).indexOf("penetration_candidate") >= 0) bits.push("sleeve item");
+  if ((c.flags || []).indexOf("mounting_check") >= 0) bits.push("mounting check");
+  if (c.conf === "degraded") bits.push("estimated");
+  return bits.length ? ` <span class="kindmeta">· ${bits.join(" · ")}</span>` : "";
+}
+function clashRowHtml(c, i, member, outFilter) {
+  return `<tr data-i="${i}" class="${member ? "gmem" : ""}${outFilter ? " outfilter" : ""}${c.id && SEL.has(c.id) ? " sel" : ""}"${c.suppressed ? ' style="opacity:.55"' : ""}${outFilter ? ' title="Outside the current filter - shown because its issue is expanded"' : ""}>
+      <td>${member ? '<div class="lconn"></div>' : ""}</td>
+      <td class="idcell">${c.seq == null ? "" : c.seq}</td>
+      <td>${bandCell(c.score, { suppressed: c.suppressed, supReason: c.supReason })}</td>
+      <td>${statusCell(c.status)}</td>
+      <td>${esc(c.a)} <span class="muted">&times;</span> ${esc(c.b)}${descMeta(c)}</td>
+      <td class="muted">${esc(c.level) || "-"}</td>
+      <td class="muted" title="${c.gap != null ? c.gap.toFixed(3) + " in" : ""}">${gapCell(c)}</td>
+      <td>${esc(c.owner)}</td></tr>`;
+}
+function groupRowHtml(g, memberRows) {
+  const r = g.rollup || {};
+  const score = r.score != null ? r.score : 0;
+  const open = r.n_open != null ? r.n_open : memberRows.length;
+  const total = (g.members || []).length;
+  const partial = memberRows.length < Math.min(open, total);
+  const pill = partial
+    ? `${memberRows.length} of ${total} match`
+    : `${total} clash${total === 1 ? "" : "es"} &middot; ${open} open`;
+  const badges =
+    (r.n_new_run ? `<span class="gbadge">+${r.n_new_run} new</span>` : "") +
+    (r.n_resolved_run ? `<span class="gbadge plain">${r.n_resolved_run} resolved</span>` : "") +
+    ((g.suggested || []).length ? `<span class="gbadge">${g.suggested.length} suggested</span>` : "") +
+    (g.needsReview ? `<span class="gdot" title="Membership changed while the issue was beyond Open - review it.">&#9679; review</span>` : "") +
+    (r.drifted ? `<span class="gbadge plain" title="Open members sit in two separate areas - consider a split.">split?</span>` : "");
+  return `<tr class="grow${SEL_GROUP === g.id ? " sel" : ""}" data-g="${g.id}">
+      <td><span class="chev" data-gexp="1">${expandedGroups.has(g.id) ? "&#9660;" : "&#9654;"}</span></td>
+      <td class="idcell">G${g.seq != null ? g.seq : "?"}</td>
+      <td>${bandCell(score, {})}</td>
+      <td>${statusCell(g.status)}</td>
+      <td><span class="gtitle">${esc(g.title) || "(unnamed issue)"}</span><span class="gpill">${pill}</span>${badges}</td>
+      <td class="muted">${esc(r.level) || "-"}</td>
+      <td class="muted">-</td>
+      <td>${esc(g.assignee)}</td></tr>`;
+}
+function renderClashes() {
+  const rows = visibleClashes();
+  const keyFn = GROUP_KEY[FILTER.group];
+  const flat = [];   // index -> clash for row click binding
+  let html = "";
+  if (keyFn) {
+    // Ephemeral view pivot (level/status/trade): the flat header-row lens.
+    // Real Layer C groups render only in the default "None" view.
+    rows.sort((x, y) => { const a = keyFn(x), b = keyFn(y); return a < b ? -1 : a > b ? 1 : 0; });
+    let lastKey = null;
+    rows.forEach((c) => {
+      const k = keyFn(c);
+      if (k !== lastKey) { html += `<tr class="ghdr"><td colspan="8">${esc(k)} (${rows.filter((r) => keyFn(r) === k).length})</td></tr>`; lastKey = k; }
+      html += clashRowHtml(c, flat.length, false); flat.push(c);
+    });
+  } else {
+    // Issue view: group parents (collapsed by default) + ungrouped rows,
+    // interleaved by score with a stable created/seq tie-break.
+    const byGid = {};
+    const singles = [];
+    rows.forEach((c) => {
+      if (c.gid && groupsById[c.gid]) (byGid[c.gid] = byGid[c.gid] || []).push(c);
+      else singles.push(c);
+    });
+    const entries = [];
+    Object.keys(byGid).forEach((gid) => {
+      const g = groupsById[gid];
+      entries.push({ g, rows: byGid[gid], score: (g.rollup && g.rollup.score) || 0, tie: g.seq != null ? g.seq : 1e9 });
+    });
+    singles.forEach((c) => entries.push({ c, score: c.score || 0, tie: 1e9 + (c.seq || 0) }));
+    entries.sort((x, y) => (y.score - x.score) || (x.tie - y.tie));
+    // Filters decide which ISSUES surface; an expanded issue always shows
+    // its FULL roster (members outside the current filter render dimmed) -
+    // hiding an issue's insides while showing the issue reads as a bug.
+    const visIds = new Set(rows.map((c) => c.id));
+    entries.forEach((e) => {
+      if (e.g) {
+        html += groupRowHtml(e.g, e.rows);
+        if (expandedGroups.has(e.g.id)) {
+          // Full roster, importance-sorted like everything else; noise-
+          // suppressed members stay hidden unless the rail toggle is on;
+          // members outside the filter show dimmed.
+          (e.g.members || [])
+            .map((id) => clashById[id])
+            .filter((c) => c && !(c.suppressed && !FILTER.showSuppressed))
+            .sort((x, y) => (y.score - x.score) || ((x.seq || 0) - (y.seq || 0)))
+            .forEach((c) => {
+              html += clashRowHtml(c, flat.length, true, !visIds.has(c.id));
+              flat.push(c);
+            });
+        }
+      } else {
+        html += clashRowHtml(e.c, flat.length, false); flat.push(e.c);
+      }
+    });
+  }
+  $("cl-rows").innerHTML = html || `<tr><td colspan="8" class="muted" style="padding:20px 14px">${esc(clashes.length ? "No clashes match the current filters." : emptyStateMsg())}</td></tr>`;
+  $("cl-rows").querySelectorAll("tr[data-i]").forEach((tr) => {
+    const rc = flat[+tr.dataset.i];
+    tr._clashId = rc && rc.id;
+    tr.addEventListener("click", (ev) => onRowClick(ev, flat, tr));
+  });
+  $("cl-rows").querySelectorAll("tr.grow").forEach((tr) => tr.addEventListener("click", (ev) => {
+    const g = groupsById[tr.dataset.g];
+    if (!g) return;
+    // the chevron toggles; anywhere else selects the issue
+    if (ev.target.dataset && ev.target.dataset.gexp) {
+      if (expandedGroups.has(g.id)) expandedGroups.delete(g.id); else expandedGroups.add(g.id);
+      renderClashes();
+    } else selectGroup(g, tr);
+  }));
+  updateGroupTools();
+  renderRailCounts(rows.length);
+  $("l-open").textContent = clashes.filter((c) => !c.suppressed && (c.status === "Open" || c.status === "Reviewed")).length + " open, sorted by importance";
+  $("cl-banner").textContent = !realData
+    ? "Sample data - run a clash test to see real clashes"
+    : (clashes.length === 0 ? emptyStateMsg()
+       : (clashes.some((c) => c.fedA) ? "Live clashes from this project" : "Live clashes - re-run detection to enable Show in 3D"));
+}
+let groups = [], groupsById = {}, clashById = {};
+// Multi-select (firm-standard click / shift / ctrl) + expanded group rows.
+const SEL = new Set();
+let SEL_GROUP = null;          // selected issue id (row highlight survives re-render)
+let lastClickIdx = null;
+const expandedGroups = new Set();
+
+// ---- keyboard: j/k walk rows, [ ] walk an issue's members, Esc goes up
+// one level (member -> issue -> list). Skipped while typing in an input.
+document.addEventListener("keydown", (ev) => {
+  if (currentView !== "clashes") return;
+  const t = ev.target && ev.target.tagName;
+  if (t === "INPUT" || t === "TEXTAREA" || t === "SELECT") {
+    if (ev.key === "Escape") ev.target.blur();
+    return;
+  }
+  if (ev.key === "Escape") {
+    const lb = $("lightbox");
+    if (lb && lb.style.display === "flex") { lb.style.display = "none"; return; }
+    if (selectedClash && selectedClash.gid && groupsById[selectedClash.gid]) {
+      const g = groupsById[selectedClash.gid];
+      renderClashes(); selectGroup(g, null);
+    } else clearSelection();
+  } else if (ev.key === "j" || ev.key === "k") {
+    const rows = Array.from($("cl-rows").querySelectorAll("tr[data-i], tr.grow"));
+    if (!rows.length) return;
+    let i = rows.findIndex((r) => r.classList.contains("sel"));
+    i = Math.max(0, Math.min(rows.length - 1, i + (ev.key === "j" ? 1 : -1)));
+    rows[i].click();
+    try { rows[i].scrollIntoView({ block: "nearest" }); } catch (e) {}
+  } else if ((ev.key === "[" || ev.key === "]") && selectedClash) {
+    stepMember(selectedClash, ev.key === "]" ? 1 : -1);
+  }
+});
+
+// ---- inspector splitter: drag to resize, width remembered per machine.
+(function () {
+  const sp = $("cl-splitter"), insp = $("cl-insp");
+  if (!sp || !insp) return;
+  try {
+    const saved = parseInt(localStorage.getItem("dbhms-insp-w"), 10);
+    if (saved >= 320 && saved <= 640) insp.style.width = saved + "px";
+  } catch (e) {}
+  let dragging = false;
+  sp.addEventListener("mousedown", (ev) => { dragging = true; sp.classList.add("drag"); ev.preventDefault(); });
+  document.addEventListener("mousemove", (ev) => {
+    if (!dragging) return;
+    const w = Math.max(320, Math.min(640, window.innerWidth - ev.clientX - 4));
+    insp.style.width = w + "px";
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false; sp.classList.remove("drag");
+    try { localStorage.setItem("dbhms-insp-w", parseInt(insp.style.width, 10) || 420); } catch (e) {}
+  });
+})();
+function loadClashes(rows) {
+  if (rows && rows.length) { clashes = rows.map(normalizeRow); realData = true; }
+  else if (HOSTED) {
+    // Inside Revit an empty list is REAL data (no clashes yet, or the project
+    // isn't linked to a folder), NEVER a cue to show the built-in demo. The
+    // grid/home banners are set from the link state in emptyStateMsg().
+    // Clear groups too so a bare clashes:[] can't leave phantom groups in the
+    // Home agenda (not every empty path is followed by a groups:[] message).
+    clashes = []; realData = true; groups = []; groupsById = {};
+    $("proj").textContent = (settings && settings.project && settings.project.display_name) || "clash coordination";
+  }
+  else {
+    clashes = SAMPLE.map(normalizeRow); realData = false;
+    // Falling back to sample rows: the header/banner must not keep a real
+    // project's name and run numbers above fake data.
+    $("proj").textContent = "standalone (browser dev) - sample data";
+    const hb = $("health-banner");
+    if (hb) hb.textContent = "Coordination health. Run a clash test to populate this project.";
+  }
+  clashById = {}; clashes.forEach((c) => { if (c.id) clashById[c.id] = c; });
+  selectedClash = null; SEL.clear();
+  // Reset the inspector: it may still show (and hold closures over) a row
+  // object from the replaced data set.
+  $("cl-detail").textContent = "Select a clash to see its details, importance score, and context view.";
+  // Standalone demo keeps a matching sample group set; live groups arrive
+  // in the host's follow-up groups: message.
+  if (!realData) loadGroups(SAMPLE_GROUPS.map((g) => JSON.parse(JSON.stringify(g))));
+  else loadGroups(groups);
+  buildRail(); renderClashes(); renderHome();
+}
+function loadGroups(rows) {
+  // In sample mode an empty host groups:[] must not wipe the demo groups
+  // that loadClashes just installed.
+  if (!realData && (!rows || !rows.length) && groups.length) { buildRail(); renderClashes(); renderHome(); return; }
+  groups = rows || [];
+  groupsById = {}; groups.forEach((g) => { if (g.id) groupsById[g.id] = g; });
+  // groups arrive right after clashes: refresh everything that shows them
+  buildRail(); renderClashes(); renderHome();
+}
+// ---- inspector navigation: one hierarchy, one way up, always the same
+// spot. List > Issue > Member. Every inspector state starts with a crumb
+// bar whose left link goes UP one level; Esc does the same.
+function clearSelection() {
+  SEL.clear(); SEL_GROUP = null; selectedClash = null;
+  $("cl-rows").querySelectorAll("tr").forEach((r) => r.classList.remove("sel"));
+  $("cl-detail").innerHTML = '<div class="muted">Select a clash or an issue to see details, the importance story, and the context view.</div>';
+  updateGroupTools();
+}
+function crumbHtml(c) {
+  // Only members carry a breadcrumb: the one navigation that matters is
+  // "back to the issue this clash belongs to". Singles and issues need no
+  // bar (clicking any row IS the navigation; Esc still deselects).
+  const g = c && c.gid ? groupsById[c.gid] : null;
+  if (!g) return "";
+  const roster = (g.members || []).filter((id) => clashById[id]);
+  const pos = roster.indexOf(c.id) + 1;
+  return `<div class="crumb">&#8249; <a id="crumb-up" title="${esc(g.title)}">Issue G${g.seq != null ? g.seq : "?"} - ${esc(g.title)}</a>
+    <span class="muted" style="flex-shrink:0">&middot; clash ${pos || "?"} of ${roster.length}</span>
+    <span class="cnav"><button id="crumb-prev" title="Previous clash in this issue ([)">&#8249;</button><button id="crumb-next" title="Next clash in this issue (])">&#8250;</button></span></div>`;
+}
+function bindCrumb(c) {
+  const up = $("crumb-up");
+  if (up) up.onclick = () => {
+    const g = c && c.gid ? groupsById[c.gid] : null;
+    if (g) { expandedGroups.add(g.id); renderClashes(); selectGroup(g, null); }
+    else clearSelection();
+  };
+  const pv = $("crumb-prev"), nx = $("crumb-next");
+  if (pv) pv.onclick = () => stepMember(c, -1);
+  if (nx) nx.onclick = () => stepMember(c, 1);
+}
+function stepMember(c, dir) {
+  const g = c && c.gid ? groupsById[c.gid] : null;
+  if (!g) return;
+  const roster = (g.members || []).filter((id) => clashById[id]);
+  if (!roster.length) return;
+  let i = roster.indexOf(c.id);
+  i = (i + dir + roster.length) % roster.length;
+  const next = clashById[roster[i]];
+  if (next) { SEL.clear(); if (next.id) SEL.add(next.id); selectClash(next, rowFor(next)); }
+}
+function rowFor(c) {
+  let out = null;
+  $("cl-rows").querySelectorAll("tr[data-i]").forEach((row) => {
+    if (row._clashId === c.id) out = row;
+  });
+  return out;
+}
+function kindLine(c) {
+  const kind = c.kind === "soft" ? (c.contact ? "Touching (near-miss test)" : "Near miss")
+    : c.kind === "clearance" ? "Clearance test" : "Hard clash";
+  return `${kind} &middot; found ${fmtDate(c.first_seen)}`;
+}
+function selectClash(c, tr) {
+  $("cl-rows").querySelectorAll("tr").forEach((r) => r.classList.remove("sel"));
+  if (!tr) tr = rowFor(c);
+  if (tr) { tr.classList.add("sel"); try { tr.scrollIntoView({ block: "nearest" }); } catch (e) {} }
+  selectedClash = c;
+  SEL_GROUP = null;
+  const [bn, bg, fg] = band(c.score);
+  // Reason sentence first (that is what gets read aloud in the meeting);
+  // bars only explain ordering WITHIN the band. brk is [{k, v}] from the
+  // scoring engine; sub-terms cap at 15, so width scales at v*6.
+  const kvBars = (c.brk && c.brk.length && typeof c.brk[0] === "object" && c.brk[0] !== null)
+    ? c.brk.map((f) => `<div class="brk"><span class="t">${esc(f.k)}</span><span class="track"><span class="fill" style="width:${Math.min(100, (f.v || 0) * 6)}%"></span></span><span class="muted" style="width:16px;text-align:right">${f.v || 0}</span></div>`).join("")
+    : "";
+  const reasonLine = c.reason
+    ? `<div class="kv" style="margin-bottom:6px">${esc(c.reason)}${c.rule ? ` <span class="muted">(rule ${esc(c.rule)})</span>` : ""}</div>`
+    : "";
+  const suppressedNote = c.suppressed
+    ? `<div class="kv" style="background:#FFFBEA;border:1px solid #D69E2E;border-radius:3px;padding:6px;color:#744210;margin-bottom:6px"><b>Suppressed as noise.</b> ${esc(c.supReason)} The record is kept, scored, and re-enters the grid if the rule is ever turned off.</div>`
+    : "";
+  const bars = (reasonLine || kvBars)
+    ? suppressedNote + reasonLine + kvBars
+    : suppressedNote + '<div class="kv muted">Provisional score - re-run detection to compute the real importance.</div>';
+  const canShow = !!(c.fedA && model);
+  const comments = (c.comments || []).map((m) =>
+    `<div class="cmt"><span class="who">${esc(m.author)}</span><span class="when">${fmtDate(m.at)}</span><div>${esc(m.body)}</div></div>`).join("")
+    || '<div class="kv muted">No comments yet.</div>';
+  $("cl-detail").innerHTML = `
+    ${crumbHtml(c)}
+    <div class="kv" style="font-size:14px"><b>Clash ${c.seq == null ? "" : c.seq}</b>
+      <span class="chip" style="background:${bg};color:${fg}">${c.score} ${bn}</span>
+      ${(c.flags || []).indexOf("escalate_candidate") >= 0 ? ' <span class="chip" style="background:#FFF5F5;color:#742A2A" title="Resolving this may need a structural penetration or opening owned by another consultant - longest lead time, raise it early.">Escalate to consultant?</span>' : ""}${(c.flags || []).indexOf("penetration_candidate") >= 0 ? ' <span class="chip" style="background:#EBF8FF;color:#0C447C" title="Likely an intended wall/floor penetration - belongs on the sleeve schedule pass, not the clash agenda.">Penetration candidate</span>' : ""}${(c.flags || []).indexOf("mounting_check") >= 0 ? ' <span class="chip" style="background:#EAF3DE;color:#27500A" title="A fixture or equipment touching the surface it mounts in/on - by design. Verify the mounting, not the routing.">Mounting check</span>' : ""}${(c.flags || []).indexOf("field_fix") >= 0 ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Small device overlap the installing trade resolves in the field.">Field fix</span>' : ""}${c.conf === "degraded" ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Scored from category fallback - re-run detection to capture system and size detail.">estimated</span>' : ""}</div>
+    <div class="kv muted">${kindLine(c)}</div>
+    ${softSubtitle(c)}
+    <div id="ctxbox" title="Click to enlarge">${canShow
+      ? '<div class="hint">Capturing context view...</div>'
+      : (c.thumb ? `<img src="${c.thumb}">`
+                 : '<div class="hint">Load the model once (3D Viewer tab) to capture a view of this clash. Captured views are kept.</div>')}</div>
+    <div class="icard">
+      <h3>Items</h3>
+      <div class="itemrow"><span class="sw" style="background:#E53E3E"></span><div><b>${esc(c.a)}</b><div class="kv muted">${esc(c.catA) || "?"} · ${esc(c.srcA)}</div></div></div>
+      <div class="itemrow"><span class="sw" style="background:#3182CE"></span><div><b>${esc(c.b)}</b><div class="kv muted">${esc(c.catB) || "?"} · ${esc(c.srcB)}</div></div></div>
+    </div>
+    <div class="icard">
+      <h3>Why it ranks</h3>${bars}
+    </div>
+    <div class="kv"><b>Status</b> ${c.status} &nbsp; <b>Owner</b> ${esc(c.owner) || "-"} &nbsp; <b>Level</b> ${esc(c.level) || "-"}${c.kind === "soft" && c.gap != null ? " &nbsp; <b>Gap</b> " + gapCell(c) : ""}</div>
+    <div class="kv muted">First seen ${fmtDate(c.first_seen)}</div>
+    <div class="icard" style="margin-top:10px">
+      <h3>Comments (${(c.comments || []).length})</h3>${comments}
+    </div>
+    <div style="margin-top:6px"><button id="show3d" ${canShow ? "" : "disabled"}>Show in 3D</button></div>`;
+  bindCrumb(c);
+  const b = $("show3d"); if (b) b.onclick = () => showClashIn3D(c);
+  const cb = $("ctxbox"); if (cb) cb.onclick = () => { const im = cb.querySelector("img"); if (im) openLightbox(im.src); };
+  if (canShow) setTimeout(() => {
+    const shot = captureContext(c);
+    const box = $("ctxbox");
+    if (box) box.innerHTML = shot ? `<img src="${shot}">`
+      : (c.thumb ? `<img src="${c.thumb}">` : '<div class="hint">Context view unavailable for this clash.</div>');
+    if (shot) saveThumb(c, shot);
+  }, 30);
+}
+function openLightbox(src) {
+  let lb = $("lightbox");
+  if (!lb) {
+    lb = document.createElement("div"); lb.id = "lightbox";
+    lb.onclick = () => { lb.style.display = "none"; };
+    document.body.appendChild(lb);
+  }
+  lb.innerHTML = `<img src="${src}">`;
+  lb.style.display = "flex";
+}
+// ---- Layer C: selection, group ops, group inspector ----
+function onRowClick(ev, flat, tr) {
+  const c = flat[+tr.dataset.i];
+  if (!c) return;
+  const idx = +tr.dataset.i;
+  if (ev.ctrlKey || ev.metaKey) {
+    if (c.id) { if (SEL.has(c.id)) SEL.delete(c.id); else SEL.add(c.id); }
+    lastClickIdx = idx;
+    tr.classList.toggle("sel");
+  } else if (ev.shiftKey && lastClickIdx != null) {
+    const lo = Math.min(lastClickIdx, idx), hi = Math.max(lastClickIdx, idx);
+    for (let k = lo; k <= hi; k++) { const r = flat[k]; if (r && r.id) SEL.add(r.id); }
+    $("cl-rows").querySelectorAll("tr[data-i]").forEach((row) => {
+      const rc = flat[+row.dataset.i];
+      row.classList.toggle("sel", !!(rc && rc.id && SEL.has(rc.id)));
+    });
+  } else {
+    SEL.clear(); if (c.id) SEL.add(c.id);
+    lastClickIdx = idx;
+    $("cl-rows").querySelectorAll("tr[data-i]").forEach((row) => row.classList.remove("sel"));
+    selectClash(c, tr);
+    tr.classList.add("sel");
+  }
+  updateGroupTools();
+}
+function updateGroupTools() {
+  const n = SEL.size;
+  const newBtn = $("g-new"), remBtn = $("g-remove");
+  if (!newBtn) return;
+  newBtn.disabled = n === 0;
+  newBtn.textContent = n > 1 ? `New issue from selection (${n})` : "New issue from selection";
+  let grouped = 0;
+  SEL.forEach((id) => { const c = clashById[id]; if (c && c.gid) grouped++; });
+  remBtn.disabled = grouped === 0;
+}
+function groupop(op) {
+  if (HOSTED) { setStatus("Applying group change..."); toHost("groupop:" + JSON.stringify(op)); }
+  else { localGroupop(op); setStatus("Applied locally (sample mode - not saved)."); }
+}
+// Standalone-browser fallback: shallow local semantics so the whole UI is
+// demoable without Revit. The REAL engine is lib/clash_group/ops.py.
+function localGroupop(op) {
+  const g = op.group_id ? groupsById[op.group_id] : null;
+  if (op.op === "rename" && g) { g.title = op.title; g.titleLocked = true; }
+  else if (op.op === "assign" && g) g.assignee = op.assignee || null;
+  else if (op.op === "status" && g) g.status = op.status;
+  else if (op.op === "comment" && g) (g.comments = g.comments || []).push({ author: "you", at: new Date().toISOString(), body: op.body });
+  else if (op.op === "accept_suggestion" && g) {
+    g.suggested = (g.suggested || []).filter((s) => s !== op.clash_id);
+    g.members.push(op.clash_id);
+    const c = clashById[op.clash_id]; if (c) c.gid = g.id;
+  }
+  else if (op.op === "dismiss_suggestion" && g) g.suggested = (g.suggested || []).filter((s) => s !== op.clash_id);
+  else if (op.op === "new_from_selection") {
+    const ng = { id: "local-" + Date.now(), axis: "manual", title: op.title || `Manual group (${op.clash_ids.length})`,
+                 titleLocked: !!op.title, status: "Open", assignee: null, members: op.clash_ids.slice(),
+                 suggested: [], needsReview: false, created: new Date().toISOString(), comments: [], rollup: {} };
+    op.clash_ids.forEach((id) => {
+      const c = clashById[id]; if (!c) return;
+      if (c.gid && groupsById[c.gid]) groupsById[c.gid].members = groupsById[c.gid].members.filter((m) => m !== id);
+      c.gid = ng.id;
+    });
+    ng.rollup = { band: "Major", score: Math.max.apply(null, op.clash_ids.map((id) => (clashById[id] || {}).score || 0)), n_open: op.clash_ids.length };
+    groups.push(ng); groupsById[ng.id] = ng;
+  }
+  else if (op.op === "remove_members" && g) {
+    g.members = g.members.filter((m) => op.clash_ids.indexOf(m) < 0);
+    op.clash_ids.forEach((id) => { const c = clashById[id]; if (c && c.gid === g.id) c.gid = null; });
+  }
+  else if (op.op === "ungroup" && g) {
+    g.members.forEach((id) => { const c = clashById[id]; if (c) c.gid = null; });
+    g.members = []; g.status = "Resolved";
+  }
+  renderClashes(); renderHome();
+}
+$("g-new").onclick = () => {
+  if (!SEL.size) return;
+  groupop({ op: "new_from_selection", clash_ids: Array.from(SEL) });
+  SEL.clear(); updateGroupTools();
+};
+$("g-remove").onclick = () => {
+  const byGid = {};
+  SEL.forEach((id) => { const c = clashById[id]; if (c && c.gid) (byGid[c.gid] = byGid[c.gid] || []).push(id); });
+  Object.keys(byGid).forEach((gid) => groupop({ op: "remove_members", group_id: gid, clash_ids: byGid[gid] }));
+  SEL.clear(); updateGroupTools();
+};
+function whyTogether(g, memberRows) {
+  // The group-level story: WHY these clashes travel as one issue. Built
+  // client-side from what already rides the payload.
+  const r = g.rollup || {};
+  const n = (g.members || []).length;
+  const level = r.level || "several levels";
+  const trades = {};
+  memberRows.forEach((c) => { const t = c.owner || "unassigned"; trades[t] = (trades[t] || 0) + 1; });
+  const tradeN = Object.keys(trades).length;
+  const span = r.diameter_ft ? ` - within a ${Math.round(r.diameter_ft)} ft span` : "";
+  if (g.axis === "cluster")
+    return `${n} clashes packed in one congested zone on ${esc(level)}${span}, ${tradeN} trade${tradeN === 1 ? "" : "s"}. Congestion this dense is rack-level rework, so they travel as one issue.`;
+  if (g.axis === "manual")
+    return `${n} clashes hand-picked into one issue${g.createdBy ? ` by ${esc(g.createdBy)}` : ""} - the tool never edits a manual set.`;
+  const anchor = g.anchor || (g.title || "").split(" vs ")[0] || "one element";
+  return `${n} clashes all involving ${esc(anchor)} - one element causing many hits, so fixing it likely clears the whole set.`;
+}
+function selectGroup(g, tr) {
+  $("cl-rows").querySelectorAll("tr").forEach((r) => r.classList.remove("sel"));
+  if (tr) tr.classList.add("sel");
+  selectedClash = null;
+  SEL_GROUP = g.id;
+  const r = g.rollup || {};
+  const [bn, bg, fg] = band(r.score != null ? r.score : 0);
+  const memberRows = (g.members || []).map((id) => clashById[id]).filter(Boolean);
+  const total = (g.members || []).length;
+  const trades = ["", "Mechanical", "Electrical", "Plumbing", "Fire Protection", "Technology"];
+  const suggested = (g.suggested || []).map((id) => clashById[id]).filter(Boolean);
+  // Composition: band mix + progress, all client-side.
+  const mix = { Critical: 0, Major: 0, Minor: 0 };
+  memberRows.forEach((c) => { mix[bandName(c)] += 1; });
+  const mixTotal = Math.max(1, memberRows.length);
+  const nResolved = r.n_resolved != null ? r.n_resolved : memberRows.filter((c) => c.status === "Resolved").length;
+  const tradeLine = Object.entries(memberRows.reduce((acc, c) => {
+    const t = c.owner || "unassigned"; acc[t] = (acc[t] || 0) + 1; return acc;
+  }, {})).sort((a, b2) => b2[1] - a[1]).map(([t, n]) => `${esc(t)} ${n}`).join(" &middot; ");
+  // Issue image slot: representative clash photo now, true issue photo
+  // when the image rework lands.
+  const rep = g.rep && clashById[g.rep];
+  const repImg = rep && rep.thumb
+    ? `<div id="gr-ctx" title="Click to enlarge"><img src="${rep.thumb}" style="display:block;width:100%"></div><div class="micro" style="margin-top:2px">Representative clash photo - a full issue photo arrives with the image rework.</div>`
+    : `<div id="gr-ctx"><div class="hint" style="padding:26px 10px;text-align:center;font-size:11px;color:#A0AEC0">Issue photo - coming with the image rework.<br>Show issue in 3D works now.</div></div>`;
+  const memberList = memberRows.slice(0, 60).map((c) => {
+    const mbn = bandName(c);
+    const mini = mbn === "Minor" ? `<span class="bandmini bandtxt">${c.score}</span>`
+      : `<span class="bandmini" style="color:${mbn === "Critical" ? "#791F1F" : "#633806"}">${c.score}</span>`;
+    return `<div class="memrow" data-m="${c.id}">${mini}<span class="idcell">${c.seq}</span><span class="t" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.a)} &times; ${esc(c.b)}</span><span class="muted2">${c.status}</span></div>`;
+  }).join("") + (memberRows.length > 60 ? `<div class="kv muted">&hellip; ${memberRows.length - 60} more</div>` : "");
+  const suggList = suggested.map((c) =>
+    `<div class="memrow"><span class="idcell">${c.seq}</span><span class="t" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.a)} &times; ${esc(c.b)}</span>
+       <button class="sec" data-acc="${c.id}" style="padding:2px 8px">Add</button>
+       <button class="sec" data-dis="${c.id}" style="padding:2px 8px">Dismiss</button></div>`).join("");
+  const comments = (g.comments || []).map((m) =>
+    `<div class="cmt"><span class="who">${esc(m.author)}</span><span class="when">${fmtDate(m.at)}</span><div>${esc(m.body)}</div></div>`).join("")
+    || '<div class="kv muted">No comments yet.</div>';
+  const canShow = !!(model && memberRows.some((c) => c.fedA));
+  $("cl-detail").innerHTML = `
+    <div class="kv" style="font-size:14px"><b>Issue G${g.seq != null ? g.seq : "?"}</b>
+      <span class="chip" style="background:${bg};color:${fg}">${r.score != null ? r.score : "-"} ${bn}</span>
+      ${g.needsReview ? '<span class="chip" style="background:#FFFBEA;color:#744210" title="Membership changed while the issue was beyond Open.">needs review</span>' : ""}</div>
+    <div style="display:flex;gap:6px;margin:8px 0">
+      <input id="gr-title" value="${esc(g.title)}" style="flex:1;font-weight:600" placeholder="Issue name">
+      <button class="sec" id="gr-rename" style="padding:4px 10px">Rename</button>
+    </div>
+    <div class="micro">Renaming locks the name - re-runs never overwrite it.</div>
+    ${repImg}
+    <div class="icard">
+      <h3>Composition - why these travel together</h3>
+      <div class="kv">${whyTogether(g, memberRows)}</div>
+      <div class="mixbar">
+        ${mix.Critical ? `<span style="flex:${mix.Critical / mixTotal};background:#C53030"></span>` : ""}
+        ${mix.Major ? `<span style="flex:${mix.Major / mixTotal};background:#D69E2E"></span>` : ""}
+        ${mix.Minor ? `<span style="flex:${mix.Minor / mixTotal};background:#CBD5E0"></span>` : ""}
+      </div>
+      <div class="kv muted">${mix.Critical} Critical &middot; ${mix.Major} Major &middot; ${mix.Minor} Minor &nbsp;|&nbsp; ${tradeLine}</div>
+      <div class="kv muted" style="margin-top:6px">Progress: ${nResolved} of ${total} resolved
+        ${r.n_new_run ? ` &middot; +${r.n_new_run} new this run` : ""}${r.drifted ? ' &middot; <b>open members sit in two areas - consider a split</b>' : ""}</div>
+      <div class="progbar"><span style="width:${Math.round(100 * nResolved / Math.max(1, total))}%"></span></div>
+    </div>
+    <div style="display:flex;gap:8px;margin:8px 0 2px">
+      <div style="flex:1"><div class="kv muted">Issue status</div>
+        <select id="gr-status" style="width:100%">${["Open", "Reviewed", "Approved", "Resolved"].map((s) => `<option ${s === g.status ? "selected" : ""}>${s}</option>`).join("")}</select></div>
+      <div style="flex:1"><div class="kv muted">Assigned to</div>
+        <select id="gr-assign" style="width:100%">${trades.map((t) => `<option value="${t}" ${t === (g.assignee || "") ? "selected" : ""}>${t || "(unassigned)"}</option>`).join("")}</select></div>
+    </div>
+    <div class="micro">Status and assignee apply to the whole issue, like a ticket - member clashes keep their own statuses. Members are re-checked every run; the issue auto-resolves when every member is gone and reopens if one returns.</div>
+    ${suggList ? `<div class="icard"><h3>Suggested additions (${suggested.length})</h3>${suggList}<div class="micro" style="margin:4px 0 0">Found near this issue's clashes on a later run - your call.</div></div>` : ""}
+    <div class="icard"><h3>Members (${total})</h3><div style="max-height:220px;overflow-y:auto">${memberList}</div></div>
+    <div class="icard" style="margin-top:10px"><h3>Comments (${(g.comments || []).length})</h3>${comments}
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <input id="gr-comment" style="flex:1" placeholder="Add a comment...">
+        <button class="sec" id="gr-addc" style="padding:4px 10px">Add</button>
+      </div></div>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+      <button id="gr-show3d" ${canShow ? "" : "disabled"}>Show issue in 3D</button>
+      <button class="danger" id="gr-ungroup">Dissolve issue&hellip;</button>
+    </div>
+    <div class="micro">Dissolving releases the ${total} clash${total === 1 ? "" : "es"} back to the list as singles. No clash is deleted and their statuses are kept.</div>`;
+  $("gr-rename").onclick = () => { const v = $("gr-title").value.trim(); if (v && v !== g.title) groupop({ op: "rename", group_id: g.id, title: v }); };
+  $("gr-status").onchange = () => groupop({ op: "status", group_id: g.id, status: $("gr-status").value });
+  $("gr-assign").onchange = () => groupop({ op: "assign", group_id: g.id, assignee: $("gr-assign").value });
+  $("gr-ungroup").onclick = () => {
+    if (confirm(`Dissolve issue G${g.seq != null ? g.seq : "?"} - "${g.title}"?\n\nIts ${total} member clash${total === 1 ? "" : "es"} return to the list as singles with their statuses kept. Nothing is deleted. The issue record closes and its comments stay in the project history.`))
+      groupop({ op: "ungroup", group_id: g.id });
+  };
+  $("gr-addc").onclick = () => { const v = $("gr-comment").value.trim(); if (v) groupop({ op: "comment", group_id: g.id, body: v }); };
+  $("cl-detail").querySelectorAll("[data-acc]").forEach((b) => b.onclick = () => groupop({ op: "accept_suggestion", group_id: g.id, clash_id: b.dataset.acc }));
+  $("cl-detail").querySelectorAll("[data-dis]").forEach((b) => b.onclick = () => groupop({ op: "dismiss_suggestion", group_id: g.id, clash_id: b.dataset.dis }));
+  $("cl-detail").querySelectorAll("[data-m]").forEach((d) => d.onclick = () => { const c = clashById[d.dataset.m]; if (c) { SEL.clear(); if (c.id) SEL.add(c.id); expandedGroups.add(g.id); renderClashes(); selectClash(c, null); } });
+  const gc = $("gr-ctx"); if (gc) gc.onclick = () => { const im = gc.querySelector("img"); if (im) openLightbox(im.src); };
+  const s3 = $("gr-show3d"); if (s3) s3.onclick = () => showGroupIn3D(g);
+}
+function showGroupIn3D(g) {
+  switchView("3d");
+  if (!model) return;
+  const memberRows = (g.members || []).map((id) => clashById[id]).filter((c) => c && c.fedA);
+  if (!memberRows.length) return;
+  eachObject((o) => { o.visible = false; o.xrayed = false; o.colorize = null; });
+  let aabb = null;
+  memberRows.forEach((c) => {
+    const a = model.objects[c.fedA], b = model.objects[c.fedB];
+    if (a) { a.visible = true; a.colorize = [0.90, 0.20, 0.20]; aabb = aabb ? unionAABB({ aabb }, a) : Array.from(a.aabb); }
+    if (b) { b.visible = true; b.colorize = [0.20, 0.50, 0.95]; aabb = aabb ? unionAABB({ aabb }, b) : Array.from(b.aabb); }
+  });
+  try { if (aabb) viewer.cameraFlight.flyTo({ aabb }); } catch (e) {}
+  setStatus("Showing group (" + memberRows.length + " clash pairs; A red, B blue).");
+}
+function unionAABB(a, b) {
+  const x = a.aabb, y = b.aabb;
+  return [Math.min(x[0], y[0]), Math.min(x[1], y[1]), Math.min(x[2], y[2]), Math.max(x[3], y[3]), Math.max(x[4], y[4]), Math.max(x[5], y[5])];
+}
+function captureContext(c) {
+  // Render the pair isolated + colored into an offscreen snapshot for the
+  // inspector, then restore the user's exact scene state and camera.
+  try {
+    if (!model || !c.fedA) return null;
+    const a = model.objects[c.fedA], b = model.objects[c.fedB];
+    if (!a && !b) return null;
+    const cam = { eye: Array.from(viewer.camera.eye), look: Array.from(viewer.camera.look), up: Array.from(viewer.camera.up) };
+    const state = [];
+    eachObject((o) => state.push([o, o.visible, o.xrayed, o.colorize ? Array.from(o.colorize) : null]));
+    eachObject((o) => { o.visible = false; });
+    if (a) { a.visible = true; a.colorize = [0.90, 0.20, 0.20]; }
+    if (b) { b.visible = true; b.colorize = [0.20, 0.50, 0.95]; }
+    try { viewer.cameraFlight.jumpTo({ aabb: clashFrameAABB(c, a, b) }); } catch (e) {}
+    const shot = viewer.getSnapshot({ format: "png", width: 520, height: 320 });
+    state.forEach(([o, v, x, col]) => { o.visible = v; o.xrayed = x; o.colorize = col; });
+    viewer.camera.eye = cam.eye; viewer.camera.look = cam.look; viewer.camera.up = cam.up;
+    return shot;
+  } catch (e) { return null; }
+}
+function showClashIn3D(c) {
+  switchView("3d");
+  if (!model || !c.fedA) return;
+  const a = model.objects[c.fedA], b = model.objects[c.fedB];
+  eachObject((o) => { o.visible = false; o.xrayed = false; o.colorize = null; });
+  if (a) { a.visible = true; a.colorize = [0.90, 0.20, 0.20]; }
+  if (b) { b.visible = true; b.colorize = [0.20, 0.50, 0.95]; }
+  try { viewer.cameraFlight.flyTo({ aabb: clashFrameAABB(c, a, b) }); } catch (e) {}
+  setStatus("Showing Clash " + c.seq + " (A red, B blue).");
+}
+function saveThumb(c, shot) {
+  // Keep in memory for this session AND persist to the shared folder so the
+  // image shows on every future open, without the model loaded.
+  c.thumb = shot;
+  if (realData && c.id) toHost("snapshot:" + c.id + ":" + shot);
+}
+function captureMissingThumbs() {
+  // After a model load: quietly capture a context view for every real clash
+  // that doesn't have one yet. One click of model-loading buys permanent
+  // images for the whole clash list.
+  if (!realData || !model) return;
+  const todo = clashes.filter((c) => c.fedA && c.id && !c.thumb);
+  if (!todo.length) return;
+  let i = 0;
+  const step = () => {
+    if (!model) return;
+    if (i >= todo.length) { setStatus("Captured " + i + " clash view(s); they are kept for future sessions."); return; }
+    const c = todo[i++];
+    const shot = captureContext(c);
+    if (shot) saveThumb(c, shot);
+    setStatus("Capturing clash views " + i + "/" + todo.length + "...");
+    setTimeout(step, 25);
+  };
+  step();
+}
+function bindSampleClashes() {
+  if (realData) { renderClashes(); captureMissingThumbs(); return; }   // live clashes carry their own fed keys
+  const keys = Object.keys(model.objects || {});
+  if (!keys.length) return;
+  clashes.forEach((c) => { c.fedA = keys[(c.seq * 7) % keys.length]; c.fedB = keys[(c.seq * 13 + 3) % keys.length]; });
+  renderClashes();
+}
+
+function applyRunInfo(info) {
+  // Real project name + since-last-run numbers (replaces the page's old
+  // hardcoded sample banner). Older data files lack last_run_summary;
+  // show what we have without inventing numbers.
+  info = info || {};
+  if (info.project) $("proj").textContent = info.project;
+  const b = $("health-banner");
+  if (!b) return;
+  const s = info.summary;
+  let txt = "Coordination health" + (info.project ? " for " + info.project : "") + ".";
+  if (s) {
+    txt += " Since the last run: " + (s.auto_resolved || 0) + " auto-closed, " +
+           (s.reopened || 0) + " reopened, " + (s["new"] || 0) + " new.";
+  } else if (info.last_run_at) {
+    txt += " Last run " + fmtDate(info.last_run_at) + ".";
+  }
+  b.textContent = txt;
+}
+function renderHome() {
+  // All Home metrics count ACTIVE work only: suppressed rows are noise and
+  // Approved/Resolved records are kept forever, so counting them would make
+  // the health numbers never go down.
+  const active = clashes.filter((c) => !c.suppressed && c.status !== "Approved" && c.status !== "Resolved");
+  $("m-open").textContent = active.length;
+  $("m-crit").textContent = active.filter((c) => c.score >= 70).length;
+  $("m-maj").textContent = active.filter((c) => c.score >= 40 && c.score < 70).length;
+  $("m-min").textContent = active.filter((c) => c.score < 40).length;
+  // Meeting agenda: open groups (rolled up) + ungrouped open clashes,
+  // ranked by band/score with a stable tie-break so the order never
+  // reshuffles between runs.
+  const items = [];
+  groups.forEach((g) => {
+    const r = g.rollup || {};
+    if ((r.n_open == null ? (g.members || []).length : r.n_open) > 0 && g.status !== "Resolved")
+      items.push({ title: g.title || "(unnamed group)", score: r.score || 0,
+                   reason: r.reason || "",
+                   sub: (r.n_open || 0) + " open" + (g.assignee ? " · " + g.assignee : ""),
+                   tie: g.seq != null ? g.seq : 1e9 });
+  });
+  active.forEach((c) => {
+    if (!c.gid || !groupsById[c.gid])
+      items.push({ title: (c.a || "?") + " × " + (c.b || "?"), score: c.score || 0,
+                   reason: c.reason || "",
+                   sub: "#" + c.seq + (c.owner ? " · " + c.owner : ""),
+                   tie: 1e9 + (c.seq || 0) });
+  });
+  items.sort((x, y) => (y.score - x.score) || (x.tie - y.tie));
+  $("agenda").innerHTML = items.slice(0, 12).map((it) => {
+    const [abn, abg, afg] = band(it.score);
+    // The reason line says WHY this item ranks (a "Congested rack (109)"
+    // card is Critical because of the one gravity main inside it).
+    return `<div class="agrow" data-view="clashes"><span class="chip" style="background:${abg};color:${afg}">${it.score} ${abn}</span><span style="flex:1;min-width:0"><span class="t" style="display:block" title="${esc(it.title)}">${esc(it.title)}</span>${it.reason ? `<span class="muted2" style="display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(it.reason)}">${esc(it.reason)}</span>` : ""}</span><span class="muted2">${esc(it.sub)}</span></div>`;
+  }).join("") || '<div class="kv muted">Nothing open. Run a clash test.</div>';
+  $("agenda").querySelectorAll(".agrow").forEach((d) => d.onclick = () => switchView("clashes"));
+  const byPair = {}; active.forEach((c) => byPair[c.pair] = (byPair[c.pair] || 0) + 1);
+  const top = Object.entries(byPair).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const max = Math.max(1, ...top.map((t) => t[1]));
+  $("pairbars").innerHTML = top.map(([p, n]) => `<div class="bar"><span class="t">${p}</span><span class="track"><span class="fill" style="width:${100 * n / max}%"></span></span><span>${n}</span></div>`).join("");
+  // Empty project inside Revit: the health banner explains the link/no-clash
+  // state (applyRunInfo overrides this once there's a real run to report).
+  if (HOSTED && clashes.length === 0) {
+    const hb = $("health-banner"); if (hb) hb.textContent = emptyStateMsg();
+  }
+}
+
+// ---- tests view ----
+let tests = [], running = false;
+const SAMPLE_TESTS = [
+  { id: "default-mep-internal", name: "MEP Internal Coordination", kind: "hard", tolerance: 0, a: "Ducts, Pipes, Conduit +10 more (host)", b: "same set (host)", scope: "firm", last_run: null },
+  { id: "default-mep-vs-arch", name: "MEP vs Architecture", kind: "hard", tolerance: 0, a: "Ducts, Pipes, Conduit +10 more (host)", b: "Walls, Floors, Ceilings +4 more (host + Architectural)", scope: "firm", last_run: null },
+  { id: "default-mep-vs-struct", name: "MEP vs Structure", kind: "hard", tolerance: 0, a: "Ducts, Pipes, Conduit +10 more (host)", b: "StructuralFraming, StructuralColumns +1 more (host + Structural)", scope: "firm", last_run: null },
+  { id: "default-mep-soft-clearance", name: "MEP Soft Clearance", kind: "soft", tolerance: 1.0, a: "Ducts, Pipes, Conduit +10 more (host)", b: "Walls, Floors, Ceilings +2 more (host + links)", scope: "firm", last_run: null },
+];
+function fmtWhen(iso) {
+  if (!iso) return "not in latest run";
+  try { return "in latest run - " + new Date(iso).toLocaleString(); } catch (e) { return "in latest run"; }
+}
+function renderTests(rows) {
+  tests = (rows && rows.length) ? rows : [];
+  const cards = $("ts-cards");
+  if (!tests.length) {
+    cards.innerHTML = '<div class="kv muted">No tests found. Open the Test Library button on the panel to review the firm library.</div>';
+    updateTestBar(); return;
+  }
+  cards.innerHTML = tests.map((t, i) => `
+    <div class="tcard">
+      <input type="checkbox" data-t="${i}" checked ${running ? "disabled" : ""}>
+      <div>
+        <div class="tn">${t.name}
+          <span class="kchip k-${t.kind}">${t.kind}</span>${t.tolerance ? `<span class="schip">${t.tolerance}″</span>` : ""}
+          <span class="schip ${t.scope === "project" ? "s-project" : ""}">${t.scope === "project" ? "Project" : "Firm"}</span>
+        </div>
+        <div class="td">${t.a} <b>vs</b> ${t.b}</div>
+      </div>
+      <div class="meta"><div class="lr">${fmtWhen(t.last_run)}</div></div>
+    </div>`).join("");
+  cards.querySelectorAll("input[data-t]").forEach((cb) => cb.addEventListener("change", updateTestBar));
+  updateTestBar();
+}
+function checkedTestIds() {
+  return Array.from(document.querySelectorAll("#ts-cards input[data-t]:checked")).map((cb) => tests[+cb.dataset.t].id);
+}
+function updateTestBar() {
+  const n = checkedTestIds().length;
+  $("ts-count").textContent = tests.length ? (n + " of " + tests.length + " selected") : "";
+  $("ts-run").disabled = running || !n || !HOSTED;
+  $("ts-run").textContent = running ? "Running..." : "Run selected";
+  $("ts-note").textContent = HOSTED ? (running ? "Revit is busy running detection - the window may be unresponsive until it finishes." : "")
+                                    : "Standalone preview: running tests needs Revit.";
+}
+function setChecks(on) { document.querySelectorAll("#ts-cards input[data-t]").forEach((cb) => { cb.checked = on; }); updateTestBar(); }
+$("ts-all").onclick = () => setChecks(true);
+$("ts-none").onclick = () => setChecks(false);
+$("ts-run").onclick = () => {
+  const ids = checkedTestIds();
+  if (!ids.length || running) return;
+  running = true;
+  const bar = $("ts-runbar"); bar.style.display = "none";
+  $("ts-status").textContent = "Starting run...";
+  updateTestBar();
+  document.querySelectorAll("#ts-cards input[data-t]").forEach((cb) => { cb.disabled = true; });
+  toHost("runtests:" + JSON.stringify(ids));
+};
+function onRunDone(r) {
+  running = false;
+  $("ts-status").textContent = "";
+  document.querySelectorAll("#ts-cards input[data-t]").forEach((cb) => { cb.disabled = false; });
+  const bar = $("ts-runbar");
+  bar.className = "runbar" + (r.ok ? "" : " err");
+  bar.textContent = r.message || (r.ok ? "Run complete." : "Run failed.");
+  bar.style.display = "block";
+  updateTestBar();
+}
+
+// ---- settings view ----
+let settings = null;
+// The tool's state drives every empty/placeholder message, so the page never
+// shows demo rows in place of a real (empty) project.
+//   unlinked - no clash-data folder set on this model yet
+//   linked   - a folder is set; whatever data is in it (or none) is real
+//   sample   - browser dev preview (not inside Revit)
+function linkState() {
+  const s = settings || {};
+  if (!HOSTED) return "sample";
+  if (!s.linked) return "unlinked";
+  return "linked";
+}
+function emptyStateMsg() {
+  switch (linkState()) {
+    case "unlinked": return "This project isn't pointed at a clash-data folder yet. Open Settings and click “Set up folder”.";
+    case "linked":   return "No clashes in this folder yet. Open Tests and run a clash test.";
+    default:         return "Sample data - run a clash test to see real clashes.";
+  }
+}
+function showLoading() {
+  // Neutral state shown inside Revit until the host's first real message
+  // arrives -- replaces the old eager sample render.
+  clashes = []; realData = true; groups = []; groupsById = {}; clashById = {};
+  $("cl-rows").innerHTML = '<tr><td colspan="12" class="muted" style="padding:20px 14px">Loading this project…</td></tr>';
+  $("cl-count").textContent = "";
+  $("cl-banner").textContent = "";
+  const hb = $("health-banner"); if (hb) hb.textContent = "Loading this project…";
+}
+function renderSettings(s) {
+  settings = s;
+  const linked = !!s.linked;
+  $("st-folder").textContent = linked ? s.folder : "Not set";
+  $("st-unlinked").style.display = (HOSTED && !linked) ? "block" : "none";
+  $("st-unsaved").style.display = (HOSTED && linked && s.folderInModel === false) ? "block" : "none";
+  $("st-setup").textContent = linked ? "Change folder…" : "Set up folder…";
+  $("st-setup").disabled = !HOSTED;
+  const canRole = HOSTED && linked;
+  const links = s.links || [];
+  $("st-links").innerHTML = links.length ? links.map((l, i) => `
+    <div class="strow"><span>${l.title}</span>
+      <select data-l="${i}" ${canRole ? "" : "disabled"}>
+        ${["Architectural", "Structural", "ignore"].map((r) =>
+          `<option value="${r}" ${l.role === r ? "selected" : ""}>${r === "ignore" ? "(ignore)" : r}</option>`).join("")}
+      </select></div>`).join("")
+    : '<div class="kv muted">No linked models are loaded in this document.</div>';
+  $("st-links").querySelectorAll("select[data-l]").forEach((sel) => sel.onchange = () => {
+    toHost("setrole:" + JSON.stringify({ title: links[+sel.dataset.l].title, role: sel.value }));
+  });
+  $("st-rolewarn").style.display = (linked && links.some((l) => l.role === "ignore")) ? "block" : "none";
+  $("st-note").textContent = HOSTED ? (linked ? "" : "Set a clash data folder to enable link roles, tests, and comments.")
+                                    : "Standalone preview: settings are read-only.";
+  // Now that the state is known, refresh any empty grid/home messaging.
+  if (HOSTED && (!clashes || clashes.length === 0)) { renderClashes(); renderHome(); }
+}
+$("st-setup").onclick = () => { if (HOSTED) { setStatus("Opening folder picker…"); toHost("setfolder"); } };
+
+if (HOSTED) {
+  // Inside Revit: show a neutral loading state and wait for the host's first
+  // message. The built-in SAMPLE demo is ONLY for the browser dev preview
+  // below, so a real (even empty) project never flashes phantom rows.
+  showLoading();
+  toHost("ready");
+} else {
+  loadClashes(null);
+  $("proj").textContent = "standalone (browser dev) - sample data";
+  renderTests(SAMPLE_TESTS);
+  renderSettings({ linked: true, folder: "C:\\Projects\\21112\\Clash Data (sample)",
+                   project: { folder: "C:\\Projects\\21112\\Clash Data", display_name: "Sample Project" },
+                   links: [{ title: "Tool Testing 01", role: "ignore" }] });
+}
+window.__dbg = { switchView, selectClash, selectGroup, showClashIn3D, showGroupIn3D, loadClashes, loadGroups, groupop, localGroupop, applyRunInfo, renderTests, onRunDone, checkedTestIds, applyPreset, visibleClashes, captureContext, clashFrameAABB, midToViewer, renderSettings, updateModelButtons, captureMissingThumbs, saveThumb, FILTER, SEL, expandedGroups, pick, SAMPLE, SAMPLE_GROUPS, SAMPLE_TESTS, get clashes() { return clashes; }, get groups() { return groups; }, get tests() { return tests; }, get running() { return running; }, get settings() { return settings; }, get modelInfo() { return modelInfo; }, get assetExtras() { return assetExtras; }, get realData() { return realData; }, get model() { return model; }, get idInfo() { return idInfo; }, HOSTED };
+</script>
+<div id="winGrip"></div>
+</body>
+</html>

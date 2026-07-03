@@ -96,7 +96,7 @@ class SettingsForm(forms.WPFWindow):
             return
 
         try:
-            ph = project.project_hash_for(doc)
+            ph = project.resolve_key(doc)
         except Exception:
             ph = ''
 

@@ -820,6 +820,12 @@ def _metadata_for_element(el):
     from clash_core.categories import discipline_for_category_id
     src_doc = _safe(lambda: el.Document, None)
     md = {"element_id": eid_int(el.Id)}
+    # Stable Revit handle, unique within its document and preserved across
+    # re-exports. This is the universal key the rebuild joins on
+    # (clash record <-> glTF node <-> Revit element / SwitchBack). For a linked
+    # element this is the id within the LINK's document; disambiguating the same
+    # link placed multiple times needs the link-instance transform too (later).
+    md["unique_id"] = _safe(lambda: el.UniqueId, None)
     md["category"] = _safe(lambda: el.Category.Name, None)
     try:
         cat = el.Category

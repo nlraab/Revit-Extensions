@@ -46,7 +46,7 @@ import System
 from System.Windows import (
     TextWrapping, TextAlignment, Thickness, CornerRadius,
     HorizontalAlignment, VerticalAlignment, FontWeights, Visibility,
-    GridLength, GridUnitType,
+    GridLength, GridUnitType, PresentationSource,
 )
 from System.Windows.Controls import (
     TextBlock, StackPanel, CheckBox, Border, Button, Grid as WpfGrid,
@@ -85,6 +85,13 @@ VHOST      = 'dbhms.viewer'   # virtual hostname mapped to _DATA_ROOT
 # WebView2 assemblies we need from Revit's install directory.
 _WEBVIEW2_WPF  = 'Microsoft.Web.WebView2.Wpf.dll'
 _WEBVIEW2_CORE = 'Microsoft.Web.WebView2.Core.dll'
+
+# Some machines render the WebView2 surface into a small, offset region with
+# black around it (a GPU-compositing bug on certain drivers). Flip this to True
+# to make WebView2 composite in software, which usually clears it. Left off by
+# default so machines that render fine keep full GPU compositing. WebGL still
+# runs on the GPU either way, so the model itself stays hardware-accelerated.
+DISABLE_GPU_COMPOSITING = False
 
 LOG_PATH = os.path.join(_DATA_ROOT, 'viewer.log')
 
@@ -132,11 +139,82 @@ def _revit_dir_with_webview2():
     return None
 
 
+def _revit_version_tag():
+    """Best-effort Revit major version ('2024' / '2025' / '2026'), used to give
+    each Revit its OWN WebView2 user-data folder. WebView2 forbids two processes
+    opening the same user-data folder with different options, so 2024 and 2026
+    running at once must not share one. Falls back to 'x' if undetectable."""
+    try:
+        import re
+        exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName
+        m = re.search(r'Revit\s+(\d{4})', exe or '')
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    try:                                   # pyRevit injects __revit__ at module scope
+        v = getattr(__revit__.Application, 'VersionNumber', None)
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return 'x'
+
+
+def _log_webview2_versions():
+    """Log the assembly version + location of every WebView2 Core/Wpf actually
+    loaded in-process. The Revit-2024 init failure is a Core/Wpf version skew, so
+    capturing both versions here makes the next failure diagnosable in one shot."""
+    try:
+        seen = []
+        for asm in System.AppDomain.CurrentDomain.GetAssemblies():
+            n = asm.GetName()
+            if n.Name in ('Microsoft.Web.WebView2.Core', 'Microsoft.Web.WebView2.Wpf'):
+                seen.append("{0} v{1} @ {2}".format(n.Name, n.Version, asm.Location))
+        _log("webview2 loaded: {0}".format(" | ".join(seen) or "none"))
+    except Exception:
+        pass
+
+
+def _loaded_webview2_core_dir():
+    """If Revit (or another add-in) has ALREADY loaded WebView2.Core into this
+    process, return the folder that copy lives in -- else None.
+
+    This is the Revit 2024 fix. Revit 2024 pre-loads an OLDER WebView2.Core than
+    the one bundled next to Revit.exe. .NET keeps only one copy of an assembly
+    loaded, so when we then load the NEWER Wpf wrapper, the wrapper calls a
+    constructor the older Core doesn't have and init dies with
+    MissingMethodException ('WebView2 failed to initialize'). Loading the Wpf
+    wrapper that sits next to the ALREADY-loaded Core keeps the pair matched on
+    whatever version is actually live, so the call exists. Revit 2025/2026 load a
+    new enough Core that the next-to-Revit.exe pair works as-is."""
+    try:
+        for asm in System.AppDomain.CurrentDomain.GetAssemblies():
+            try:
+                if asm.GetName().Name == 'Microsoft.Web.WebView2.Core':
+                    loc = asm.Location
+                    if loc and os.path.isfile(loc) and \
+                       os.path.isfile(os.path.join(os.path.dirname(loc), _WEBVIEW2_WPF)):
+                        return os.path.dirname(loc)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def _load_webview2_type():
     """Reference Revit's WebView2 assemblies and return the WebView2 WPF
     control type. Returns (type, None) on success or (None, reason) on
     failure so the caller can surface a clear message."""
-    d = _revit_dir_with_webview2()
+    # Prefer the folder of the Core that's already loaded in-process (matches
+    # whatever version is live -- see _loaded_webview2_core_dir for why). Fall
+    # back to the matched pair next to Revit.exe when nothing's loaded yet.
+    d = _loaded_webview2_core_dir()
+    if d is not None:
+        _log("webview2: matching wrapper to already-loaded Core at {0}".format(d))
+    else:
+        d = _revit_dir_with_webview2()
     if d is None:
         return None, ("WebView2 assemblies were not found next to Revit.exe. "
                       "They ship with Revit 2025/2026; this Revit may be "
@@ -223,35 +301,108 @@ class ViewerForm(forms.WPFWindow):
             self._show_viewport_message("Viewer page is missing:\n\n{}".format(WEB_INDEX))
             return
         try:
-            from Microsoft.Web.WebView2.Wpf import CoreWebView2CreationProperties
             self._sync_app_assets()
             wv = WebView2()
-            # WebView2 writes a cache/user-data folder; default sits next to
-            # the host exe (Program Files, read-only). Point it somewhere
-            # writable so initialization can't fail on permissions.
-            props = CoreWebView2CreationProperties()
-            props.UserDataFolder = os.path.join(_DATA_ROOT, 'WebView2')
-            wv.CreationProperties = props
-            wv.CoreWebView2InitializationCompleted += self._on_webview_init
-            self.brd_viewport.Child = wv
-            self._webview = wv
-            # Init the core WITHOUT navigating anywhere. Previously we set Source
-            # to a file:// page to trigger init, but that file:// navigation fired
-            # late and ABORTED our virtual-host navigation to viewer3
-            # (ConnectionAborted), leaving the old page on screen. EnsureCoreWebView2Async
-            # starts the core with no competing navigation; _on_webview_init then
-            # maps the vhost and navigates to viewer3 exactly once.
+            # Steer WebView2 through process ENV VARS instead of
+            # CoreWebView2CreationProperties. Setting CreationProperties makes the
+            # (newer) Wpf wrapper build CoreWebView2EnvironmentOptions with a
+            # constructor that Revit 2024's older in-process Core does NOT have ->
+            # 'WebView2 failed to initialize / MissingMethodException ...
+            # CoreWebView2EnvironmentOptions..ctor'. Leaving CreationProperties
+            # null makes the wrapper take its default-environment path (a plain
+            # CoreWebView2Environment.CreateAsync(), no such ctor), and the loaded
+            # Core honours these env vars:
+            #   WEBVIEW2_USER_DATA_FOLDER -- writable cache dir; the default sits
+            #       in read-only Program Files next to Revit.exe and can fail init.
+            #   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -- optional GPU-compositing
+            #       -off flag for the offset/black-box render on some GPUs.
+            # We deliberately do NOT force device scale. The WebView2 control's
+            # CoreWebView2Controller derives its RasterizationScale from the WPF
+            # DpiScale and keeps the child-HWND Bounds in sync. The old
+            # --force-device-scale-factor=1 desynced the two at non-100% Windows
+            # scaling: at 125% the controller sized the surface for 1.25 content
+            # while the page rasterized at 1.0, so the whole page rendered
+            # shrunk+offset into a corner with the dark host Border showing through
+            # -- and it pinned window.devicePixelRatio to 1.0, which silently
+            # disabled the page's pointer-lock dpr correction (the erratic, jumpy
+            # mouselook on a 125% / Remote-Desktop machine). Letting the controller
+            # own DPI makes the surface fill the host and dpr report the true scale
+            # on 100/125/150/175% alike; three.js caps its own pixel ratio so it
+            # stays crisp. See _on_webview_init for the DPI diagnostic.
+            browser_args = []
+            if DISABLE_GPU_COMPOSITING:
+                browser_args.append('--disable-gpu-compositing')   # software-composite escape hatch
+            System.Environment.SetEnvironmentVariable(
+                'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', ' '.join(browser_args))
+            # WebView2 forbids two instances sharing a user-data folder with
+            # DIFFERENT browser args (COMException 0x8007139F). The folder name
+            # encodes the args scheme ('s3', bumped whenever the args change) AND
+            # the Revit version (so 2024 + 2026 open at once don't collide). The
+            # default folder sits in read-only Program Files; point it at a writable
+            # per-user dir and CREATE it first so init never fails on a missing/ACL'd
+            # parent. Fall back to %TEMP% if the primary path can't be made.
+            udf_base = 'WebView2-s3-swc' if DISABLE_GPU_COMPOSITING else 'WebView2-s3'
+            udf_path = os.path.join(_DATA_ROOT, udf_base, _revit_version_tag())
             try:
-                wv.EnsureCoreWebView2Async(None)
-                _log("attach_viewer: webview created, EnsureCoreWebView2Async called")
+                if not os.path.isdir(udf_path):
+                    os.makedirs(udf_path)
             except Exception:
-                _log("attach_viewer: EnsureCoreWebView2Async failed; falling back to Source\n{0}"
-                     .format(traceback.format_exc()))
-                wv.Source = System.Uri(WEB_INDEX)
+                udf_path = os.path.join(
+                    os.environ.get('TEMP') or _DATA_ROOT, 'dbHMS_3DViewer', udf_base)
+                try:
+                    if not os.path.isdir(udf_path):
+                        os.makedirs(udf_path)
+                except Exception:
+                    pass
+            self._WebView2 = WebView2
+            self._udf_path = udf_path
+            self._wv_retried = False
+            self._cleanup_retry_udfs(udf_path)
+            self._create_webview(udf_path)
         except Exception:
             _log("attach_viewer: EXCEPTION\n{}".format(traceback.format_exc()))
             self._show_viewport_message(
                 "The 3D panel failed to start:\n\n{}".format(traceback.format_exc()))
+
+    def _create_webview(self, udf_path):
+        """Create the WebView2 control against a specific user-data folder.
+        Called once normally, and again by the init-failure retry with a
+        fresh per-process folder."""
+        System.Environment.SetEnvironmentVariable('WEBVIEW2_USER_DATA_FOLDER', udf_path)
+        _log("attach_viewer: udf={0}".format(udf_path))
+        wv = self._WebView2()
+        wv.CoreWebView2InitializationCompleted += self._on_webview_init
+        self.brd_viewport.Child = wv
+        self._webview = wv
+        # Init the core WITHOUT navigating anywhere. Previously we set Source
+        # to a file:// page to trigger init, but that file:// navigation fired
+        # late and ABORTED our virtual-host navigation to viewer3
+        # (ConnectionAborted), leaving the old page on screen. EnsureCoreWebView2Async
+        # starts the core with no competing navigation; _on_webview_init then
+        # maps the vhost and navigates to viewer3 exactly once.
+        try:
+            wv.EnsureCoreWebView2Async(None)
+            _log("attach_viewer: webview created, EnsureCoreWebView2Async called")
+        except Exception:
+            _log("attach_viewer: EnsureCoreWebView2Async failed; falling back to Source\n{0}"
+                 .format(traceback.format_exc()))
+            wv.Source = System.Uri(WEB_INDEX)
+
+    def _cleanup_retry_udfs(self, udf_path):
+        """Best-effort removal of stale retry profiles (<udf>-r*) left by
+        previous crashed sessions; a locked one just stays."""
+        try:
+            parent = os.path.dirname(udf_path)
+            base = os.path.basename(udf_path) + '-r'
+            for name in os.listdir(parent):
+                if name.startswith(base):
+                    try:
+                        shutil.rmtree(os.path.join(parent, name))
+                        _log("attach_viewer: removed stale retry profile {0}".format(name))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _sync_app_assets(self):
         """Copy the viewer's web assets into the served app folder so the
@@ -282,16 +433,104 @@ class ViewerForm(forms.WPFWindow):
         except Exception:
             _log("sync_app_assets: EXCEPTION\n{}".format(traceback.format_exc()))
 
+    def _log_dpi_state(self):
+        """Log the host's WPF device DPI and the laid-out Border size. On a
+        System-DPI-aware host (Revit) at e.g. 125% scaling this logs M11=1.0 while
+        the page renders at dpr=1.25 -- the split that mis-sizes the WebView2
+        surface until a resize forces a recompute (see _schedule_bounds_nudge).
+        Diagnostic only; never load-bearing."""
+        try:
+            src = PresentationSource.FromVisual(self.brd_viewport)
+            m11 = src.CompositionTarget.TransformToDevice.M11 if src else None
+            _log("dpi: border={0}x{1} wpf_M11={2}".format(
+                getattr(self.brd_viewport, 'ActualWidth', '?'),
+                getattr(self.brd_viewport, 'ActualHeight', '?'), m11))
+        except Exception:
+            _log("dpi: wpf scale read failed\n{0}".format(traceback.format_exc()))
+
+    def _nudge_webview_bounds(self):
+        """Force the WebView2 control to recompute its child-HWND Bounds by
+        momentarily changing its layout size, then restoring it. This reproduces
+        the manual window-resize that snaps the offset render into place: on a
+        System-DPI-aware host at >100% scaling the controller latches a wrong
+        surface rectangle at init and only fixes it on a size change. A 2px margin
+        toggle (with synchronous UpdateLayout) is invisible but triggers the
+        recompute. Fully guarded -- never breaks the viewer."""
+        try:
+            wv = self._webview
+            if wv is None:
+                return
+            wv.Margin = Thickness(0, 0, 0, 2)
+            wv.UpdateLayout()
+            wv.Margin = Thickness(0)
+            wv.UpdateLayout()
+        except Exception:
+            _log("nudge: {0}".format(traceback.format_exc().splitlines()[-1]))
+
+    def _schedule_bounds_nudge(self):
+        """Nudge the WebView2 bounds a few times over the first ~1.3s after init so
+        the offset render self-corrects without the user resizing the window. Runs
+        on the UI thread via a DispatcherTimer."""
+        try:
+            from System.Windows.Threading import DispatcherTimer
+            self._nudge_n = 0
+            timer = DispatcherTimer()
+            timer.Interval = System.TimeSpan.FromMilliseconds(320)
+
+            def _tick(s, e):
+                self._nudge_webview_bounds()
+                self._nudge_n += 1
+                if self._nudge_n >= 4:
+                    timer.Stop()
+            timer.Tick += _tick
+            timer.Start()
+            self._nudge_timer = timer   # pin so it isn't garbage-collected
+        except Exception:
+            _log("schedule_nudge: {0}".format(traceback.format_exc().splitlines()[-1]))
+
     def _on_webview_init(self, sender, args):
         try:
             ok = args.IsSuccess
             _log("init: IsSuccess={0}".format(ok))
+            _log_webview2_versions()   # capture Core/Wpf versions for diagnosing 2024 skew
             if not ok:
+                _log("init: FAILED\n{0}".format(args.InitializationException))
+                # One-shot self-heal for 0x8007139F-class profile conflicts
+                # (stale msedgewebview2.exe holding the folder, or a runtime
+                # update under Revit): retry with a fresh per-process folder.
+                if not getattr(self, '_wv_retried', False):
+                    self._wv_retried = True
+                    fresh = '{0}-r{1}'.format(
+                        getattr(self, '_udf_path', os.path.join(_DATA_ROOT, 'WebView2')),
+                        System.Diagnostics.Process.GetCurrentProcess().Id)
+                    _log("init: retrying once with fresh profile {0}".format(fresh))
+                    try:
+                        if not os.path.isdir(fresh):
+                            os.makedirs(fresh)
+                    except Exception:
+                        pass
+                    try:
+                        self.brd_viewport.Child = None
+                    except Exception:
+                        pass
+                    self._create_webview(fresh)
+                    return
                 self._show_viewport_message(
-                    "WebView2 failed to initialize:\n\n{}".format(
-                        args.InitializationException))
+                    "The embedded browser (WebView2) could not start, even "
+                    "after retrying with a fresh profile.\n\n"
+                    "This is almost always one of these:\n\n"
+                    "1. A leftover browser process from a previous or crashed "
+                    "Revit session is holding the profile. Fix: close ALL "
+                    "Revit windows, open Task Manager, end every "
+                    "'msedgewebview2.exe' process (or simply restart the "
+                    "computer), then reopen the tool.\n\n"
+                    "2. Windows updated the WebView2 runtime while Revit was "
+                    "open. Fix: restart Revit.\n\n"
+                    "Technical details:\n{0}".format(args.InitializationException))
                 return
             core = self._webview.CoreWebView2
+            self._log_dpi_state()        # diagnose surface-vs-host DPI mismatch (offset render)
+            self._schedule_bounds_nudge()  # auto-recompute bounds so the offset self-corrects
             # Reverse channel: the page posts messages back (e.g. "escape" to
             # drop full screen, element picks later).
             try:
@@ -558,9 +797,9 @@ class ViewerForm(forms.WPFWindow):
         returns the list instead of driving the panel UI. Raises
         SharedFolderNotConfigured so the caller can decide how to handle it."""
         rows = []
-        from clash_core import persistence, project, browser_filters
-        ph = project.project_hash_for(doc) if doc is not None else None
-        data = persistence.read_clashes(ph) if ph else {"clashes": []}
+        from clash_core import persistence, binding, browser_filters
+        folder = binding.folder_for(doc) if doc is not None else None
+        data = persistence.read_clashes_at(folder) if folder else {"clashes": []}
         names = {}
         try:
             lib = persistence.read_global_test_library()
@@ -589,14 +828,16 @@ class ViewerForm(forms.WPFWindow):
         return rows
 
     def _share_out_path(self, doc):
-        """Where the shareable HTML is written. Prefer the project's shared
-        clash folder (on the network, where PMs already have reach); fall back
-        to a local folder if the shared root isn't configured."""
+        """Where the shareable HTML is written. Prefer this project's clash-data
+        folder (where PMs already have reach); fall back to a local folder if no
+        folder is set on the model."""
         name = _safe_title(doc) + "_3D_review.html"
         try:
-            from clash_core import persistence, project
-            ph = project.project_hash_for(doc)
-            share_dir = os.path.join(persistence.project_dir(ph), "share")
+            from clash_core import binding
+            folder = binding.folder_for(doc)
+            if not folder:
+                raise ValueError("no clash-data folder set")
+            share_dir = os.path.join(folder, "share")
             if not os.path.isdir(share_dir):
                 os.makedirs(share_dir)
             return os.path.join(share_dir, name)
@@ -1080,10 +1321,10 @@ class ViewerForm(forms.WPFWindow):
         folder_ok = True
         try:
             from pyrevit import revit
-            from clash_core import persistence, project, browser_filters
+            from clash_core import persistence, binding, browser_filters
             doc = revit.doc
-            ph = project.project_hash_for(doc) if doc is not None else None
-            data = persistence.read_clashes(ph) if ph else {"clashes": []}
+            folder = binding.folder_for(doc) if doc is not None else None
+            data = persistence.read_clashes_at(folder) if folder else {"clashes": []}
             # Test-name lookup so the search box can also match by test name.
             names = {}
             try:

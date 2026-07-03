@@ -22,7 +22,8 @@ from clash_detect import linked
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_test(doc, test_dict, role_map, log=None, trade_filter=None):
+def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
+             tess_cache=None, ins_cache=None, status=None):
     """Run a single clash test and return a list of raw clash dicts.
 
     Each raw clash has:
@@ -48,6 +49,11 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None):
     test_id = test_dict.get('id') or ''
     test_name = test_dict.get('name') or test_id or '<unnamed>'
     kind = (test_dict.get('kind') or 'hard').lower()
+    # Tessellation cache for the soft narrow phase. Callers running several
+    # tests should pass ONE dict for the whole session so shared elements
+    # (the same wall in three tests) tessellate once.
+    if tess_cache is None:
+        tess_cache = {}
     set_a = test_dict.get('set_a') or {}
     set_b = test_dict.get('set_b') or {}
     tolerance_in = float(test_dict.get('tolerance_inches') or 0.0)
@@ -69,6 +75,14 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None):
     if log:
         log("  - resolving set_b (source `{}`):".format(set_b.get('source', 'host')))
     b_buckets = list(_resolve_buckets(doc, set_b, role_map, log=log))
+
+    # Session-scope insulation cache (like tess_cache): buckets are rebuilt
+    # per test, so enrichment's per-document insulation collector pass would
+    # otherwise re-run for every test and side.
+    if ins_cache is None:
+        ins_cache = {}
+    for bucket in a_buckets + b_buckets:
+        bucket['_ins_cache'] = ins_cache
 
     # Apply the trade filter to set_a if provided
     if trade_filter:
@@ -102,6 +116,7 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None):
                     doc, kind, tolerance_in,
                     a_bucket['elements'], b_bucket['elements'],
                     a_bucket['link_instance'], b_bucket['link_instance'],
+                    tess_cache=tess_cache, log=log, status=status,
                 )
             except Exception as ex:
                 if log:
@@ -118,9 +133,21 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None):
                     'ref_b':            _make_ref(pair['elem_b'], b_bucket),
                     'midpoint':         _xyz_to_list(pair.get('midpoint')),
                     'default_assignee': default_assignee,
+                    # The test's tolerance, stamped per clash so the pure
+                    # scoring layer can compute gap/tolerance without a
+                    # test-library lookup (refreshed via _PER_RUN_FIELDS).
+                    'tolerance_inches': tolerance_in,
                 }
-                if 'gap_inches' in pair:
-                    clash['gap_inches'] = pair['gap_inches']
+                # Soft-clash measurement fields: the REAL surface gap, the
+                # closest-point pair (host feet), whether the pair touches/
+                # intersects, and how the gap was measured ('mesh' = true
+                # geometry, 'bbox' = fallback estimate). Absent on hard rows.
+                for k in ('gap_inches', 'is_contact', 'gap_method'):
+                    if k in pair:
+                        clash[k] = pair[k]
+                for k in ('closest_point_a', 'closest_point_b'):
+                    if pair.get(k) is not None:
+                        clash[k] = _xyz_to_list(pair[k])
                 out.append(clash)
 
     if log:
@@ -217,14 +244,16 @@ def _resolve_one_source(doc, source, categories, role_map, log=None):
 
 def _run_detection(doc, kind, tolerance_in,
                    set_a_elems, set_b_elems,
-                   a_link, b_link):
+                   a_link, b_link, tess_cache=None, log=None, status=None):
     if kind == 'hard':
         return hard_mod.find_hard_clashes(
             doc, set_a_elems, set_b_elems, a_link, b_link,
+            log=log, progress=status,
         )
     if kind == 'soft':
         return soft_mod.find_soft_clashes(
             doc, set_a_elems, set_b_elems, tolerance_in, a_link, b_link,
+            tess_cache=tess_cache, log=log, progress=status,
         )
     return []
 
@@ -258,14 +287,42 @@ def _make_ref(elem, bucket):
             link_doc_title = bucket['doc'].Title
         except Exception:
             pass
-    return models.make_element_ref(
+    # Stable per-element key joining this clash to the exported glTF node and
+    # back to the Revit element. Built via the shared clash_identity helper so it
+    # is byte-identical to what the exporter stamps on each node (host = bare
+    # UniqueId; linked = link-instance namespace + UniqueId). The link instance
+    # in scope here is the one this element actually came from (bucket pairing),
+    # so the namespace is correct.
+    uid = None
+    fk = None
+    try:
+        import clash_identity
+        uid = elem.UniqueId
+        inst = bucket.get('link_instance')
+        link_ns = None if inst is None else clash_identity.link_ns_for_instance(inst)
+        fk = clash_identity.fed_key(uid, link_ns)
+    except Exception:
+        pass
+    ref = models.make_element_ref(
         source=bucket['source'],
         element_id=eid_int(elem.Id),
         category=cat_name,
         category_id=cat_id,
         name=elem_name,
         link_doc_title=link_doc_title,
+        unique_id=uid,
+        fed_key=fk,
     )
+    # MEP enrichment for the importance engine (system, sizes, insulation,
+    # level, discipline). All nullable; fingerprint-safe by design (the
+    # fingerprint hashes only source + element_id + midpoint bucket), and
+    # refs are wholesale-replaced at merge so these refresh every run.
+    try:
+        from clash_detect import enrich
+        ref.update(enrich.mep_facts(elem, bucket, cat_id))
+    except Exception:
+        pass
+    return ref
 
 
 def _xyz_to_list(xyz):

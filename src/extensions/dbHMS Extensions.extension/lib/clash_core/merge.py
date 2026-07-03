@@ -96,6 +96,24 @@ def _next_seq(old_clashes):
     return max_seq + 1
 
 
+# Measurement fields refreshed from the raw detection on EVERY run, for both
+# new and persisting clashes -- one list so the two branches can never drift.
+# midpoint: detection midpoint (soft: closest-point midpoint on real geometry).
+# gap_inches/closest_point_*/is_contact/gap_method: soft-clash measurements
+# (None on hard rows).
+# tolerance_inches: the owning test's tolerance, stamped per clash so the
+# pure scoring layer can compute gap/tolerance with no test-library lookup.
+# penetration_depth_in / overlap_volume_cf: RESERVED. Nothing computes them
+# yet; listing them here materializes explicit None on every record so the
+# day hard.py starts emitting them, values backfill re-appearing clashes with
+# no migration and the dormant scoring rules (R-GRAZE, C4) activate on the
+# next run. Readers must use .get() (auto-resolved rows never gain keys).
+_PER_RUN_FIELDS = ('midpoint', 'gap_inches', 'closest_point_a',
+                   'closest_point_b', 'is_contact', 'gap_method',
+                   'tolerance_inches',
+                   'penetration_depth_in', 'overlap_volume_cf')
+
+
 def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
     """Merge a fresh detection run into the existing clash list.
 
@@ -145,7 +163,10 @@ def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
         if existing is not None:
             updated = copy.deepcopy(existing)
             updated['last_seen_run'] = run_iso
-            updated['midpoint'] = raw.get('midpoint')
+            # Per-run measurements refresh unconditionally: a stale gap from
+            # an earlier run is worse than None (hard rows carry None).
+            for k in _PER_RUN_FIELDS:
+                updated[k] = raw.get(k)
             # Refresh element refs in case names/categories changed
             if raw.get('ref_a'):
                 updated['ref_a'] = raw['ref_a']
@@ -164,7 +185,7 @@ def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
             merged.append(updated)
             persisting_count += 1
         else:
-            merged.append({
+            fresh = {
                 'id':              _new_id(),
                 'seq':             next_seq,
                 'fingerprint':     fp,
@@ -174,13 +195,15 @@ def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
                 'assignee':        _derive_assignee(raw),
                 'ref_a':           raw.get('ref_a'),
                 'ref_b':           raw.get('ref_b'),
-                'midpoint':        raw.get('midpoint'),
                 'first_seen_run':  run_iso,
                 'last_seen_run':   run_iso,
                 'comments':        [],
                 'viewpoints':      [],
                 'history':         [models.make_history_entry(author, 'detected')],
-            })
+            }
+            for k in _PER_RUN_FIELDS:
+                fresh[k] = raw.get(k)
+            merged.append(fresh)
             next_seq += 1
             new_count += 1
 

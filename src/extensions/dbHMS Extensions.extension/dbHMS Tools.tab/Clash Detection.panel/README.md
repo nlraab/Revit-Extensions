@@ -366,7 +366,7 @@ pushbuttons in this order (controlled by the `layout:` key in
 ```
 src/extensions/dbHMS Extensions.extension/
     dbHMS Tools.tab/
-        dbHMS Tools.panel/                   <- general productivity tools
+        BIM Tools.panel/                     <- general productivity tools
             (AlignViews, Sheet Manager, etc. — not part of this README)
         Clash Detection.panel/
             README.md                        <- this file
@@ -463,37 +463,50 @@ folder. Why outside?
 * **No Revit-side schema migration.** Changing the data shape later is a
   matter of editing JSON, not migrating Extensible Storage in every model.
 
-### Layout under the shared root
+### One folder per project (the whole state model)
+
+> **This supersedes the older shared-root design.** The two currently-shipping
+> tools (**Clash Detection** / Coordination and **3D Viewer**) use the model
+> below. The older per-machine "shared root" (`clash_core.config`) and the
+> `<shared_root>/<hash>/` layout only remain for the being-retired buttons.
+
+A project remembers exactly **one** thing: the absolute path of its clash-data
+folder. The user points the tool at a folder (Coordination -> Settings ->
+*Set up folder*, a plain folder browser), and that path is stored **inside the
+Revit model** via Extensible Storage on `ProjectInformation`
+(`lib/clash_core/binding.py`, `folder_for` / `write_binding`). Because it lives
+in the .rvt, it travels with the file and is the same for every teammate who
+opens it. All clash data is read and written **directly inside that folder**
+via the `*_at(folder)` helpers in `lib/clash_core/persistence.py`:
 
 ```
-<shared_root>/                            <- e.g. T:\_clash_data\
-    global/
-        test_library.json                 <- firm-wide test definitions (editable)
-    <project-hash>/                       <- one folder per project
-        project.json                      <- display name, disciplines, central path
-        clashes.json                      <- the clash database for this project
-        test_overrides.json               <- per-project tweaks to global library
-        viewpoints/
-            <clash-id>__<viewpoint-id>.png
-    <another-project-hash>/
-        ...
+<the folder the user picked>/     <- e.g. \\server\Projects\21112\BIM\Clash Data\
+    clashes.json                  <- the clash database (+ groups) for this project
+    project.json                  <- display name, disciplines, link role map
+    test_overrides.json           <- this project's disabled/custom tests
+    viewpoints/
+        <clash-id>.png            <- on-demand clash context thumbnails
 ```
 
-`<project-hash>` is a short hex digest (first 12 chars of SHA-1) of the
-normalized central-model path. It's stable across users on the same
-project, and unique enough that two projects won't collide. Computed in
-`lib/clash_core/project.py`.
+Key properties:
 
-### Per-machine config
-
-```
-%APPDATA%/dbHMS_clash/config.json
-```
-
-Contains the path to the shared root and a few per-user preferences. The
-**only** thing an engineer has to set up the first time they use the tool
-is point this at the firm's shared folder. After that, every project's
-data is found automatically by the central-model path -> hash lookup.
+- **The folder is the truth.** Point the model at a folder -> you see that
+  folder's data; an empty/new folder -> an empty tool; change the folder ->
+  you see the new folder's data and nothing from before.
+- **No folder set -> nothing shown.** A model with no stored path shows the
+  "Set up folder" prompt and no data. Merely opening a tool never creates a
+  folder (reads are non-creating).
+- **No shared root, no hash, no subfolder naming, no migration.** The path is
+  stored exactly as the user picked it; the tool does nothing about network vs.
+  local. If a teammate can't reach that path they simply see no data.
+- **Firm default tests are bundled** with the Coordination tool
+  (`default_tests.json` next to its `script.py`); per-project tweaks live in
+  the folder's `test_overrides.json`. There is no separate firm-wide library
+  file.
+- The schema is always built before reading (`_schema(create=True)`), because
+  opening a .rvt does not reliably register an Extensible Storage schema in a
+  fresh Revit session -- without this a reopened model (or a teammate, or the
+  read-only 3D Viewer) would wrongly read "no folder set".
 
 ---
 

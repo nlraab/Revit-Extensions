@@ -216,7 +216,7 @@ class TestLibraryForm(forms.WPFWindow):
                 from pyrevit import revit
                 doc = revit.doc
                 if doc is not None:
-                    ph = project.project_hash_for(doc)
+                    ph = project.resolve_key(doc)
                     if ph:
                         self._project_hash = ph
                         ov = persistence.read_overrides(ph)

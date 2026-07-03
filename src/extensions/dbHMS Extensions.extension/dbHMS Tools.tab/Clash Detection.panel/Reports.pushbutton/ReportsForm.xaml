@@ -116,6 +116,13 @@
                             <CheckBox Content="Resolved" IsChecked="False" Margin="0,3,8,3"/>
                         </WrapPanel>
 
+                        <TextBlock Text="Importance" Style="{StaticResource FieldLabel}"/>
+                        <WrapPanel x:Name="wp_band_filter">
+                            <CheckBox Content="Critical" IsChecked="True" Margin="0,3,8,3"/>
+                            <CheckBox Content="Major" IsChecked="True" Margin="0,3,8,3"/>
+                            <CheckBox Content="Minor" IsChecked="True" Margin="0,3,8,3"/>
+                        </WrapPanel>
+
                         <Grid Margin="0,4,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -159,7 +166,9 @@
 
                         <TextBlock Text="Format" Style="{StaticResource FieldLabel}"/>
                         <ComboBox x:Name="cmb_format">
-                            <ComboBoxItem Content="BCF 2.1 (.bcfzip — for coordination tools)" IsSelected="True"/>
+                            <ComboBoxItem Content="BCF 2.1 (.bcfzip — one topic per clash)" IsSelected="True"/>
+                            <ComboBoxItem Content="BCF by issue (.bcfzip — one topic per coordination group)"/>
+                            <ComboBoxItem Content="Meeting agenda (.html — pre-meeting handout, top issues)"/>
                             <ComboBoxItem Content="Excel (.xlsx — for internal review / save-as-PDF)"/>
                             <ComboBoxItem Content="HTML summary (.html — for sharing / save-as-PDF in browser)"/>
                         </ComboBox>

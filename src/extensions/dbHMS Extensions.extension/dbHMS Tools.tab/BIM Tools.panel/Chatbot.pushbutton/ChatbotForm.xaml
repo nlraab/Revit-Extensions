@@ -1,0 +1,519 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Chatbot"
+        Height="820" Width="1180" MinHeight="560" MinWidth="820"
+        WindowStartupLocation="CenterScreen"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        ResizeMode="CanResizeWithGrip">
+
+    <Window.Resources>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#1A202C"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#4A5568"/>
+            <Setter Property="Margin" Value="0,8,0,2"/>
+        </Style>
+
+        <Style x:Key="HelperText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#718096"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style x:Key="MonoText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+        </Style>
+
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E2E8F0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="90"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="MinWidth" Value="90"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+
+        <Style x:Key="MiniButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+
+        <Style x:Key="WarnButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+            <Setter Property="Background" Value="#FEFCBF"/>
+            <Setter Property="BorderBrush" Value="#D69E2E"/>
+            <Setter Property="Foreground" Value="#744210"/>
+            <Setter Property="MinWidth" Value="0"/>
+        </Style>
+
+        <Style x:Key="SidebarPrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#6B46C1"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- ===================== HEADER (slate dbHMS bar) ===================== -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+            <Grid>
+                <StackPanel HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Chatbot" Foreground="White" FontSize="20" FontWeight="Bold"
+                                   VerticalAlignment="Center"/>
+                        <Border Background="#6B46C1" CornerRadius="3" Padding="6,1" Margin="10,0,0,0"
+                                VerticalAlignment="Center">
+                            <TextBlock Text="AI" Foreground="White" FontSize="10" FontWeight="Bold"/>
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Text="MEP engineering assistant &#x2014; ASHRAE, HVAC design, and (later) live Revit actions."
+                               Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                            VerticalAlignment="Center" Opacity="0.85">
+                    <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
+                               FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
+                    <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
+                               FontWeight="Light" VerticalAlignment="Center"/>
+                    <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
+                               FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ===================== MISSING-KEY BANNER (hidden by default) ===================== -->
+        <Border x:Name="bnr_no_key" DockPanel.Dock="Top"
+                Background="#FFFBEA" BorderBrush="#D69E2E" BorderThickness="0,0,0,1"
+                Padding="16,10" Visibility="Collapsed">
+            <Grid>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="&#x26A0;" FontSize="16" Foreground="#D69E2E"
+                               VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock Foreground="#744210" VerticalAlignment="Center"
+                               Text="No API key configured. Click Settings to paste your Anthropic API key."/>
+                </StackPanel>
+                <Button x:Name="btn_open_settings_from_banner" Content="Open Settings"
+                        Style="{StaticResource WarnButton}"
+                        HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+
+        <!-- ===================== MIDDLE: 2-column grid (sidebar | chat pane) ===================== -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="col_sidebar" Width="260" MinWidth="200"/>
+                <ColumnDefinition Width="*" MinWidth="380"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ============ SIDEBAR (left column) ============ -->
+            <Border Grid.Column="0" Background="White"
+                    BorderBrush="#E2E8F0" BorderThickness="0,0,1,0">
+                <DockPanel>
+                    <!-- Sidebar header: project info + new chat button -->
+                    <Border DockPanel.Dock="Top" Padding="14,12,14,10"
+                            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1">
+                        <StackPanel>
+                            <TextBlock Text="Project" Foreground="#A0AEC0"
+                                       FontSize="10" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="txt_project_name" Text="(no project open)"
+                                       Foreground="#2D3748" FontWeight="SemiBold"
+                                       FontSize="13" TextTrimming="CharacterEllipsis"
+                                       Margin="0,2,0,0"/>
+                            <TextBlock x:Name="txt_msg_count"
+                                       Style="{StaticResource HelperText}"
+                                       Text="0 chats" Margin="0,2,0,8"/>
+                            <Button x:Name="btn_new_chat" Content="+ New chat"
+                                    Style="{StaticResource SidebarPrimaryButton}"
+                                    HorizontalAlignment="Stretch"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Sidebar footer: settings -->
+                    <Border DockPanel.Dock="Bottom" Padding="10"
+                            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0">
+                        <Button x:Name="btn_settings" Content="&#x2699; Settings"
+                                Style="{StaticResource MiniButton}"
+                                HorizontalAlignment="Stretch"
+                                Padding="8,6" Margin="0"/>
+                    </Border>
+
+                    <!-- Search bar: filters the sidebar to chats containing
+                         the query in any message. Empty query restores the
+                         normal date-grouped list. -->
+                    <Border DockPanel.Dock="Top" Padding="10,8,10,8"
+                            BorderBrush="#E2E8F0" BorderThickness="0,0,0,1">
+                        <Grid>
+                            <TextBox x:Name="txt_chat_search"
+                                     Padding="22,3,22,3" Height="26"
+                                     VerticalContentAlignment="Center"
+                                     BorderBrush="#CBD5E0" BorderThickness="1"
+                                     ToolTip="Search across every chat in this project"/>
+                            <TextBlock Text="&#x1F50D;" FontSize="11"
+                                       Foreground="#A0AEC0" IsHitTestVisible="False"
+                                       VerticalAlignment="Center"
+                                       HorizontalAlignment="Left"
+                                       Margin="7,0,0,0"/>
+                            <TextBlock x:Name="txt_search_hint"
+                                       Text="Search messages..."
+                                       Foreground="#A0AEC0" FontSize="11"
+                                       IsHitTestVisible="False"
+                                       VerticalAlignment="Center"
+                                       HorizontalAlignment="Left"
+                                       Margin="24,0,0,0"/>
+                            <Button x:Name="btn_clear_search" Content="&#x2715;"
+                                    Width="20" Height="20" Padding="0"
+                                    FontSize="10" FontWeight="Bold"
+                                    Foreground="#718096" Background="Transparent"
+                                    BorderThickness="0" Cursor="Hand"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center"
+                                    Margin="0,0,3,0"
+                                    Visibility="Collapsed"
+                                    ToolTip="Clear search"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Sidebar body: scrollable conversation / search list -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  Padding="6,6,6,6">
+                        <StackPanel x:Name="pnl_conversations">
+                            <TextBlock x:Name="txt_no_chats"
+                                       Style="{StaticResource HelperText}"
+                                       TextAlignment="Center" Margin="8,16,8,0"
+                                       Visibility="Collapsed"
+                                       Text="No saved chats yet for this project."/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+
+            <!-- ============ CHAT PANE (right column) ============
+                 AllowDrop=True so the user can drag files / folders from
+                 Explorer onto anywhere in the chat pane. _on_drop_ui
+                 inspects the dragged data and creates attachments. -->
+            <DockPanel Grid.Column="1" x:Name="pnl_chat_pane" AllowDrop="True">
+                <!-- Chat title strip: [<] toggle | title + subtitle | [Export] -->
+                <Border DockPanel.Dock="Top" Background="White"
+                        BorderBrush="#E2E8F0" BorderThickness="0,0,0,1" Padding="10,8,20,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Button x:Name="btn_toggle_sidebar" Grid.Column="0"
+                                Width="32" Height="32" Padding="0"
+                                Background="#EDF2F7"
+                                BorderBrush="#CBD5E0" BorderThickness="1"
+                                Foreground="#4A5568"
+                                FontSize="14" FontWeight="Bold"
+                                Cursor="Hand"
+                                VerticalAlignment="Center"
+                                Content="&#x276E;"
+                                ToolTip="Hide sidebar"/>
+
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="txt_chat_title" Text="New chat"
+                                       Foreground="#1A202C" FontSize="14" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="txt_chat_subtitle"
+                                       Style="{StaticResource HelperText}" Margin="0,2,0,0"
+                                       Text=""/>
+                        </StackPanel>
+
+                        <Button x:Name="btn_export" Grid.Column="2"
+                                Content="Export"
+                                Style="{StaticResource MiniButton}"
+                                Padding="10,6" Margin="0"
+                                VerticalAlignment="Center"
+                                ToolTip="Export this conversation to Markdown or JSON"/>
+                    </Grid>
+                </Border>
+
+                <!-- Input bar (chat pane only, docked below transcript) -->
+                <Border DockPanel.Dock="Bottom" Background="White"
+                        BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
+                    <DockPanel>
+                        <!-- status row at the very bottom -->
+                        <Grid DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                                <TextBlock x:Name="txt_status" Text="" Foreground="#4A5568"
+                                           VerticalAlignment="Center" FontStyle="Italic"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <TextBlock x:Name="txt_model_label" Text="Sonnet 4.6"
+                                           Style="{StaticResource HelperText}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- attachments chip strip (hidden when empty) -->
+                        <Border x:Name="pnl_attachments_wrap" DockPanel.Dock="Top"
+                                Margin="0,0,0,6" Visibility="Collapsed">
+                            <WrapPanel x:Name="pnl_attachments" Orientation="Horizontal"/>
+                        </Border>
+
+                        <!-- input row: textbox | [+ Add / Stop / Send] -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0" Background="White"
+                                    BorderBrush="#CBD5E0" BorderThickness="1" CornerRadius="4">
+                                <TextBox x:Name="txt_input"
+                                         BorderThickness="0" Background="Transparent"
+                                         Padding="10,8" FontSize="13"
+                                         AcceptsReturn="True" TextWrapping="Wrap"
+                                         VerticalContentAlignment="Top"
+                                         VerticalScrollBarVisibility="Auto"
+                                         MinHeight="56" MaxHeight="180"/>
+                            </Border>
+
+                            <StackPanel Grid.Column="1" Orientation="Vertical" VerticalAlignment="Bottom">
+                                <Button x:Name="btn_add"
+                                        Width="40" Height="32"
+                                        Background="#EDF2F7"
+                                        BorderBrush="#CBD5E0" BorderThickness="1"
+                                        Padding="0"
+                                        Cursor="Hand"
+                                        Margin="6,0,0,4"
+                                        ToolTip="Attach a Revit element, sheet, image, PDF, or file">
+                                    <!-- Plus icon (add attachment) - drawn as a Path so it
+                                         renders identically across machines (no font
+                                         dependency). Two crossed bars. -->
+                                    <Path Width="14" Height="14" Stretch="Uniform"
+                                          Fill="#2D3748"
+                                          Data="M 6,0 L 10,0 L 10,6 L 16,6 L 16,10 L 10,10 L 10,16 L 6,16 L 6,10 L 0,10 L 0,6 L 6,6 Z"/>
+                                </Button>
+                                <Button x:Name="btn_stop" Content="Stop"
+                                        Style="{StaticResource SecondaryButton}"
+                                        Visibility="Collapsed" Margin="6,0,0,4"/>
+                                <Button x:Name="btn_send" Content="Send"
+                                        Style="{StaticResource PrimaryButton}"
+                                        MinWidth="90" Padding="14,10"/>
+                            </StackPanel>
+
+                            <!-- Modern popup for + Add menu. PlacementTarget + Placement
+                                 anchor it above the button; AllowsTransparency lets us
+                                 do rounded corners + drop shadow on the inner Border. -->
+                            <Popup x:Name="popup_add"
+                                   PlacementTarget="{Binding ElementName=btn_add}"
+                                   Placement="Top"
+                                   VerticalOffset="-6"
+                                   HorizontalOffset="0"
+                                   StaysOpen="False"
+                                   AllowsTransparency="True"
+                                   PopupAnimation="Fade">
+                                <Border Background="White"
+                                        BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="10"
+                                        Margin="10">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="Black" Opacity="0.18"
+                                                          BlurRadius="16" ShadowDepth="3"/>
+                                    </Border.Effect>
+                                    <StackPanel Margin="6" MinWidth="280">
+                                        <TextBlock Text="ATTACH REVIT CONTEXT"
+                                                   FontSize="9" FontWeight="SemiBold"
+                                                   Foreground="#A0AEC0"
+                                                   Margin="10,4,10,6"/>
+
+                                        <Border x:Name="popup_pick_element"
+                                                Background="Transparent"
+                                                Cursor="Hand" Padding="10,8"
+                                                CornerRadius="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Path Width="14" Height="14" Stretch="Uniform"
+                                                      Fill="#4A5568"
+                                                      Data="M 0,0 L 0,12 L 3,9 L 5,14 L 7,13 L 5,8 L 8,8 Z"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,12,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="Pick element(s) in Revit"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#1A202C"/>
+                                                    <TextBlock Text="Click in canvas or Project Browser, then Attach"
+                                                               FontSize="10" Foreground="#718096"
+                                                               Margin="0,1,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Border x:Name="popup_use_selection"
+                                                Background="Transparent"
+                                                Cursor="Hand" Padding="10,8"
+                                                CornerRadius="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Path Width="14" Height="14" Stretch="Uniform"
+                                                      Fill="#4A5568"
+                                                      Data="M 7,0 A 7,7 0 1,1 6.99,0 Z M 7,3 A 4,4 0 1,1 6.99,3 Z"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,12,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="Use current Revit selection"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#1A202C"/>
+                                                    <TextBlock Text="Elements in the canvas OR sheets/views in the Project Browser"
+                                                               FontSize="10" Foreground="#718096"
+                                                               Margin="0,1,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Rectangle Fill="#E2E8F0" Height="1" Margin="6,4"/>
+
+                                        <TextBlock Text="ATTACH AN IMAGE OR DOCUMENT"
+                                                   FontSize="9" FontWeight="SemiBold"
+                                                   Foreground="#A0AEC0"
+                                                   Margin="10,4,10,6"/>
+
+                                        <Border x:Name="popup_capture_view"
+                                                Background="Transparent"
+                                                Cursor="Hand" Padding="10,8"
+                                                CornerRadius="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <!-- Camera icon: body + lens -->
+                                                <Path Width="14" Height="14" Stretch="Uniform"
+                                                      Fill="#4A5568"
+                                                      Data="M 1,3 L 4,3 L 5,1 L 11,1 L 12,3 L 15,3 L 15,13 L 1,13 Z M 8,5 A 3,3 0 1,1 7.99,5 Z"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,12,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="Capture active Revit view"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#1A202C"/>
+                                                    <TextBlock Text="Snapshots the current view as a PNG that Claude can see"
+                                                               FontSize="10" Foreground="#718096"
+                                                               Margin="0,1,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Border x:Name="popup_attach_file"
+                                                Background="Transparent"
+                                                Cursor="Hand" Padding="10,8"
+                                                CornerRadius="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <!-- Document / page icon with folded corner -->
+                                                <Path Width="14" Height="14" Stretch="Uniform"
+                                                      Fill="#4A5568"
+                                                      Data="M 1,0 L 9,0 L 13,4 L 13,16 L 1,16 Z M 9,0 L 9,4 L 13,4"
+                                                      Stroke="#4A5568" StrokeThickness="1.1"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,12,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="Attach a PDF, image, or file"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#1A202C"/>
+                                                    <TextBlock Text="Read a spec, cut sheet, or code letter (or drag files onto the chat)"
+                                                               FontSize="10" Foreground="#718096"
+                                                               Margin="0,1,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Rectangle Fill="#E2E8F0" Height="1" Margin="6,4"/>
+
+                                        <Border x:Name="popup_pick_sheet"
+                                                Background="Transparent"
+                                                Cursor="Hand" Padding="10,8"
+                                                CornerRadius="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Path Width="14" Height="14" Stretch="Uniform"
+                                                      Fill="#4A5568"
+                                                      Data="M 1,0 L 9,0 L 12,3 L 12,14 L 1,14 Z M 9,0 L 9,3 L 12,3"
+                                                      Stroke="#4A5568" StrokeThickness="1.2"
+                                                      VerticalAlignment="Center"
+                                                      Margin="0,0,12,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="Choose sheet(s) from list"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#1A202C"/>
+                                                    <TextBlock Text="Pick from all sheets in this project"
+                                                               FontSize="10" Foreground="#718096"
+                                                               Margin="0,1,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </DockPanel>
+                </Border>
+
+                <!-- Chat transcript (fills remaining) -->
+                <ScrollViewer x:Name="scroll_chat" VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Padding="20,12,20,12" Background="#F7FAFC">
+                    <StackPanel x:Name="pnl_messages">
+                        <Border x:Name="bnr_empty_state" Style="{StaticResource CardBorder}"
+                                HorizontalAlignment="Center" Padding="20,16" MaxWidth="560"
+                                Margin="0,40,0,0">
+                            <StackPanel HorizontalAlignment="Center">
+                                <Border Background="#6B46C1" CornerRadius="20" Width="40" Height="40"
+                                        HorizontalAlignment="Center">
+                                    <TextBlock Text="&#x2728;" Foreground="White" FontSize="20"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <TextBlock Text="Ask me anything"
+                                           FontSize="16" FontWeight="SemiBold" Foreground="#1A202C"
+                                           HorizontalAlignment="Center" Margin="0,12,0,4"/>
+                                <TextBlock Style="{StaticResource HelperText}"
+                                           HorizontalAlignment="Center" TextAlignment="Center"
+                                           Text="Try: &quot;What's the minimum OA per person for an open office under 62.1?&quot; or &quot;Walk me through sizing a rooftop unit for a 12,000 sf retail space.&quot;"/>
+                                <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                                        CornerRadius="3" Padding="10" Margin="0,12,0,0">
+                                    <TextBlock Style="{StaticResource HelperText}" TextAlignment="Center"
+                                               Text="Each chat is saved automatically. Click + New chat to start a fresh one without losing this conversation."/>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </DockPanel>
+        </Grid>
+    </DockPanel>
+</Window>

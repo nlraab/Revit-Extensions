@@ -96,7 +96,8 @@ def _xyz_to_list(xyz):
 # ---------------------------------------------------------------------------
 
 def make_element_ref(source, element_id, category=None, name=None,
-                     link_doc_title=None, category_id=None):
+                     link_doc_title=None, category_id=None,
+                     unique_id=None, fed_key=None):
     """Build an ElementRef dict.
 
     `source` is one of ElementSource.* (or any "link:<role>" string).
@@ -116,6 +117,12 @@ def make_element_ref(source, element_id, category=None, name=None,
         "category_id":    int(category_id) if category_id is not None else None,
         "name":           name,
         "link_doc_title": link_doc_title,
+        # Stable identity for the web viewer / SwitchBack join (added when the
+        # detector can resolve them; None on older data). `unique_id` = Revit
+        # UniqueId (within the element's own doc); `fed_key` = the globally-unique
+        # federation key (see lib/clash_identity).
+        "unique_id":      unique_id,
+        "fed_key":        fed_key,
     }
 
 
@@ -134,8 +141,16 @@ def make_clash_test(name, kind, set_a, set_b, tolerance_inches=0.0,
 
 
 def make_clash(test_id, ref_a, ref_b, midpoint_xyz, kind=None,
-               status=None, assignee=None, run_at=None, clash_id=None):
-    """Build a Clash dict for a freshly detected intersection."""
+               status=None, assignee=None, run_at=None, clash_id=None,
+               gap_inches=None, closest_point_a=None, closest_point_b=None,
+               is_contact=None, gap_method=None):
+    """Build a Clash dict for a freshly detected intersection.
+
+    The five measurement fields describe soft ("near miss") results: the
+    REAL surface-to-surface gap in inches, the closest-point pair in host
+    feet, whether the pair touches/intersects, and how the gap was measured
+    ('mesh' = true geometry, 'bbox' = fallback estimate when an element has
+    no usable solids). All None on hard rows."""
     if kind is None:
         kind = ClashKind.HARD
     if status is None:
@@ -155,6 +170,11 @@ def make_clash(test_id, ref_a, ref_b, midpoint_xyz, kind=None,
         "comments":        [],
         "viewpoints":      [],
         "history":         [],
+        "gap_inches":      gap_inches,
+        "closest_point_a": _xyz_to_list(closest_point_a) if closest_point_a is not None else None,
+        "closest_point_b": _xyz_to_list(closest_point_b) if closest_point_b is not None else None,
+        "is_contact":      is_contact,
+        "gap_method":      gap_method,
     }
 
 

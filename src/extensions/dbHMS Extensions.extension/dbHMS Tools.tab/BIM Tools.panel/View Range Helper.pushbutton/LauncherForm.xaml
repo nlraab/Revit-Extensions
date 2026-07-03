@@ -1,0 +1,155 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="View Range Helper"
+        Height="460" Width="620"
+        MinHeight="420" MinWidth="540"
+        Background="#F7FAFC"
+        FontFamily="Segoe UI" FontSize="12"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResizeWithGrip">
+
+    <Window.Resources>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#1A202C"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        <Style x:Key="HelperText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#718096"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E2E8F0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="140"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="MinWidth" Value="100"/>
+            <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+        </Style>
+        <Style x:Key="WarnButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+            <Setter Property="Background" Value="#FEFCBF"/>
+            <Setter Property="BorderBrush" Value="#D69E2E"/>
+            <Setter Property="Foreground" Value="#744210"/>
+            <Setter Property="MinWidth" Value="100"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+
+        <!-- Header: dbHMS branding bar -->
+        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="View Range Helper" Foreground="White"
+                               FontSize="20" FontWeight="Bold"/>
+                    <TextBlock Text="Live plan + section from an exported model slice."
+                               Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            VerticalAlignment="Center" Opacity="0.85">
+                    <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
+                               FontWeight="Bold" FontFamily="Segoe UI"/>
+                    <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
+                               FontWeight="Light"/>
+                    <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
+                               FontWeight="Bold" FontFamily="Segoe UI"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Footer -->
+        <Border DockPanel.Dock="Bottom" Background="White" BorderBrush="#E2E8F0"
+                BorderThickness="0,1,0,0" Padding="20,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" x:Name="txt_status"
+                           Text="Ready when you are."
+                           Foreground="#4A5568" FontStyle="Italic"
+                           VerticalAlignment="Center"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="btn_close" Content="Close"
+                            Style="{StaticResource SecondaryButton}"/>
+                    <Button x:Name="btn_abort" Content="Abort"
+                            Style="{StaticResource WarnButton}"
+                            Visibility="Collapsed"/>
+                    <Button x:Name="btn_launch" Content="Launch Helper"
+                            Style="{StaticResource PrimaryButton}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Body -->
+        <Grid Margin="20,16,20,8">
+
+            <!-- Intro / prompt state -->
+            <Border x:Name="pnl_intro" Style="{StaticResource CardBorder}"
+                    VerticalAlignment="Top">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionHeader}"
+                               Text="Build the helper for this view"/>
+                    <TextBlock Style="{StaticResource HelperText}"
+                               Text="Launching the helper does a one-time export of the model around this view's crop region, then opens a live plan + section where you can drag the view-range planes and apply them back to Revit."/>
+                    <TextBlock x:Name="txt_view" Style="{StaticResource HelperText}"
+                               Margin="0,8,0,0"
+                               Text="Active view: --"/>
+
+                    <Border Background="#FFFBEA" BorderBrush="#D69E2E"
+                            BorderThickness="1" CornerRadius="3"
+                            Padding="10" Margin="0,12,0,0">
+                        <TextBlock Foreground="#744210" FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Text="The export can take a few minutes on large models. Revit will be busy during it. You can Abort at any time without affecting your model or losing unsaved work."/>
+                    </Border>
+                </StackPanel>
+            </Border>
+
+            <!-- Exporting / progress state -->
+            <Border x:Name="pnl_progress" Style="{StaticResource CardBorder}"
+                    VerticalAlignment="Top" Visibility="Collapsed">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionHeader}"
+                               Text="Exporting model slice"/>
+                    <TextBlock x:Name="txt_progress" Style="{StaticResource HelperText}"
+                               Text="Working. This can take a few minutes on large models."/>
+                    <ProgressBar x:Name="bar_progress" IsIndeterminate="True"
+                                 Height="6" Margin="0,14,0,0"
+                                 Background="#EDF2F7" Foreground="#2B6CB0"
+                                 BorderThickness="0"/>
+                    <TextBlock Style="{StaticResource HelperText}" Margin="0,12,0,0"
+                               Text="Press Abort to stop. Aborting never changes your model; it only cancels building the preview."/>
+                </StackPanel>
+            </Border>
+
+        </Grid>
+
+    </DockPanel>
+</Window>

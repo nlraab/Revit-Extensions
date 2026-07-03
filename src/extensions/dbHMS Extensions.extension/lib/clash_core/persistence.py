@@ -72,20 +72,32 @@ def _atomic_write(path, text):
 
 
 def _read_json(path, default):
-    """Read JSON from `path`; return `default` on missing-or-corrupt."""
+    """Read JSON from `path`; return `default` on missing-or-corrupt.
+
+    A file that parses but has the wrong top-level shape (e.g. a top-level list,
+    string, or number in a hand-edited or foreign file dropped into the now
+    user-picked clash folder) is treated as absent when a dict is expected, so
+    the readers below can safely do `data["..."]` / `data.get(...)`."""
     if not os.path.isfile(path):
         return default
     try:
         with codecs.open(path, "r", "utf-8") as f:
             data = json.load(f)
-        return data
     except (IOError, ValueError):
         return default
+    if isinstance(default, dict) and not isinstance(data, dict):
+        return default
+    return data
 
 
 def _write_json(path, data):
+    # ensure_ascii=False: IronPython 2.7's json.dumps raises on non-ASCII
+    # under the default (the documented repo gotcha). Refs now carry
+    # user-typed system/level names, so unicode is expected, and
+    # _atomic_write / _read_json already round-trip UTF-8.
     _ensure_dir(os.path.dirname(path))
-    _atomic_write(path, json.dumps(data, indent=2, sort_keys=True))
+    _atomic_write(path, json.dumps(data, indent=2, sort_keys=True,
+                                   ensure_ascii=False))
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +105,22 @@ def _write_json(path, data):
 # ---------------------------------------------------------------------------
 
 def project_dir(project_hash):
-    """Return <shared_root>/<project-hash>/, creating it if missing."""
+    """Return <shared_root>/<project-key>/, creating it if missing.
+
+    Use this for WRITE / asset paths (viewpoints, share, reports) that
+    legitimately need the folder to exist. The read helpers below go through
+    `_project_dir_path` (non-creating) instead, so merely opening a tool on an
+    unlinked project never litters the shared drive with an empty folder."""
     return _ensure_dir(os.path.join(_require_shared_root(), project_hash))
+
+
+def _project_dir_path(project_hash):
+    """Compute <shared_root>/<project-key>/ WITHOUT creating it. The read
+    path-builders use this: `_read_json` already returns the default when the
+    file is missing regardless of whether the parent dir exists, and every
+    writer self-ensures the directory via `_write_json`, so nothing needs the
+    side-effecting mkdir on a read."""
+    return os.path.join(_require_shared_root(), project_hash)
 
 
 def viewpoints_dir(project_hash):
@@ -114,15 +140,15 @@ def viewpoint_image_path(project_hash, clash_id):
 
 
 def clashes_path(project_hash):
-    return os.path.join(project_dir(project_hash), "clashes.json")
+    return os.path.join(_project_dir_path(project_hash), "clashes.json")
 
 
 def project_meta_path(project_hash):
-    return os.path.join(project_dir(project_hash), "project.json")
+    return os.path.join(_project_dir_path(project_hash), "project.json")
 
 
 def overrides_path(project_hash):
-    return os.path.join(project_dir(project_hash), "test_overrides.json")
+    return os.path.join(_project_dir_path(project_hash), "test_overrides.json")
 
 
 # ---------------------------------------------------------------------------
@@ -143,14 +169,24 @@ def global_test_library_path():
 # ---------------------------------------------------------------------------
 
 def read_clashes(project_hash):
-    """Return the clashes.json content; empty schema if missing."""
-    return _read_json(clashes_path(project_hash), default={
+    """Return the clashes.json content; empty schema if missing.
+
+    `groups` is the Layer C issue list (lib/clash_group). It lives INSIDE
+    clashes.json so one atomic write covers members + rosters + statuses.
+    WARNING to future writers: both run pipelines rebuild this file's top
+    level from a literal - any writer that drops the `groups` key silently
+    wipes every named group (integrity-tested in tests/test_clash_group)."""
+    data = _read_json(clashes_path(project_hash), default={
         "schema_version": SCHEMA_VERSION,
         "project_hash":   project_hash,
         "last_run_at":    None,
         "tests_run":      [],
         "clashes":        [],
+        "groups":         [],
     })
+    if "groups" not in data:
+        data["groups"] = []
+    return data
 
 
 def write_clashes(project_hash, data):
@@ -198,3 +234,76 @@ def read_project_meta(project_hash):
 
 def write_project_meta(project_hash, data):
     _write_json(project_meta_path(project_hash), data)
+
+
+# ---------------------------------------------------------------------------
+# Folder-path API (the kept tools: Coordination + 3D Viewer)
+# ---------------------------------------------------------------------------
+#
+# The current model stores ONE absolute clash-data folder path in the Revit
+# model (clash_core.binding). These helpers read/write directly inside that
+# folder -- no shared root, no per-project subfolder, no hash. `_read_json`
+# returns the default when a file is missing (so an empty/new folder reads as an
+# empty project) and `_write_json` ensures the folder exists on write, so a read
+# never creates anything on disk. Pass the absolute folder path the user picked.
+
+def clashes_path_at(folder):
+    return os.path.join(folder, "clashes.json")
+
+
+def project_meta_path_at(folder):
+    return os.path.join(folder, "project.json")
+
+
+def overrides_path_at(folder):
+    return os.path.join(folder, "test_overrides.json")
+
+
+def viewpoints_dir_at(folder):
+    """<folder>/viewpoints/, created on demand (a write path)."""
+    return _ensure_dir(os.path.join(folder, "viewpoints"))
+
+
+def read_clashes_at(folder):
+    """clashes.json inside `folder`; empty schema (incl. `groups`) if missing.
+    See read_clashes for why `groups` must never be dropped."""
+    data = _read_json(clashes_path_at(folder), default={
+        "schema_version": SCHEMA_VERSION,
+        "last_run_at":    None,
+        "tests_run":      [],
+        "clashes":        [],
+        "groups":         [],
+    })
+    if "groups" not in data:
+        data["groups"] = []
+    return data
+
+
+def write_clashes_at(folder, data):
+    _write_json(clashes_path_at(folder), data)
+
+
+def read_project_meta_at(folder):
+    return _read_json(project_meta_path_at(folder), default={
+        "schema_version": SCHEMA_VERSION,
+        "display_name":   None,
+        "disciplines":    [],
+        "link_role_map":  {},
+        "warn_threshold": None,
+    })
+
+
+def write_project_meta_at(folder, data):
+    _write_json(project_meta_path_at(folder), data)
+
+
+def read_overrides_at(folder):
+    return _read_json(overrides_path_at(folder), default={
+        "schema_version":    SCHEMA_VERSION,
+        "disabled_test_ids": [],
+        "custom_tests":      [],
+    })
+
+
+def write_overrides_at(folder, data):
+    _write_json(overrides_path_at(folder), data)

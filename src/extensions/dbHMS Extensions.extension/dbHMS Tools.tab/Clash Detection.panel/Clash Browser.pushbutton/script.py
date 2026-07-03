@@ -87,6 +87,18 @@ TRADE_FG_BRUSHES = {
 GRAY_BRUSH = _brush('#A0AEC0')
 DARK_GRAY_BRUSH = _brush('#4A5568')
 
+# Importance-band chip colors (match the web grid).
+BAND_BG_BRUSHES = {
+    'Critical': _brush('#FCEBEB'),
+    'Major':    _brush('#FAEEDA'),
+    'Minor':    _brush('#F1EFE8'),
+}
+BAND_FG_BRUSHES = {
+    'Critical': _brush('#791F1F'),
+    'Major':    _brush('#633806'),
+    'Minor':    _brush('#444441'),
+}
+
 
 # ---------------------------------------------------------------------------
 # View-model
@@ -94,7 +106,7 @@ DARK_GRAY_BRUSH = _brush('#4A5568')
 
 class ClashRow(object):
     """One row in the clash grid. Wraps a real clash dict so changes write back."""
-    def __init__(self, clash_dict, test_name_lookup):
+    def __init__(self, clash_dict, test_name_lookup, group_title_lookup=None):
         self.Source = clash_dict   # link back to underlying dict for in-place edits
         self.Id     = clash_dict.get('seq') or '?'
         self.TestName = test_name_lookup.get(clash_dict.get('test_id'), '(unknown test)')
@@ -106,10 +118,21 @@ class ClashRow(object):
         self.ElementB = (ref_b.get('name')
                          or _short_for_id(ref_b.get('element_id')))
 
-        self.Level  = '-'  # level lookup is a future enhancement (needs Revit)
+        self.Level  = (ref_a.get('level') or ref_b.get('level') or '-')
         self.Status = clash_dict.get('status') or 'Open'
         self.Trade  = clash_dict.get('assignee') or '-'
         self.Kind   = (clash_dict.get('kind') or 'hard').lower()
+
+        # Importance band + the Layer C issue this clash belongs to. Both
+        # are READ-ONLY here: the Browser shows them; the Clash Detection
+        # tool owns the scoring/grouping. Older records with no importance
+        # block show a neutral '-'.
+        imp = clash_dict.get('importance') or {}
+        self.Band = imp.get('band') or '-'
+        self.BandBgBrush = BAND_BG_BRUSHES.get(self.Band, GRAY_BRUSH)
+        self.BandFgBrush = BAND_FG_BRUSHES.get(self.Band, DARK_GRAY_BRUSH)
+        gt = (group_title_lookup or {}).get(clash_dict.get('group_id'))
+        self.Issue = gt or '-'
 
         comments = clash_dict.get('comments') or []
         self.CommentCount = len(comments)
@@ -152,16 +175,17 @@ def _short_for_id(elem_id):
 
 
 def _read_clashes_safe(project_hash):
-    """Return (clashes_list, test_name_lookup, banner_or_None)."""
+    """Return (clashes_list, test_name_lookup, group_title_lookup, banner)."""
     if not project_hash:
-        return ([], {}, '(no active project)')
+        return ([], {}, {}, '(no active project)')
     try:
         data = persistence.read_clashes(project_hash)
         clashes = data.get('clashes') or []
+        groups = data.get('groups') or []
     except persistence.SharedFolderNotConfigured as ex:
-        return ([], {}, str(ex))
+        return ([], {}, {}, str(ex))
     except Exception as ex:
-        return ([], {}, 'Could not read clashes.json: {}'.format(ex))
+        return ([], {}, {}, 'Could not read clashes.json: {}'.format(ex))
 
     # Test name lookup
     name_lookup = {}
@@ -174,7 +198,14 @@ def _read_clashes_safe(project_hash):
     except Exception:
         pass
 
-    return (clashes, name_lookup, None)
+    # group_id -> title, so each row can show its coordination issue.
+    group_titles = {}
+    for g in groups:
+        gid = g.get('id')
+        if gid and g.get('status') != 'MergedInto':
+            group_titles[gid] = g.get('title') or '(unnamed issue)'
+
+    return (clashes, name_lookup, group_titles, None)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +310,7 @@ class ClashBrowserForm(forms.WPFWindow):
             doc = revit.doc
             if doc is None:
                 return
-            ph = project.project_hash_for(doc)
+            ph = project.resolve_key(doc)
             if ph:
                 self._project_hash = ph
         except Exception:
@@ -293,11 +324,14 @@ class ClashBrowserForm(forms.WPFWindow):
             return 'unknown'
 
     def _load_clashes(self):
-        clash_dicts, name_lookup, banner = _read_clashes_safe(self._project_hash)
+        clash_dicts, name_lookup, group_titles, banner = _read_clashes_safe(
+            self._project_hash)
         self._clash_dicts = clash_dicts
         self._test_names  = name_lookup
+        self._group_titles = group_titles
 
-        self._clashes = [ClashRow(c, name_lookup) for c in clash_dicts]
+        self._clashes = [ClashRow(c, name_lookup, group_titles)
+                         for c in clash_dicts]
 
         # Wrap rows in an explicit ListCollectionView. This gives grouping a
         # known-stable .NET source instead of relying on WPF building an
@@ -662,10 +696,12 @@ class ClashBrowserForm(forms.WPFWindow):
             self._show_empty_detail()
 
     _GROUP_PROP_FOR_CHOICE = {
-        'Group by trade':  'Trade',
-        'Group by test':   'TestName',
-        'Group by level':  'Level',
-        'Group by status': 'Status',
+        'Group by trade':      'Trade',
+        'Group by test':       'TestName',
+        'Group by level':      'Level',
+        'Group by status':     'Status',
+        'Group by issue':      'Issue',
+        'Group by importance': 'Band',
     }
 
     def _on_group_changed(self, sender, args):

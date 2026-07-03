@@ -178,6 +178,22 @@ class PersistenceTests(_AppdataIsolation):
         d = persistence.project_dir(ph)
         self.assertTrue(os.path.isdir(d))
 
+    def test_read_path_builders_do_not_create_folder(self):
+        # Building a read path (or reading a missing DB) must NOT materialize
+        # the project folder -- otherwise merely opening a tool on an unlinked
+        # project litters the shared drive with empty hash folders.
+        from clash_core import persistence
+        ph = "neverlinked01"
+        proj = os.path.join(self.shared, ph)
+        persistence.clashes_path(ph)
+        persistence.project_meta_path(ph)
+        persistence.overrides_path(ph)
+        persistence.read_clashes(ph)
+        persistence.read_project_meta(ph)
+        persistence.read_overrides(ph)
+        self.assertFalse(os.path.isdir(proj),
+                         "read paths/reads must not create the project folder")
+
     def test_clashes_round_trip(self):
         from clash_core import persistence
         ph = "abcdef123456"
@@ -220,8 +236,10 @@ class PersistenceTests(_AppdataIsolation):
     def test_read_corrupt_returns_default(self):
         from clash_core import persistence
         ph = "abcdef123456"
-        # clashes_path() goes through project_dir() which creates the folder,
-        # so we don't need to mkdir ourselves.
+        # The read path-builders no longer create the folder (so opening a tool
+        # on an unlinked project can't litter the shared drive). Create it here
+        # via project_dir(), the write-side helper that still ensures the dir.
+        persistence.project_dir(ph)
         path = persistence.clashes_path(ph)
         with open(path, "w") as f:
             f.write("{ not json")
@@ -278,6 +296,76 @@ class PersistenceWithoutSharedRootTests(_AppdataIsolation):
         from clash_core import persistence
         with self.assertRaises(persistence.SharedFolderNotConfigured):
             persistence.global_dir()
+
+
+class PersistenceFolderApiTests(unittest.TestCase):
+    """The kept tools (Coordination + 3D Viewer) read/write clash data directly
+    inside one absolute folder chosen per project -- no shared root, no hash.
+    These are the *_at(folder) helpers that back that model."""
+
+    def setUp(self):
+        _fresh_modules()
+        self.tmp = tempfile.mkdtemp(prefix="dbhms_clash_folder_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_read_missing_folder_is_empty_project(self):
+        from clash_core import persistence
+        empty = os.path.join(self.tmp, "does-not-exist-yet")
+        data = persistence.read_clashes_at(empty)
+        self.assertEqual(data["clashes"], [])
+        self.assertEqual(data["groups"], [])          # groups key always present
+        self.assertFalse(os.path.isdir(empty))        # a read never creates it
+
+    def test_clashes_round_trip_in_folder(self):
+        from clash_core import persistence
+        payload = {"schema_version": 1, "last_run_at": "t",
+                   "tests_run": ["x"], "clashes": [{"id": "c1"}],
+                   "groups": [{"id": "g1"}]}
+        persistence.write_clashes_at(self.tmp, payload)
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "clashes.json")))
+        back = persistence.read_clashes_at(self.tmp)
+        self.assertEqual(back["clashes"], [{"id": "c1"}])
+        self.assertEqual(back["groups"], [{"id": "g1"}])
+
+    def test_meta_and_overrides_round_trip_in_folder(self):
+        from clash_core import persistence
+        persistence.write_project_meta_at(
+            self.tmp, {"display_name": "Job 21112",
+                       "link_role_map": {"ARCH.rvt": "Architectural"}})
+        persistence.write_overrides_at(
+            self.tmp, {"disabled_test_ids": ["d1"], "custom_tests": [{"id": "c"}]})
+        self.assertEqual(
+            persistence.read_project_meta_at(self.tmp)["display_name"], "Job 21112")
+        self.assertEqual(
+            persistence.read_overrides_at(self.tmp)["disabled_test_ids"], ["d1"])
+
+    def test_folder_api_needs_no_shared_root(self):
+        # No config / shared root is set in this test's environment, yet the
+        # folder API must work purely off the passed path.
+        from clash_core import persistence
+        persistence.write_clashes_at(self.tmp, {"clashes": [], "groups": []})
+        self.assertEqual(persistence.read_clashes_at(self.tmp)["clashes"], [])
+
+    def test_non_dict_json_reads_as_empty_project(self):
+        # A user-picked folder may contain a hand-edited or foreign clashes.json
+        # that parses to a non-dict. It must read as an empty project, never
+        # crash (which would discard a successful detection run).
+        from clash_core import persistence
+        import io as _io
+        for junk in ("[]", '"hello"', "42", "null"):
+            with _io.open(persistence.clashes_path_at(self.tmp), "w",
+                          encoding="utf-8") as f:
+                f.write(junk)
+            data = persistence.read_clashes_at(self.tmp)
+            self.assertEqual(data["clashes"], [])
+            self.assertEqual(data["groups"], [])
+        # project.json / test_overrides.json get the same protection.
+        with _io.open(persistence.project_meta_path_at(self.tmp), "w",
+                      encoding="utf-8") as f:
+            f.write("[1, 2, 3]")
+        self.assertIsNone(persistence.read_project_meta_at(self.tmp)["display_name"])
 
 
 class ModelsTests(unittest.TestCase):

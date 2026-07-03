@@ -16,6 +16,11 @@
   #minbtn:hover { background: rgba(20,26,33,0.78); color: #cbd5e0; }
   #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
           font: 14px Segoe UI, sans-serif; color: #cbd5e0; text-align: center; pointer-events: none; }
+  /* TEMP diagnostic readout (top-centre) -- removed once the high-DPI offset/look bug is solved */
+  #diag { position: fixed; left: 50%; top: 4px; transform: translateX(-50%);
+          font: 11px Consolas, monospace; color: #cffafe; background: rgba(8,12,18,0.78);
+          padding: 3px 10px; border-radius: 4px; z-index: 9999; pointer-events: none;
+          white-space: nowrap; letter-spacing: 0.2px; }
   #props { position: fixed; display: none; max-width: 300px; background: rgba(255,255,255,0.97);
            border: 1px solid #cbd5e0; border-radius: 4px; padding: 6px 12px; font: 12px Segoe UI, sans-serif;
            box-shadow: 0 3px 10px rgba(0,0,0,0.30); z-index: 10; pointer-events: none; }
@@ -39,7 +44,7 @@
             border-left: 7px solid transparent; border-right: 7px solid transparent;
             border-bottom: 14px solid #00BFFF; filter: drop-shadow(0 0 2px rgba(0,0,0,0.7));
             transform: translate(-50%,-50%); }
-  /* resize grip (top-right corner): nested diagonal lines, classic drag-to-resize */
+  /* resize grip (top-right corner): triangle of dots, matching the WPF tools' drag-to-resize grip */
   #mm_grip { position: absolute; right: 1px; top: 1px; width: 16px; height: 16px;
              cursor: nesw-resize; pointer-events: auto; }
   /* ---- standalone (plain-browser) share overlay: hidden inside Revit, where the
@@ -103,9 +108,12 @@
   <div id="mm_cam"></div>
   <div id="mm_grip" title="Drag to resize">
     <svg viewBox="0 0 16 16" width="16" height="16">
-      <line x1="6"  y1="0" x2="16" y2="10" stroke="rgba(45,55,72,0.75)" stroke-width="1.4"/>
-      <line x1="9"  y1="0" x2="16" y2="7"  stroke="rgba(45,55,72,0.75)" stroke-width="1.4"/>
-      <line x1="12" y1="0" x2="16" y2="4"  stroke="rgba(45,55,72,0.75)" stroke-width="1.4"/>
+      <!-- dotted grip (triangle pointing into the top-right corner), matching the WPF tools' resize grip -->
+      <g fill="rgba(45,55,72,0.75)">
+        <circle cx="13" cy="3"  r="1.15"/>
+        <circle cx="13" cy="7"  r="1.15"/><circle cx="9" cy="3" r="1.15"/>
+        <circle cx="13" cy="11" r="1.15"/><circle cx="9" cy="7" r="1.15"/><circle cx="5" cy="3" r="1.15"/>
+      </g>
     </svg>
   </div>
 </div>
@@ -131,6 +139,25 @@ function showHint(t, fadeMs) {
   // optional auto-dismiss so an informational notice doesn't sit over the model forever
   if (t && fadeMs) _hintTimer = setTimeout(() => { hint.style.display = 'none'; }, fadeMs);
 }
+// ---- TEMP on-screen diagnostics: build tag + dpr + sizes + last pointer-lock
+// look delta. Lets the high-DPI offset/look bug be read off the screen at a
+// glance (no log-file hunt). BUILD changes every code drop so we can confirm the
+// machine is running the latest. Remove this block once the bug is solved. ----
+const BUILD = '0629d-draglook';
+let lastRawMove = [0, 0];   // raw e.movementX/Y from the most recent locked mousemove
+const diagEl = document.createElement('div'); diagEl.id = 'diag';
+document.body.appendChild(diagEl);
+function updateDiag(){
+  const r = canvas.getBoundingClientRect();
+  diagEl.textContent =
+    'build ' + BUILD + '  dpr=' + (window.devicePixelRatio || 1) +
+    '  win=' + window.innerWidth + 'x' + window.innerHeight +
+    '  canvas=' + Math.round(r.width) + 'x' + Math.round(r.height) +
+    '  buf=' + canvas.width + 'x' + canvas.height +
+    '  lock=' + (document.pointerLockElement === canvas ? 'Y' : 'n') +
+    '  move=' + lastRawMove[0] + ',' + lastRawMove[1];
+}
+setInterval(updateDiag, 300); updateDiag();
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 // ---------- renderer ----------
@@ -611,9 +638,13 @@ function tuneAO(){
 // ---------- free-fly camera (ported from the WebGL viewer) ----------
 const cam = { pos: [0, 0, 0], yaw: 0, pitch: 0 };
 let vel = [0, 0, 0], keys = {}, dragMode = null, rightLook = false, locked = false;
-// true between requesting pointer-lock and it engaging: suppress hover-picking so a stray
-// transition mousemove can't re-show the selection box right after F clears it.
+// Look is DRAG-based, not pointer-lock based. Pointer lock (relative mouse) is broken over
+// Remote Desktop / VDI -- it returns garbage, jumpy movementX/Y -- and our users run Revit over
+// RDP, so we never use it. dragLook = right-button held; lookActive = 'F' toggled persistent
+// mouselook; lookLast holds the previous cursor pos so we can take a clean clientX/Y delta.
 let lockPending = false;
+let dragLook = false, lookActive = false, lookLast = null;
+const DRAG_GAIN = 2.0;   // CSS-px drag feels ~half as fast as raw relative motion; scale it up
 let lastX = 0, lastY = 0, prevT = 0;
 let userSpeed = 4.0, userLook = 0.10;
 const PITCH_LIMIT = Math.PI / 2 - 0.02;
@@ -1334,7 +1365,15 @@ function applyMovement(dt, gp){
   vel[0]+=(target[0]-vel[0])*k; vel[1]+=(target[1]-vel[1])*k; vel[2]+=(target[2]-vel[2])*k;
   cam.pos[0]+=vel[0]*dt; cam.pos[1]+=vel[1]*dt; cam.pos[2]+=vel[2]*dt;
 }
-function applyLook(dx,dy){ cam.yaw+=dx*lookRad(); cam.pitch-=dy*lookRad();
+function applyLook(dx,dy){
+  // dx,dy are CSS-pixel cursor-drag deltas (clientX/Y based), already resolution-
+  // independent -- no devicePixelRatio scaling. We deliberately do NOT use pointer
+  // lock (its movementX/Y are broken/jumpy over Remote Desktop). The cap guards a
+  // single pathological jump; normal drags stay well under it.
+  const CAP = 250;
+  dx = Math.max(-CAP, Math.min(CAP, dx));
+  dy = Math.max(-CAP, Math.min(CAP, dy));
+  cam.yaw+=dx*lookRad(); cam.pitch-=dy*lookRad();
   cam.pitch=Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, cam.pitch)); }
 function applyPan(dx,dy){ const f=forwardVec(), r=rightVec();
   const up=[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]];
@@ -1344,13 +1383,12 @@ function applyPan(dx,dy){ const f=forwardVec(), r=rightVec();
 let leftDown=null;
 canvas.addEventListener('mousedown', e => {
   flying=false; canvas.focus();
-  if (e.button===2){ clearHover(); if(!locked && canvas.requestPointerLock){ rightLook=true; lockPending=true; canvas.requestPointerLock(); } e.preventDefault(); return; }
-  if (locked) return;
+  if (e.button===2){ clearHover(); dragLook=true; lookLast=[e.clientX,e.clientY]; e.preventDefault(); return; }
   if (e.button===1){ clearHover(); dragMode='pan'; lastX=e.clientX; lastY=e.clientY; e.preventDefault(); }
   else if (e.button===0){ leftDown={x:e.clientX,y:e.clientY}; }
 });
 window.addEventListener('mouseup', e => {
-  if (rightLook && e.button===2){ rightLook=false; if(document.exitPointerLock) document.exitPointerLock(); }
+  if (e.button===2){ dragLook=false; lookLast=null; }
   if (e.button===0 && leftDown && !locked){
     // a clean click (not a drag) selects + pins the element under the cursor
     if (Math.hypot(e.clientX-leftDown.x, e.clientY-leftDown.y) < 5){
@@ -1361,7 +1399,10 @@ window.addEventListener('mouseup', e => {
   dragMode=null;
 });
 window.addEventListener('mousemove', e => {
-  if (locked || lockPending){ if (locked) applyLook(e.movementX||0, e.movementY||0); return; }
+  if (dragLook || lookActive){
+    if (lookLast){ const ldx=e.clientX-lookLast[0], ldy=e.clientY-lookLast[1];
+      lastRawMove=[ldx,ldy]; applyLook(ldx*DRAG_GAIN, ldy*DRAG_GAIN); }
+    lookLast=[e.clientX,e.clientY]; return; }
   if (dragMode==='pan'){ applyPan(e.clientX-lastX, e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; return; }
   if (isFlying()) return;
   if (!pinnedEl){
@@ -1381,14 +1422,17 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('wheel', e => { e.preventDefault(); flying=false;
   const f=forwardVec(), step=(bounds?bounds.radius*0.012:0.3)*(e.deltaY<0?1:-1);
   cam.pos[0]+=f[0]*step; cam.pos[1]+=f[1]*step; cam.pos[2]+=f[2]*step; }, { passive:false });
-document.addEventListener('pointerlockchange', () => { locked=(document.pointerLockElement===canvas); lockPending=false; if(!locked) rightLook=false; });
-document.addEventListener('pointerlockerror', () => { lockPending=false; });   // lock failed: don't freeze hover
 // Nav-key actions, shared by the page's OWN keydown and by keys forwarded from the WPF
 // host (so F / WASD / etc. work whenever the tool window is focused, not only when the
 // render area has keyboard focus -- no click-into-the-view required).
 function navKeyDown(k){
-  if (k==='escape'){ clearSelection(); return; }   // unselect only; never closes/minimizes
-  if (k==='f'){ if(locked) document.exitPointerLock(); else if(canvas.requestPointerLock){ clearSelection(); lockPending=true; canvas.requestPointerLock(); } return; }
+  if (k==='escape'){ if(lookActive){ lookActive=false; canvas.style.cursor=''; } clearSelection(); return; }
+  if (k==='f'){ // toggle persistent mouselook (drag-free): move the mouse to look, F/Esc to exit
+    lookActive=!lookActive; lookLast=null; canvas.style.cursor = lookActive ? 'none' : '';
+    showHint(lookActive ? 'Mouselook ON — move the mouse to look, press F or Esc to exit'
+                        : '', lookActive ? 3500 : 1);
+    if(lookActive) clearSelection();
+    return; }
   if (k==='shift'){ keys.shift=true; return; }
   if ('wasdqe'.indexOf(k)>=0){ keys[k]=true; flying=false; }
 }
@@ -1546,7 +1590,7 @@ const planCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);  // top-down, 
 // solids it passes through, so a wall fills its real footprint on EVERY floor it crosses (a plain
 // top-down render only fills a wall on the floor where it has a flat top/bottom face). The cut also
 // makes per-floor filtering exact -- only solids the plane actually passes through show.
-const PLAN_PAPER = new THREE.Color(0xeceeec);   // very light paper-grey background
+const PLAN_PAPER = new THREE.Color(0xe9eef3);   // very light paper background (matches View Range Helper plan)
 // The plan shows only the architectural SHELL (walls, columns, doors, etc.), never floor/ceiling/
 // roof slabs or MEP -- both to de-clutter and because slabs would clutter the cut.
 const PLAN_CATS = ['wall','column','door','window','curtain','stair','railing'];
@@ -1583,25 +1627,22 @@ planCapMat.stencilWrite = true; planCapMat.stencilFunc = THREE.NotEqualStencilFu
 planCapMat.stencilFail = THREE.ZeroStencilOp; planCapMat.stencilZFail = THREE.ZeroStencilOp; planCapMat.stencilZPass = THREE.ZeroStencilOp;
 const planCapScene = new THREE.Scene();
 planCapScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), planCapMat));
-// composite: white-on-black mask -> paper background + dark hatched walls (+1px dilation so thin
-// walls survive, + a darker outline at wall edges). Hatch is a screen-space diagonal in map pixels.
+// composite: white-on-black mask -> paper background + flat solid-poche walls (+1px dilation so thin
+// walls survive the downscale). No hatch: cut walls are filled with one flat dark slate, matching the
+// View Range Helper plan (POCHE_COLOR 0x39414f). The old diagonal hatch shimmered when the supersampled
+// map was scaled into the small minimap canvas, which read as "grain"; a flat fill stays crisp.
 const planCompositeMat = new THREE.ShaderMaterial({
   uniforms: { tMask:{value:null}, uTexel:{value:new THREE.Vector2()},
-    uPaper:{value:PLAN_PAPER}, uInk:{value:new THREE.Color(0x2c323b)}, uInk2:{value:new THREE.Color(0x232934)},
-    uEdge:{value:new THREE.Color(0x0a0d11)}, uSpace:{value:9.0} },
+    uPaper:{value:PLAN_PAPER}, uInk:{value:new THREE.Color(0x39414f)} },
   vertexShader: 'varying vec2 vUv;\nvoid main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }',
   fragmentShader:
     'precision highp float;\nvarying vec2 vUv;\nuniform sampler2D tMask; uniform vec2 uTexel;\n' +
-    'uniform vec3 uPaper; uniform vec3 uInk; uniform vec3 uInk2; uniform vec3 uEdge; uniform float uSpace;\n' +
+    'uniform vec3 uPaper; uniform vec3 uInk;\n' +
     'void main(){\n' +
-    '  float maxM=0.0, minM=1.0;\n' +
+    '  float m = 0.0;\n' +
     '  for(int dy=-1;dy<=1;dy++){ for(int dx=-1;dx<=1;dx++){\n' +
-    '    float m = texture2D(tMask, vUv+vec2(float(dx),float(dy))*uTexel).r;\n' +
-    '    maxM=max(maxM,m); minM=min(minM,m); } }\n' +
-    '  if(maxM<0.5){ gl_FragColor=vec4(uPaper,1.0); return; }       // paper\n' +
-    '  if(minM<0.5){ gl_FragColor=vec4(uEdge,1.0); return; }        // wall outline\n' +
-    '  float h = step(0.5, fract((gl_FragCoord.x+gl_FragCoord.y)/uSpace));\n' +
-    '  gl_FragColor = vec4(mix(uInk, uInk2, h), 1.0);              // hatched wall fill\n' +
+    '    m = max(m, texture2D(tMask, vUv+vec2(float(dx),float(dy))*uTexel).r); } }   // +1px dilation\n' +
+    '  gl_FragColor = vec4(mix(uPaper, uInk, step(0.5, m)), 1.0);   // flat poche walls on paper\n' +
     '}',
   depthTest:false, depthWrite:false
 });
@@ -1827,12 +1868,37 @@ function resize(){
   renderer.setSize(w, h, false); composer.setSize(w, h);
   camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix();
 }
+// Controller input, guarded against phantom devices. Work machines often expose
+// a fake gamepad (from a dock, KVM, headset, or remote-desktop session) that
+// sits with its sticks off-centre; trusting it makes the camera tilt up to the
+// sky and spin on its own, with no real controller attached. Defences:
+//   - subtract each pad's RESTING axes (snapshotted when first seen) so a steady
+//     offset or stick drift reads as zero -- a real stick push still clears the
+//     deadzone instantly, so genuine controllers keep working;
+//   - a device that doesn't report the standard gamepad mapping must actually
+//     MOVE before we trust it, so a static phantom never touches the camera.
+// 'g' toggles controller input off entirely as a last-resort backstop.
+let padUseEnabled = true;
+const padBaseline = {};   // gamepad index -> axes snapshot at first sight
+function pickGamepad(){
+  if (!padUseEnabled || !navigator.getGamepads) return null;
+  const pads = navigator.getGamepads();
+  for (const p of pads){
+    if (!p || !p.axes) continue;
+    if (!(p.index in padBaseline)) padBaseline[p.index] = Array.prototype.slice.call(p.axes);
+    const base = padBaseline[p.index];
+    const ax = Array.prototype.map.call(p.axes, (v,i)=> v - (base[i]||0));
+    const moved = ax.some(v=>Math.abs(v)>0.18);
+    if (p.mapping !== 'standard' && !moved) continue;   // unproven phantom: ignore
+    return { axes: ax, buttons: p.buttons, mapping: p.mapping };
+  }
+  return null;
+}
 function frame(t){
   requestAnimationFrame(frame);
   if (glLost) return;   // context is dead; don't throw on every frame trying to draw
   const dt = prevT ? Math.min(0.05, (t-prevT)/1000) : 0.016; prevT=t;
-  const pads = navigator.getGamepads ? navigator.getGamepads() : []; let gp=null;
-  for (const p of pads){ if (p){ gp=p; break; } }
+  const gp = pickGamepad();
   if (gp){ const dz=v=>Math.abs(v)<0.16?0:v; cam.yaw+=dz(gp.axes[2]||0)*2.4*dt; cam.pitch-=dz(gp.axes[3]||0)*2.4*dt;
     cam.pitch=Math.max(-PITCH_LIMIT,Math.min(PITCH_LIMIT,cam.pitch)); }
   applyMovement(dt, gp);
@@ -2023,5 +2089,17 @@ function bootStandalone(){
 
 if (STANDALONE) bootStandalone();
 </script>
+<style>
+  /* Window resize affordance: WebView2 paints over WPF's native grip
+     (airspace), so the page draws the classic corner dots itself. */
+  #winGrip { position: fixed; right: 3px; bottom: 3px; width: 14px; height: 14px; pointer-events: none; z-index: 9999; opacity: .6;
+    background:
+      radial-gradient(circle at 2.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 7.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 7.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 2.5px, #94A3B8 1.2px, transparent 1.7px); }
+</style><div id="winGrip"></div>
 </body>
 </html>

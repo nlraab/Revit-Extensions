@@ -35,19 +35,23 @@ import dbhms_ui
 import dbhms_telemetry
 
 from clash_core import config, persistence, project
-from clash_report import bcf, excel_summary
+from clash_report import bcf, excel_summary, digest
 from clash_report import html as html_report
 
 
 # Internal format keys.
-_FORMAT_BCF   = 'bcf'
-_FORMAT_XLSX  = 'xlsx'
-_FORMAT_HTML  = 'html'
+_FORMAT_BCF        = 'bcf'
+_FORMAT_BCF_GROUPS = 'bcf_groups'
+_FORMAT_AGENDA     = 'agenda'
+_FORMAT_XLSX       = 'xlsx'
+_FORMAT_HTML       = 'html'
 
 _FORMAT_EXTENSIONS = {
-    _FORMAT_BCF:  '.bcfzip',
-    _FORMAT_XLSX: '.xlsx',
-    _FORMAT_HTML: '.html',
+    _FORMAT_BCF:        '.bcfzip',
+    _FORMAT_BCF_GROUPS: '.bcfzip',
+    _FORMAT_AGENDA:     '.html',
+    _FORMAT_XLSX:       '.xlsx',
+    _FORMAT_HTML:       '.html',
 }
 
 
@@ -69,11 +73,13 @@ class ReportsForm(forms.WPFWindow):
         self._project_hash = None
         self._project_meta = {}
         self._clashes = []
+        self._groups = []
         self._reports_dir = None  # default output dir; resolved on first paint
 
         self._resolve_project()
         self._load_clashes()
         self._populate_test_filter()
+        self._populate_level_filter()
         self._set_default_output_folder()
         self._wire_filter_events()
 
@@ -97,7 +103,7 @@ class ReportsForm(forms.WPFWindow):
             doc = revit.doc
             if doc is None:
                 return
-            ph = project.project_hash_for(doc)
+            ph = project.resolve_key(doc)
             if not ph:
                 return
             self._project_hash = ph
@@ -108,12 +114,15 @@ class ReportsForm(forms.WPFWindow):
     def _load_clashes(self):
         if not self._project_hash:
             self._clashes = []
+            self._groups = []
             return
         try:
             data = persistence.read_clashes(self._project_hash)
             self._clashes = data.get('clashes') or []
+            self._groups = data.get('groups') or []
         except Exception:
             self._clashes = []
+            self._groups = []
 
     def _populate_test_filter(self):
         """Replace the XAML mockup test items with the actual loaded test names."""
@@ -132,6 +141,29 @@ class ReportsForm(forms.WPFWindow):
             item.Content = name
             self.cmb_test_filter.Items.Add(item)
         self.cmb_test_filter.SelectedIndex = 0
+
+    def _clash_level(self, clash):
+        """The level a clash sits on, from either ref's enriched level."""
+        a = clash.get('ref_a') or {}
+        b = clash.get('ref_b') or {}
+        return a.get('level') or b.get('level')
+
+    def _populate_level_filter(self):
+        """Replace the XAML mock level items with the real captured levels.
+        Level enrichment lands on refs at detection time; older data with no
+        level just leaves this at '(All levels)'."""
+        from System.Windows.Controls import ComboBoxItem
+        levels = sorted({lv for lv in (self._clash_level(c) for c in self._clashes)
+                         if lv})
+        self.cmb_level_filter.Items.Clear()
+        all_item = ComboBoxItem()
+        all_item.Content = "(All levels)"
+        self.cmb_level_filter.Items.Add(all_item)
+        for lv in levels:
+            item = ComboBoxItem()
+            item.Content = lv
+            self.cmb_level_filter.Items.Add(item)
+        self.cmb_level_filter.SelectedIndex = 0
 
     def _set_default_output_folder(self):
         """Default output folder = <shared>/<project-hash>/reports/.
@@ -157,7 +189,11 @@ class ReportsForm(forms.WPFWindow):
         for chk in self._iter_checkboxes(self.wp_status_filter):
             chk.Checked   += self._on_filter_changed
             chk.Unchecked += self._on_filter_changed
+        for chk in self._iter_checkboxes(self.wp_band_filter):
+            chk.Checked   += self._on_filter_changed
+            chk.Unchecked += self._on_filter_changed
         self.cmb_test_filter.SelectionChanged += self._on_filter_changed
+        self.cmb_level_filter.SelectionChanged += self._on_filter_changed
         self.cmb_date_filter.SelectionChanged  += self._on_filter_changed
 
     @staticmethod
@@ -181,19 +217,41 @@ class ReportsForm(forms.WPFWindow):
         passes the current filter selections."""
         allowed_trades = self._checked_set(self.wp_trade_filter)
         allowed_statuses = self._checked_set(self.wp_status_filter)
+        allowed_bands = self._checked_set(self.wp_band_filter)
         test_filter = self._combo_text(self.cmb_test_filter)
+        level_filter = self._combo_text(self.cmb_level_filter)
         date_filter = self._combo_text(self.cmb_date_filter)
         cutoff_iso = _date_filter_cutoff(date_filter)
 
         def predicate(clash):
+            imp = clash.get('importance') or {}
+            # Suppressed (noise-rule) clashes never go to a consultant: the
+            # whole point of Layer A is that the team decided they are not
+            # real. They stay in clashes.json but out of every export.
+            if imp.get('suppressed'):
+                return False
             if allowed_trades is not None:
                 if (clash.get('assignee') or '-') not in allowed_trades:
                     return False
             if allowed_statuses is not None:
                 if (clash.get('status') or 'Open') not in allowed_statuses:
                     return False
+            if allowed_bands is not None:
+                # Scored records carry importance.band. Genuinely unscored
+                # rows (older data, no importance block) have no band and
+                # pass only when every band is checked, so a partial band
+                # filter never silently swallows unscored data.
+                band = imp.get('band')
+                if band is None:
+                    if len(allowed_bands) < 3:
+                        return False
+                elif band not in allowed_bands:
+                    return False
             if test_filter and test_filter != "(All tests)":
                 if self._test_name_for(clash) != test_filter:
+                    return False
+            if level_filter and level_filter != "(All levels)":
+                if self._clash_level(clash) != level_filter:
                     return False
             if cutoff_iso:
                 first_seen = clash.get('first_seen_run') or ''
@@ -201,6 +259,28 @@ class ReportsForm(forms.WPFWindow):
                     return False
             return True
         return predicate
+
+    def _group_predicate(self):
+        """Filter GROUPS for the group-BCF/agenda exports: a group passes
+        when it has at least one member that passes the clash predicate.
+        This keeps the band/trade/status filters meaningful at the issue
+        level (a Critical-only export keeps groups with a Critical member)."""
+        clash_pred = self._build_filter_predicate()
+        by_id = {}
+        for c in self._clashes:
+            if isinstance(c, dict) and c.get('id'):
+                by_id[c['id']] = c
+
+        def gpred(group):
+            member_ids = group.get('member_ids') or []
+            if not member_ids:
+                return False           # dissolved/empty group: nothing to export
+            for mid in member_ids:
+                c = by_id.get(mid)
+                if c is not None and clash_pred(c):
+                    return True
+            return False
+        return gpred
 
     def _checked_set(self, panel):
         """Return the set of CheckBox.Content values currently checked
@@ -233,13 +313,22 @@ class ReportsForm(forms.WPFWindow):
     # --- Preview ------------------------------------------------------------
 
     def _update_preview(self):
+        fmt = self._selected_format()
         try:
-            predicate = self._build_filter_predicate()
-            count = sum(1 for c in self._clashes if predicate(c))
+            if fmt in (_FORMAT_BCF_GROUPS, _FORMAT_AGENDA):
+                gpred = self._group_predicate()
+                count = sum(1 for g in self._groups
+                            if g.get('status') != 'MergedInto' and gpred(g))
+                unit = 'issue-group(s)'
+            else:
+                predicate = self._build_filter_predicate()
+                count = sum(1 for c in self._clashes if predicate(c))
+                unit = 'clash(es)'
         except Exception:
             count = len(self._clashes)
-        self.txt_preview.Text = '{} clash(es) will be exported.'.format(count)
-        self.txt_status.Text = 'Ready - {} clash(es) match the current filters.'.format(count)
+            unit = 'clash(es)'
+        self.txt_preview.Text = '{} {} will be exported.'.format(count, unit)
+        self.txt_status.Text = 'Ready - {} {} match the current filters.'.format(count, unit)
 
     # --- Browse / Export ----------------------------------------------------
 
@@ -254,6 +343,8 @@ class ReportsForm(forms.WPFWindow):
     def _on_format_changed(self, sender, args):
         """Swap the filename's extension when the user picks a different
         format — saves them having to manually edit the textbox."""
+        # The preview unit (clashes vs issue-groups) depends on the format.
+        self._update_preview()
         new_ext = _FORMAT_EXTENSIONS[self._selected_format()]
         current = (self.txt_filename.Text or '').strip()
         if not current:
@@ -275,18 +366,24 @@ class ReportsForm(forms.WPFWindow):
         """Return the internal format key for the currently-selected
         cmb_format item. Defaults to BCF if unrecognized."""
         text = (self._combo_text(self.cmb_format) or '').lower()
-        if 'html' in text:
-            return _FORMAT_HTML
+        if 'by issue' in text:
+            return _FORMAT_BCF_GROUPS
+        if 'agenda' in text:
+            return _FORMAT_AGENDA
         if 'xlsx' in text or 'excel' in text:
             return _FORMAT_XLSX
+        if 'html' in text:
+            return _FORMAT_HTML
         return _FORMAT_BCF
 
     def _on_export(self, sender, args):
         fmt = self._selected_format()
         title_label = {
-            _FORMAT_BCF:  'Export BCF',
-            _FORMAT_XLSX: 'Export Excel',
-            _FORMAT_HTML: 'Export HTML',
+            _FORMAT_BCF:        'Export BCF',
+            _FORMAT_BCF_GROUPS: 'Export BCF (by issue)',
+            _FORMAT_AGENDA:     'Export meeting agenda',
+            _FORMAT_XLSX:       'Export Excel',
+            _FORMAT_HTML:       'Export HTML',
         }[fmt]
 
         if not self._project_hash:
@@ -336,6 +433,44 @@ class ReportsForm(forms.WPFWindow):
                     filter_predicate=predicate,
                     project_name=self._project_meta.get('display_name'),
                 )
+            elif fmt == _FORMAT_BCF_GROUPS:
+                viewpoints_dir = None
+                try:
+                    viewpoints_dir = persistence.viewpoints_dir(self._project_hash)
+                except Exception:
+                    pass
+                written = bcf.build_group_bcf_zip(
+                    project_meta=self._project_meta,
+                    groups=self._groups,
+                    clashes=self._clashes,
+                    viewpoints_dir=viewpoints_dir,
+                    out_path=out_path,
+                    group_predicate=self._group_predicate(),
+                    project_name=self._project_meta.get('display_name'),
+                )
+            elif fmt == _FORMAT_AGENDA:
+                viewpoints_dir = None
+                try:
+                    viewpoints_dir = persistence.viewpoints_dir(self._project_hash)
+                except Exception:
+                    pass
+                generated_by = None
+                try:
+                    from clash_core import users as _users
+                    from pyrevit import revit as _revit
+                    generated_by = _users.current_user(_revit.uiapp)
+                except Exception:
+                    pass
+                written = digest.build_digest_html(
+                    groups=self._groups,
+                    clashes=self._clashes,
+                    out_path=out_path,
+                    project_name=self._project_meta.get('display_name'),
+                    viewpoints_dir=viewpoints_dir,
+                    generated_by=generated_by,
+                    group_predicate=self._group_predicate(),
+                    clash_predicate=predicate,
+                )
             elif fmt == _FORMAT_XLSX:
                 written = excel_summary.build_xlsx(
                     clashes=self._clashes,
@@ -384,7 +519,14 @@ class ReportsForm(forms.WPFWindow):
             )
             return
 
-        self.txt_status.Text = 'Exported {} clash(es) to {}'.format(written, filename)
+        # Match the unit to the format so preview and completion agree.
+        if fmt == _FORMAT_BCF_GROUPS:
+            unit = 'issue-group(s)'
+        elif fmt == _FORMAT_AGENDA:
+            unit = 'agenda item(s)'
+        else:
+            unit = 'clash(es)'
+        self.txt_status.Text = 'Exported {} {} to {}'.format(written, unit, filename)
 
         # Show the file in Explorer so the user can grab it.
         try:
@@ -393,7 +535,7 @@ class ReportsForm(forms.WPFWindow):
             pass
 
         dbhms_ui.info(
-            "Exported {} clash(es) to:\n\n{}".format(written, out_path),
+            "Exported {} {} to:\n\n{}".format(written, unit, out_path),
             title='Export complete',
         )
 

@@ -310,6 +310,45 @@ class MergeRunsTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(summary["new"], 1)
 
+    def test_measurement_fields_survive_merge_new_and_persisting(self):
+        """gap_inches + closest points + contact flags must reach the persisted
+        record for NEW clashes, refresh on PERSISTING ones, and stay None-keyed
+        (no KeyError) on hard rows that never had them."""
+        from clash_core import merge
+
+        raw_soft = _raw("t1", _ref("host", 1), _ref("host", 2), [0, 0, 0], kind="soft")
+        raw_soft.update({
+            "gap_inches": 0.9,
+            "closest_point_a": [1.0, 2.0, 3.0],
+            "closest_point_b": [1.0, 2.0, 3.075],
+            "is_contact": False,
+            "gap_method": "mesh",
+        })
+        merged, summary = merge.merge_runs([], [raw_soft], run_iso="2026-01-01T00:00:00Z")
+        self.assertEqual(summary["new"], 1)
+        rec = merged[0]
+        self.assertEqual(rec["gap_inches"], 0.9)
+        self.assertEqual(rec["closest_point_a"], [1.0, 2.0, 3.0])
+        self.assertEqual(rec["closest_point_b"], [1.0, 2.0, 3.075])
+        self.assertIs(rec["is_contact"], False)
+        self.assertEqual(rec["gap_method"], "mesh")
+
+        # second run: same fingerprint, tighter gap -> refreshed in place
+        raw_again = dict(raw_soft)
+        raw_again.update({"gap_inches": 0.5, "closest_point_a": [1.0, 2.0, 3.01]})
+        merged2, summary2 = merge.merge_runs(merged, [raw_again], run_iso="2026-01-02T00:00:00Z")
+        self.assertEqual(summary2["persisting"], 1)
+        self.assertEqual(merged2[0]["gap_inches"], 0.5)
+        self.assertEqual(merged2[0]["closest_point_a"], [1.0, 2.0, 3.01])
+
+        # hard raw without measurement fields: keys exist as None, no KeyError
+        raw_hard = _raw("t1", _ref("host", 5), _ref("host", 6), [9, 9, 9], kind="hard")
+        merged3, _ = merge.merge_runs([], [raw_hard], run_iso="2026-01-01T00:00:00Z")
+        for k in ("gap_inches", "closest_point_a", "closest_point_b",
+                  "is_contact", "gap_method"):
+            self.assertIn(k, merged3[0])
+            self.assertIsNone(merged3[0][k])
+
     def test_does_not_mutate_input_old_clashes(self):
         """merge_runs should deep-copy old clashes, not mutate them in place."""
         from clash_core.merge import merge_runs

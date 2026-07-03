@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dbHMS View Range</title>
+<style>
+  :root{
+    --surface:#F7FAFC; --card:#FFFFFF; --card-border:#E2E8F0; --header:#2D3748;
+    --primary:#2B6CB0; --body:#2D3748; --helper:#718096; --accent:#00BFFF;
+    --field-label:#4A5568; --section-bg:#e9eef3;
+    --top:#38A169; --cut:#E53E3E; --bot:#3182CE; --vd:#805AD5; --guide:#A0AEC0;
+    --warn-bg:#FFFBEA; --warn-border:#D69E2E; --warn-text:#744210;
+    --err-bg:#FFF5F5; --err-border:#FC8181; --err-text:#742A2A;
+  }
+  *{ box-sizing:border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--surface);
+               font:12px "Segoe UI", system-ui, sans-serif; color:var(--body); }
+  #app{ position:fixed; inset:0; display:flex; flex-direction:column; }
+
+  /* slim in-page toolbar (the WPF window supplies the big dbHMS header) */
+  #toolbar{ flex:0 0 auto; display:flex; align-items:center; gap:12px;
+            padding:8px 14px; background:var(--card); border-bottom:1px solid var(--card-border); }
+  #toolbar .title{ font-weight:600; font-size:13px; color:#1A202C; }
+  #toolbar .viewname{ color:var(--helper); font-size:12px;
+                      max-width:34vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #toolbar .spacer{ flex:1 1 auto; }
+  .snapwrap{ display:flex; align-items:center; gap:6px; color:var(--field-label); user-select:none; }
+  .snapwrap input[type=text]{ width:54px; }
+  input[type=text]{ height:24px; padding:2px 6px; border:1px solid #CBD5E0; border-radius:3px;
+                    font:12px "Segoe UI", sans-serif; color:var(--body); }
+  button{ font:600 12px "Segoe UI", sans-serif; border-radius:3px; cursor:pointer; padding:6px 14px;
+          border:1px solid transparent; }
+  .btn-primary{ background:var(--primary); color:#fff; }
+  .btn-primary:disabled{ background:#A0AEC0; cursor:default; }
+  .btn-secondary{ background:#EDF2F7; color:var(--body); border-color:#CBD5E0; }
+  .wordmark{ font-weight:700; font-size:18px; user-select:none; }
+  .wordmark .db,.wordmark .hms{ color:var(--accent); } .wordmark .bar{ color:#7A8FA6; font-weight:300; }
+
+  /* template-lock warn banner */
+  #banner{ display:none; flex:0 0 auto; align-items:center; gap:12px; padding:10px 16px;
+           background:var(--warn-bg); border-bottom:1px solid var(--warn-border); color:var(--warn-text); }
+  #banner.show{ display:flex; }
+  #banner .msg{ flex:1 1 auto; }
+  #banner button{ padding:5px 10px; }
+  .btn-warn{ background:#FEFCBF; border:1px solid var(--warn-border); color:var(--warn-text); }
+
+  /* body: editor sidebar + render stage */
+  #body{ flex:1 1 auto; display:flex; min-height:0; }
+  #stage{ position:relative; flex:1 1 auto; overflow:hidden; background:var(--section-bg); }
+  #c{ position:absolute; inset:0; width:100%; height:100%; display:block; outline:none; }
+  #ovl{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  #ovl .hit{ pointer-events:auto; }
+  #divider{ position:absolute; top:0; bottom:0; width:1px; background:var(--card-border); pointer-events:none; }
+  .region-label{ position:absolute; top:8px; padding:2px 9px; border-radius:10px; font-size:11px;
+                 font-weight:600; color:#4A5568; background:rgba(255,255,255,0.82);
+                 border:1px solid var(--card-border); user-select:none; pointer-events:none; }
+  .region-btn{ position:absolute; top:6px; padding:3px 11px; border-radius:10px; font-size:11px;
+               font-weight:600; color:#4A5568; background:rgba(255,255,255,0.92);
+               border:1px solid var(--card-border); cursor:pointer; user-select:none; }
+  .region-btn:hover{ background:#fff; border-color:#CBD5E0; color:var(--body); }
+
+  /* four-plane editor (docked left sidebar, never overlaps the plan) */
+  #editor{ flex:0 0 288px; width:288px; background:var(--card); border-right:1px solid var(--card-border);
+           padding:12px 12px 10px; overflow-y:auto; }
+  #editor h3{ margin:0 0 4px; font-size:13px; font-weight:600; color:#1A202C; }
+  #editor .sub{ margin:0 0 8px; font-size:11px; color:var(--helper); }
+  .prow{ display:grid; grid-template-columns:14px 1fr; gap:7px; align-items:start;
+         padding:6px 0; border-top:1px solid #EDF2F7; }
+  .prow:first-of-type{ border-top:none; }
+  .prow.disabled{ opacity:0.42; }
+  .swatch{ width:12px; height:12px; border-radius:3px; margin-top:3px; }
+  .prow .pname{ font-weight:600; font-size:12px; }
+  .prow .ctrls{ display:flex; gap:6px; margin-top:4px; align-items:center; }
+  .prow select{ flex:1 1 auto; min-width:0; height:24px; border:1px solid #CBD5E0; border-radius:3px;
+                font:12px "Segoe UI", sans-serif; color:var(--body); background:#fff; }
+  .prow .off{ width:70px; }
+  .prow .abs{ margin-top:3px; font-size:11px; color:var(--field-label); }
+  .prow .abs b{ color:var(--body); font-weight:600; }
+
+  /* visibility panel (sidebar, under the planes) -- model rows + Edit dialog */
+  #editor h3.shhdr{ margin-top:14px; padding-top:12px; border-top:1px solid var(--card-border); }
+  #shtree{ margin-top:2px; }
+  .visrow{ display:flex; align-items:center; gap:8px; padding:5px 0;
+           border-top:1px solid #EDF2F7; }
+  .visrow:first-child{ border-top:none; }
+  .vismodel{ flex:1 1 auto; display:flex; align-items:center; gap:7px; min-width:0;
+             font-weight:600; font-size:12px; color:#1A202C; cursor:pointer; user-select:none; }
+  .vismname{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .visedit{ flex:0 0 auto; padding:3px 10px; font:600 11px "Segoe UI", sans-serif;
+            background:#EDF2F7; color:var(--body); border:1px solid #CBD5E0; border-radius:3px; }
+  #shtree input[type=checkbox]{ flex:0 0 auto; }
+
+  /* Edit dialog (in-page modal over the whole tool) */
+  #vismodal{ display:none; position:fixed; inset:0; z-index:50; align-items:center;
+             justify-content:center; background:rgba(45,55,72,0.45); }
+  #vismodal.show{ display:flex; }
+  .visdlg{ width:540px; max-width:92vw; max-height:86vh; display:flex; flex-direction:column;
+           background:var(--card); border-radius:6px; box-shadow:0 12px 40px rgba(0,0,0,0.3); overflow:hidden; }
+  .visdlg-head{ flex:0 0 auto; background:var(--header); color:#fff; padding:12px 16px;
+                font-size:15px; font-weight:600; }
+  .visdlg-body{ flex:1 1 auto; display:flex; gap:14px; padding:14px 16px; min-height:0; }
+  .visdlg-col{ flex:1 1 50%; display:flex; flex-direction:column; min-height:0; }
+  .visdlg-colhead{ display:flex; align-items:center; justify-content:space-between;
+                   font-size:12px; font-weight:600; color:#1A202C; margin-bottom:5px; }
+  .visdlg-colhead .minibtn{ padding:2px 8px; font:600 11px "Segoe UI", sans-serif;
+            background:#EDF2F7; color:var(--body); border:1px solid #CBD5E0; border-radius:3px; margin-left:4px; }
+  .vislist{ flex:1 1 auto; overflow-y:auto; border:1px solid var(--card-border); border-radius:4px;
+            padding:8px; min-height:160px; max-height:46vh; }
+  .vischk{ display:flex; align-items:center; gap:7px; padding:3px 0; font-size:12px;
+           color:var(--body); cursor:pointer; user-select:none; }
+  .visempty{ font-size:11px; color:#A0AEC0; }
+  .visdlg-foot{ flex:0 0 auto; display:flex; justify-content:flex-end; gap:8px;
+                padding:12px 16px; border-top:1px solid var(--card-border); background:#fff; }
+
+  /* validation banner (in the sidebar, under the plane rows) */
+  #validation{ display:none; margin-top:10px;
+               background:var(--err-bg); border:1px solid var(--err-border); border-radius:4px;
+               padding:8px 11px; color:var(--err-text); font-size:11px; }
+  #validation.show{ display:block; }
+  #validation ul{ margin:4px 0 0; padding-left:16px; } #validation li{ margin:1px 0; }
+
+  /* loading + toast */
+  #hint{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+         font-size:14px; color:#4a5568; text-align:center; pointer-events:none; }
+  #toast{ position:absolute; left:50%; bottom:18px; transform:translateX(-50%) translateY(20px);
+          background:#2D3748; color:#fff; padding:9px 16px; border-radius:5px; font-size:12px;
+          max-width:70vw; opacity:0; transition:opacity .18s, transform .18s; pointer-events:none;
+          white-space:pre-wrap; }
+  #toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+  #toast.err{ background:#742A2A; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "./lib/three/three.module.js",
+  "three/addons/": "./lib/three/addons/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="title">View Range</span>
+    <span class="viewname" id="viewname"></span>
+    <span class="spacer"></span>
+    <label class="snapwrap" title="Snap plane elevations to an increment">
+      <input type="checkbox" id="snap_on"><span>Snap</span>
+      <input type="text" id="snap_dist" value="0.5" title="Snap increment (feet)">
+      <span>ft</span>
+    </label>
+    <button class="btn-secondary" id="btn_revert">Revert</button>
+    <button class="btn-primary" id="btn_apply">Apply to Revit</button>
+  </div>
+
+  <div id="banner">
+    <span class="msg" id="banner_msg"></span>
+    <button class="btn-warn" id="btn_detach">Detach view range</button>
+    <button class="btn-warn" id="btn_edittpl">Edit template instead</button>
+  </div>
+
+  <div id="body">
+    <div id="editor">
+      <h3>View Range Planes</h3>
+      <p class="sub" id="editor_sub">Drag a bar in the section, or edit a plane below.</p>
+      <div id="prows"></div>
+      <div id="validation"></div>
+
+      <h3 class="shhdr">Visibility</h3>
+      <p class="sub">Turn whole models off, or click Edit to toggle a model's
+        categories and worksets. Things hidden in the plan start off; switch one
+        on, then raise the Cut or Top to reveal it. Instant &mdash; nothing re-exports.</p>
+      <div id="shtree"></div>
+    </div>
+
+    <div id="stage">
+      <canvas id="c" tabindex="0"></canvas>
+      <svg id="ovl" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="divider"></div>
+      <div class="region-label" id="lbl_plan" style="left:8px;">Plan</div>
+      <div class="region-label" id="lbl_sec">Section</div>
+      <button class="region-btn" id="btn_flip" style="left:64px;"
+              title="Flip the section's view direction">&#8646; Flip section</button>
+      <div id="hint">Loading view-range slice&hellip;</div>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+  <!-- Edit dialog: one model's categories + worksets (3D-Viewer style) -->
+  <div id="vismodal">
+    <div class="visdlg">
+      <div class="visdlg-head"><span id="vismodal_title">Model</span></div>
+      <div class="visdlg-body">
+        <div class="visdlg-col">
+          <div class="visdlg-colhead"><span>Categories</span>
+            <span><button class="minibtn" id="vis_cats_all">All</button><button class="minibtn" id="vis_cats_none">None</button></span>
+          </div>
+          <div class="vislist" id="vis_cats"></div>
+        </div>
+        <div class="visdlg-col">
+          <div class="visdlg-colhead"><span>Worksets</span>
+            <span><button class="minibtn" id="vis_ws_all">All</button><button class="minibtn" id="vis_ws_none">None</button></span>
+          </div>
+          <div class="vislist" id="vis_ws"></div>
+        </div>
+      </div>
+      <div class="visdlg-foot">
+        <button class="btn-secondary" id="vis_cancel">Cancel</button>
+        <button class="btn-primary" id="vis_apply">Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module" src="./vr/app.js"></script>
+<style>
+  /* Window resize affordance: WebView2 paints over WPF's native grip
+     (airspace), so the page draws the classic corner dots itself. */
+  #winGrip { position: fixed; right: 3px; bottom: 3px; width: 14px; height: 14px; pointer-events: none; z-index: 9999; opacity: .6;
+    background:
+      radial-gradient(circle at 2.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 12.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 7.5px 7.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 7.5px, #94A3B8 1.2px, transparent 1.7px),
+      radial-gradient(circle at 12.5px 2.5px, #94A3B8 1.2px, transparent 1.7px); }
+</style><div id="winGrip"></div>
+</body>
+</html>

@@ -56,15 +56,28 @@ def hash_path(path):
 # ---------------------------------------------------------------------------
 
 def central_model_path(doc):
-    """Return the full path to the central .rvt for `doc`.
+    """Return the stable identity path for `doc`'s central model.
 
-    For workshared documents, uses GetWorksharingCentralModelPath +
-    ModelPathUtils.ConvertModelPathToUserVisiblePath so the result matches
-    what Revit shows in the title bar. For non-workshared documents (or if
-    workshare lookup fails), falls back to `doc.PathName`.
+    Priority order matters for identity stability:
+    1. ACC / BIM 360 cloud models: the CLOUD path ("BIM 360://Project/
+       Model.rvt" style) - identical for every teammate on every machine,
+       unlike doc.PathName which points at the machine-local cloud cache.
+    2. Workshared file-based models: GetWorksharingCentralModelPath, which
+       matches what Revit shows in the title bar (UNC/mapped path everyone
+       shares).
+    3. Everything else (or any lookup failure): doc.PathName.
     """
     from Autodesk.Revit.DB import ModelPathUtils  # noqa: F401
 
+    try:
+        if getattr(doc, "IsModelInCloud", False):
+            mp = doc.GetCloudModelPath()
+            if mp is not None:
+                p = ModelPathUtils.ConvertModelPathToUserVisiblePath(mp) or ""
+                if p:
+                    return p
+    except Exception:
+        pass
     if getattr(doc, "IsWorkshared", False):
         try:
             mp = doc.GetWorksharingCentralModelPath()
@@ -79,6 +92,18 @@ def project_hash_for(doc):
     """Return the stable per-project hash for `doc`. May be "" for an
     unsaved/untitled document - callers should treat that as "no project."""
     return hash_path(central_model_path(doc))
+
+
+def resolve_key(doc):
+    """Legacy storage key (SHA-1 path hash) for the OLD, being-retired clash
+    buttons that still resolve data as <shared_root>/<key>/.
+
+    The kept tools (Coordination, 3D Viewer) do NOT use this: the tool's only
+    project state is now a single absolute clash-data folder path stored in the
+    model (`clash_core.binding.folder_for`), read/written directly with the
+    `*_at(folder)` persistence helpers. This shim only exists so the old
+    buttons keep working until they're removed."""
+    return project_hash_for(doc)
 
 
 def display_name_for(doc):

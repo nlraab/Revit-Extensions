@@ -274,6 +274,9 @@ def build_glb(meshes, asset_extras=None):
         node = {"mesh": mesh_index}
         if mesh.metadata:
             node["extras"] = mesh.metadata
+            fk = mesh.metadata.get("fed_key")
+            if fk:
+                node["name"] = fk   # xeokit keys Entities by node name -> fed_key id-parity
         scene_nodes.append(len(nodes))
         nodes.append(node)
 
@@ -464,6 +467,9 @@ class GlbWriter(object):
         node = {"mesh": mesh_index}
         if mesh.metadata:
             node["extras"] = mesh.metadata
+            fk = mesh.metadata.get("fed_key")
+            if fk:
+                node["name"] = fk   # xeokit keys Entities by node name -> fed_key id-parity
         self._scene_nodes.append(len(self._nodes))
         self._nodes.append(node)
 

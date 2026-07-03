@@ -223,7 +223,9 @@
                             <ComboBox x:Name="cmb_group_by" Width="160" DockPanel.Dock="Right"
                                       Margin="0,0,0,0">
                                 <ComboBoxItem Content="No grouping"/>
-                                <ComboBoxItem Content="Group by trade" IsSelected="True"/>
+                                <ComboBoxItem Content="Group by issue" IsSelected="True"/>
+                                <ComboBoxItem Content="Group by importance"/>
+                                <ComboBoxItem Content="Group by trade"/>
                                 <ComboBoxItem Content="Group by test"/>
                                 <ComboBoxItem Content="Group by level"/>
                                 <ComboBoxItem Content="Group by status"/>
@@ -309,6 +311,22 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="#" Binding="{Binding Id}"
                                                     Width="40" MinWidth="40" IsReadOnly="True"
+                                                    ElementStyle="{StaticResource EllipsisCellStyle}"/>
+                                <DataGridTemplateColumn Header="Importance" Width="80" MinWidth="80" IsReadOnly="True">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{Binding BandBgBrush}"
+                                                    CornerRadius="3" Padding="6,2" Margin="2"
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Band}"
+                                                           Foreground="{Binding BandFgBrush}"
+                                                           FontSize="10" FontWeight="SemiBold"/>
+                                            </Border>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="Issue" Binding="{Binding Issue}"
+                                                    Width="2*" MinWidth="90" IsReadOnly="True"
                                                     ElementStyle="{StaticResource EllipsisCellStyle}"/>
                                 <DataGridTextColumn Header="Test" Binding="{Binding TestName}"
                                                     Width="*" MinWidth="90" IsReadOnly="True"

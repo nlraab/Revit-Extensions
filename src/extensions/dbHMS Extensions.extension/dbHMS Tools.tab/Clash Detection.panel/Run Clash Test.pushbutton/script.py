@@ -256,7 +256,7 @@ class RunClashTestForm(forms.WPFWindow):
             return
 
         try:
-            ph = project.project_hash_for(doc)
+            ph = project.resolve_key(doc)
         except Exception:
             ph = ''
 
@@ -537,12 +537,14 @@ class RunClashTestForm(forms.WPFWindow):
                 )
             raw_clashes = []
             error_count = 0
+            ins_cache = {}   # one insulation map per document per run
             for test_dict in selected_tests:
                 try:
                     raw_clashes.extend(
                         runner.run_test(doc, test_dict, run_role_map,
                                         log=output.print_md,
-                                        trade_filter=trade_filter)
+                                        trade_filter=trade_filter,
+                                        ins_cache=ins_cache)
                     )
                 except Exception as ex:
                     # One bad test shouldn't kill the whole run, but log it
@@ -586,12 +588,33 @@ class RunClashTestForm(forms.WPFWindow):
             merged_clashes, summary = merge.merge_runs(
                 old_clashes, raw_clashes, run_iso=run_iso, author=author,
             )
+            # Importance engine (lib/clash_score): stamp band/score/reason so
+            # data written by this legacy button matches the new Clash
+            # Detection tool. Best-effort; never fails the run.
+            try:
+                import clash_score
+                clash_score.score_all(merged_clashes)
+            except Exception:
+                pass
+            # Layer C grouping (lib/clash_group): same contract. On failure
+            # the previous run's groups pass through untouched.
+            groups = existing_data.get('groups') or []
+            try:
+                import clash_group
+                groups, _gsummary = clash_group.regroup_all(
+                    merged_clashes, groups, run_iso=run_iso)
+            except Exception:
+                pass
             new_data = {
                 'schema_version': existing_data.get('schema_version', 1),
                 'project_hash':   self._project_hash,
                 'last_run_at':    run_iso,
+                'last_run_summary': summary,
                 'tests_run':      [t.get('id') for t in selected_tests],
                 'clashes':        merged_clashes,
+                # Layer C groups live INSIDE clashes.json (atomicity).
+                # Never drop this key: named groups die silently.
+                'groups':         groups,
             }
             persistence.write_clashes(self._project_hash, new_data)
         except Exception as ex:
@@ -702,103 +725,69 @@ class RunClashTestForm(forms.WPFWindow):
             )
 
     def _on_open_settings(self, sender, args):
-        """Close this Run Clash Test form, then auto-launch the
-        Settings toolbar button via Revit's ribbon (the AdWindows
-        ribbon-walk approach used elsewhere in this extension).
+        """Open the Clash Detection Settings form as a modal dialog ON TOP
+        of this window, without closing this form.
+
+        Earlier this posted the Settings ribbon command and then closed
+        Run Clash Test. That had two problems the user hit directly:
+
+        1. Closing this form too was jarring — after picking a shared
+           folder and closing Settings, you were dumped back to bare
+           Revit instead of the tool you started in.
+        2. The ribbon command is dispatched through Revit's external
+           command queue, which is blocked while this modal dialog is
+           open. So the freshly picked shared folder didn't take effect
+           until the queued command finally ran and the tool was
+           reopened — the "wait a few minutes / click enough times"
+           lag.
+
+        Launching the sibling Settings script in-process (the same
+        execfile pattern the Open Browser button uses) sidesteps both:
+        Settings opens as a nested modal, and when it closes you're back
+        here with the new config readable live — config.shared_root() is
+        read fresh on every Run, so the next Run just works.
         """
-        launched = self._post_settings_command()
-        self.Close()
-        if not launched:
+        settings_script = os.path.abspath(os.path.join(
+            SCRIPT_DIR, '..', 'Settings.pushbutton', 'script.py',
+        ))
+        if not os.path.isfile(settings_script):
             dbhms_ui.info(
+                "Settings script not found at:\n\n{}\n\n"
                 "Click the Settings button on the dbHMS Clash Detection "
-                "toolbar to manage role mapping.",
-                title='Settings',
+                "toolbar instead.".format(settings_script),
+                title='Could not open Settings',
             )
+            return
+        try:
+            ns = dict(globals())
+            ns['__file__'] = settings_script
+            ns['__name__'] = '__main__'
+            execfile(settings_script, ns)
+        except Exception as ex:
+            dbhms_ui.info(
+                "Couldn't open Settings:\n\n{}\n\n"
+                "Click the Settings button on the dbHMS Clash Detection "
+                "toolbar instead.".format(ex),
+                title='Open failed',
+            )
+            return
+        # Settings closed — re-sync the bits of this form that depend on it
+        # (warn threshold + link role map) so the user can Run immediately
+        # without reopening the tool. The shared-folder gate in _on_run is
+        # read live, so it needs no refresh here.
+        self._refresh_after_settings()
 
-    @staticmethod
-    def _post_settings_command():
-        """Walk the Revit ribbon and click our **Clash Detection >
-        Settings** button. The text-only match in the original was too
-        greedy — pyRevit's own Settings button (Core Settings /
-        Environment Variables / etc.) shares the text "Settings" and
-        was being invoked instead, opening pyRevit's settings dialog
-        rather than our Clash Detection settings.
-
-        Fix: scope the search to the tab whose title contains "Clash
-        Detection". Skip every other tab — pyRevit, dbHMS Tools,
-        anything else — so we can only possibly land on the right
-        button.
-        """
+    def _refresh_after_settings(self):
+        """Re-read per-machine + per-project config after Settings closes."""
         try:
-            import clr
-            clr.AddReference("AdWindows")
-            from Autodesk.Windows import ComponentManager
+            cfg = config.load()
+            self.txt_warn_threshold.Text = str(cfg.get('warn_threshold') or 2000)
         except Exception:
-            return False
+            pass
         try:
-            ribbon = ComponentManager.Ribbon
+            self._populate_link_section()
         except Exception:
-            return False
-        if ribbon is None:
-            return False
-        try:
-            for tab in ribbon.Tabs:
-                try:
-                    for panel in tab.Panels:
-                        # Scope to the Clash Detection PANEL by name
-                        # (Iter 16 — the panel lives inside dbHMS
-                        # Tools tab now, so a tab-title filter would
-                        # miss it). Panel-level scoping ALSO keeps
-                        # us out of pyRevit's own "Settings" button,
-                        # which lives in a different panel.
-                        try:
-                            source = panel.Source
-                            if source is None:
-                                continue
-                            panel_title = str(getattr(source, "Title", "") or "")
-                        except Exception:
-                            continue
-                        if "Clash Detection" not in panel_title:
-                            continue
-                        try:
-                            for item in source.Items:
-                                text = None
-                                for attr in ("Text", "AutomationName",
-                                             "Cookie", "Description"):
-                                    try:
-                                        v = getattr(item, attr, None)
-                                        if v:
-                                            text = str(v)
-                                            break
-                                    except Exception:
-                                        continue
-                                if not text:
-                                    continue
-                                normalized = text.replace("\n", "") \
-                                                  .replace("\r", "") \
-                                                  .replace("-", "") \
-                                                  .replace(" ", "") \
-                                                  .lower()
-                                if normalized == "settings":
-                                    handler = getattr(item, "CommandHandler", None)
-                                    if handler is None:
-                                        continue
-                                    try:
-                                        handler.Execute(item)
-                                        return True
-                                    except Exception:
-                                        try:
-                                            handler.Execute(None)
-                                            return True
-                                        except Exception:
-                                            continue
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        except Exception:
-            return False
-        return False
+            pass
 
     def _on_close(self, sender, args):
         self.Close()

@@ -71,6 +71,26 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
    would make a "change the storage path" tweak a 12-file edit. See
    the Wiring section below for how each `script.py` plugs in.
 
+4. **`View Range Helper.pushbutton` imports `lib/clash_export`** — a
+   **cross-panel** use of the clash_export lib (it lives next to Clash
+   Detection but is reused by a `BIM Tools.panel` tool). View Range
+   Helper is a web/glTF tool, the same approach as the 3D Viewer: it
+   exports the active plan's crop footprint to a small `.glb` via
+   `clash_export.custom_export.export_region`, hosts WebView2, and slices
+   the model live with GPU clipping planes that map 1:1 onto Revit's four
+   view-range planes (Top, Cut, Bottom, View Depth). The whole interactive
+   editor (plan + section, draggable planes, validation, Apply) lives in
+   `web/` (`viewrange.html` + `vr/app.js`, vendored three.js under
+   `web/lib/three/`). The page has a **browser dev-fallback mode**: when
+   not hosted in WebView2 it auto-loads the sample fixture under
+   `web/sample/` so the entire UI is testable in a plain browser over
+   HTTP (no Revit). `python.py` stays a thin host: export, build + post
+   `meta` (levels, current view range, template state), and on Apply
+   convert plane elevations back to (level, offset) and write them in a
+   transaction. Reusing `export_region` rather than copying it keeps one
+   export pipeline (it handles linked models via a transform stack). Fixture
+   regen + how to swap in a real export: `tools/vr_fixtures/README.md`.
+
 If a future tool wants the same treatment, document the exception here
 first.
 
@@ -119,7 +139,7 @@ A new pushbutton without telemetry will fail the suite.
 
 **Tool-level READMEs:** some larger tools have their own `README.md` next to `script.py`. Read these before making serious changes inside that tool's folder; do not auto-load them outside that scope. Currently:
 - `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/Clash Detection.panel/README.md` — Clash Detection architecture (see paragraph above).
-- `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/dbHMS Tools.panel/View Templates Manager.pushbutton/README.md` — multi-XAML structure, iteration plan, Revit API mapping, documented `LinkVisibility.Custom` API limitation. The tool ships 5 XAML files (main + 4 sub-dialogs) and is being built iteration-by-iteration; iter-1 is a UI shell with mock sub-dialog data and disabled Apply.
+- `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/BIM Tools.panel/View Templates Manager.pushbutton/README.md` — multi-XAML structure, iteration plan, Revit API mapping, documented `LinkVisibility.Custom` API limitation. The tool ships 5 XAML files (main + 4 sub-dialogs) and is being built iteration-by-iteration; iter-1 is a UI shell with mock sub-dialog data and disabled Apply.
 
 ### Build / deploy model
 
