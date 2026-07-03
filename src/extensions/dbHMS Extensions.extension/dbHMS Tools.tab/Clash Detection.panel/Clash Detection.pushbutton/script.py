@@ -525,8 +525,10 @@ class CoordinationForm(forms.WPFWindow):
         except Exception:
             _log("push_initial({0}): folder probe failed\n{1}".format(
                 why, traceback.format_exc()))
-        # Heal FIRST but never let it block the sends (own try/except inside).
-        self._heal_binding()
+        # NOTE: nothing writes the model on open. The folder binding is only
+        # ever written by an explicit user action (_set_folder). Auto-heal
+        # was removed - it could re-publish a stale local cache over a
+        # teammate's synced change (multi-machine review).
         # Each feed independent: one failure can't blank the others.
         for name, fn in (("settings", self._send_settings),
                          ("tests", self._send_tests),
@@ -749,36 +751,6 @@ class CoordinationForm(forms.WPFWindow):
 
     # --- settings ---------------------------------------------------------
 
-    def _heal_binding(self):
-        """The model lost its folder binding (closed without saving after it
-        was set) but this machine's registry remembers it: quietly write it
-        back into the model so the next SAVE makes it permanent for the
-        whole team. Best-effort - the registry keeps covering this machine
-        even when the rebind can't run (read-only doc, no edit rights on
-        Project Information)."""
-        try:
-            from clash_core import binding
-            doc = revit.doc
-            if doc is None or getattr(doc, "IsReadOnly", False):
-                return
-            folder = binding.needs_heal(doc)
-            if not folder:
-                return
-            try:
-                # Workshared/ACC: this borrows Project Information for the
-                # session; the user's next Sync with Central publishes the
-                # binding to the team and relinquishes. If a teammate owns
-                # the element right now, the write fails quietly and the
-                # machine registry keeps covering this session.
-                with revit.Transaction("dbHMS: restore clash-data folder"):
-                    binding.write_binding(doc, folder)
-                _log("heal: re-bound clash folder into the model: {0}".format(folder))
-            except Exception:
-                _log("heal: model rebind failed (machine registry still "
-                     "covers this session)\n{0}".format(traceback.format_exc()))
-        except Exception:
-            pass
-
     def _send_settings(self):
         """Post the settings snapshot: this project's clash-data folder (the
         tool's only piece of state) and the linked-model role mapping.
@@ -862,16 +834,36 @@ class CoordinationForm(forms.WPFWindow):
         if not folder:
             return
         # Store the path in the model (transaction; travels with the file).
+        # Then VERIFY it actually landed by reading it back: on a workshared
+        # model where a teammate owns Project Information, SetEntity can fail
+        # to persist without a hard throw, and we must NOT report a false
+        # success (review finding). The per-machine registry is written ONLY
+        # after a confirmed commit + read-back, so a rolled-back transaction
+        # can never poison the local cache.
+        model_ok = False
         try:
             with revit.Transaction("dbHMS: set clash-data folder"):
                 binding.write_binding(doc, folder)
-            _log("set_folder: {0}".format(folder))
+            status, path = binding.read_model(doc)
+            model_ok = (status == binding.BOUND and path == folder)
+            _log("set_folder: wrote {0}; read-back status={1} ok={2}".format(
+                folder, status, model_ok))
         except Exception:
             _log("set_folder: write_binding failed\n{0}".format(traceback.format_exc()))
-            self._post("status:Couldn't save the folder into the model. On a "
-                       "workshared model, make sure you can edit Project "
-                       "Information, then try again.")
-            return
+        # Always remember locally so THIS machine resolves the folder even if
+        # the model write couldn't persist (borrowed element, read-only).
+        try:
+            binding.remember_local(doc, folder)
+        except Exception:
+            pass
+        if not model_ok:
+            # The folder works on this machine (registry), but it's not in the
+            # model yet, so teammates won't get it. Tell the user plainly.
+            self._post("status:Folder set on your machine. It could NOT be "
+                       "saved into the model yet (another user may be editing "
+                       "Project Information, or the model is read-only) - "
+                       "teammates won't see it until you set it again with "
+                       "edit access and save.")
         # Seed project.json with a display name so the folder isn't anonymous.
         try:
             meta = persistence.read_project_meta_at(folder)

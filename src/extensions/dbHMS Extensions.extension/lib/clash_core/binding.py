@@ -15,6 +15,25 @@ about network vs. local: if a teammate can't reach that path, they simply see
 no data. A brand-new model has no stored path, so the tool shows nothing until
 the user points it at a folder.
 
+TWO HARD RULES (an adversarial multi-machine review found the tool violating
+both, silently corrupting the team's shared binding):
+
+  1. The MODEL is written ONLY by an explicit user action (_set_folder ->
+     write_binding, inside a transaction the user then saves/syncs). NOTHING
+     writes the model automatically on open. The old "heal on open" that
+     re-published the local cache into the model is GONE - it could clobber a
+     teammate's synced change on the next sync.
+
+  2. A FAILED read is never treated as "not set". read_model() returns a
+     three-state status (BOUND / UNSET / CLEARED / UNKNOWN); only a clean
+     BOUND caches to the registry, and UNKNOWN never drives any write. This
+     stops a transient ES read (routine on ACC reload) from serving, and
+     cementing, a stale folder.
+
+The per-machine registry (%APPDATA%/dbHMS_clash/bindings.json) is a pure
+LOCAL convenience: it lets a close-without-save session still resolve the
+folder on this machine. It can never reach the shared model.
+
 All Revit API use is imported lazily inside function bodies so this module still
 parses under CPython 3 for the test suite (same pattern as project.py).
 """
@@ -28,6 +47,26 @@ _SCHEMA_GUID_STR = "3F2A9B71-6C4D-4E88-A1F3-2D5B7C0E9A46"
 _SCHEMA_NAME     = "dbHMSClashFolder"
 _VENDOR_ID       = "dbHMS"
 _FIELD_FOLDER    = "folder_path"
+
+
+# Three-state result of reading the model's binding. The whole multi-machine
+# correctness of the tool hinges on keeping these DISTINCT (an adversarial
+# review found that collapsing UNKNOWN into "not set" let a transient ES
+# read on one machine silently serve, and re-publish, a stale folder over a
+# teammate's synced change):
+#   BOUND   - the model carries a real folder path. Authoritative; team truth.
+#   UNSET   - the model was read cleanly and has NO binding (never set).
+#   CLEARED - the model was read cleanly and carries an explicit "cleared"
+#             tombstone (empty path). Distinct from UNSET so a deliberate
+#             team-wide clear is never resurrected from a stale local cache.
+#   UNKNOWN - the read FAILED (schema race, ProjectInformation mid-load on an
+#             ACC reload, borrow contention). We know NOTHING; we must never
+#             treat this as "not set", never write the model, never cement a
+#             cache from it.
+BOUND   = "bound"
+UNSET   = "unset"
+CLEARED = "cleared"
+UNKNOWN = "unknown"
 
 
 # Optional diagnostic logger. script.py sets this to its coord.log writer via
@@ -56,7 +95,14 @@ def _log(msg):
 def _schema(create=False):
     """Look up (or, when create=True, build) our Extensible Storage schema.
     Building a schema does NOT require a transaction; only writing an entity to
-    an element does. Returns the Schema, or None when absent and create=False."""
+    an element does. Returns the Schema, or None when absent and create=False.
+
+    Hardened against the register race (review finding): SchemaBuilder.Finish()
+    throws if the GUID was registered between our Lookup and our Finish (a
+    concurrent read on another doc in the same session, or the ES-registration
+    timing the read path already fights). On any Finish failure we re-Lookup
+    and use whatever is now registered, so a lost race becomes a success, not
+    an exception that the caller has to read as UNKNOWN."""
     import clr  # noqa: F401
     import System
     from Autodesk.Revit.DB.ExtensibleStorage import (
@@ -67,86 +113,125 @@ def _schema(create=False):
         return existing
     if not create:
         return None
-    b = SchemaBuilder(gid)
-    b.SetSchemaName(_SCHEMA_NAME)
-    b.SetVendorId(_VENDOR_ID)
-    b.SetReadAccessLevel(AccessLevel.Public)
-    b.SetWriteAccessLevel(AccessLevel.Public)
-    b.AddSimpleField(_FIELD_FOLDER, clr.GetClrType(System.String))
-    return b.Finish()
+    try:
+        b = SchemaBuilder(gid)
+        b.SetSchemaName(_SCHEMA_NAME)
+        b.SetVendorId(_VENDOR_ID)
+        b.SetReadAccessLevel(AccessLevel.Public)
+        b.SetWriteAccessLevel(AccessLevel.Public)
+        b.AddSimpleField(_FIELD_FOLDER, clr.GetClrType(System.String))
+        return b.Finish()
+    except Exception:
+        # Lost the register race (or a foreign schema shares the GUID): use
+        # whatever is registered now rather than raising.
+        return Schema.Lookup(gid)
+
+
+def _read_entity(doc):
+    """The Revit-facing half of read_model: return (status, path). All ES /
+    Revit API contact lives here so read_model's decision logic stays pure
+    and unit-testable (tests monkeypatch this). Under CPython (no Revit) the
+    ES import fails -> UNKNOWN, which is the correct "can't read" answer."""
+    import System
+    try:
+        schema = _schema(create=True)
+    except Exception:
+        import traceback
+        _log("read: schema build FAILED\n" + traceback.format_exc())
+        return (UNKNOWN, None)
+    if schema is None:
+        return (UNKNOWN, None)
+    try:
+        pinfo = doc.ProjectInformation
+    except Exception:
+        _log("read: ProjectInformation FAILED -> UNKNOWN")
+        return (UNKNOWN, None)
+    if pinfo is None:
+        return (UNKNOWN, None)
+    try:
+        ent = pinfo.GetEntity(schema)
+    except Exception:
+        import traceback
+        _log("read: GetEntity FAILED -> UNKNOWN\n" + traceback.format_exc())
+        return (UNKNOWN, None)
+    if ent is None or not ent.IsValid():
+        return (UNSET, None)          # clean absence
+    try:
+        path = ent.Get[System.String](_FIELD_FOLDER)
+    except Exception:
+        import traceback
+        _log("read: field read FAILED -> UNKNOWN\n" + traceback.format_exc())
+        return (UNKNOWN, None)
+    if path:
+        return (BOUND, path)
+    return (CLEARED, None)             # empty entity = explicit tombstone
+
+
+def read_model(doc):
+    """Read the model's binding as a (status, path) pair, status one of
+    BOUND / UNSET / CLEARED / UNKNOWN. Never raises. This is the low-level
+    truth; higher-level callers branch on the status so a FAILED read is
+    never mistaken for a clean "not set"."""
+    if doc is None:
+        return (UNKNOWN, None)
+    try:
+        status, path = _read_entity(doc)
+    except Exception:
+        import traceback
+        _log("read_model: unexpected\n" + traceback.format_exc())
+        return (UNKNOWN, None)
+    _log("read_model: {0} {1!r}".format(status, path))
+    return (status, path)
+
+
+def read_model_retry(doc, attempts=3):
+    """read_model with a few retries, because the schema-registration/ACC
+    reload transient that produces UNKNOWN is momentary. Returns the first
+    non-UNKNOWN result, or the last UNKNOWN. No sleeps (IronPython/WPF UI
+    thread) - just re-attempts, which re-runs Lookup now that a prior
+    _schema(create=True) may have registered it."""
+    status, path = read_model(doc)
+    tries = 1
+    while status == UNKNOWN and tries < attempts:
+        status, path = read_model(doc)
+        tries += 1
+    return (status, path)
 
 
 def model_folder(doc):
-    """Return the folder path stored INSIDE `doc` (Extensible Storage), or
-    None. Never raises.
-
-    Builds the schema (create=True) before reading: opening a .rvt that already
-    contains our entity does NOT reliably register the schema in a fresh Revit
-    session, so Schema.Lookup can return None even though the entity is there.
-    Building is idempotent (Lookup short-circuits once registered), needs no
-    transaction, and our definition is fixed, so it's safe on every read. This
-    is what makes a reopened model -- and every teammate, and the read-only 3D
-    Viewer -- actually see the stored folder."""
-    if doc is None:
-        return None
-    try:
-        import System
-        schema = _schema(create=True)
-        if schema is None:
-            _log("model_folder: schema is None (ES unavailable)")
-            return None
-        pinfo = getattr(doc, "ProjectInformation", None)
-        if pinfo is None:
-            _log("model_folder: no ProjectInformation")
-            return None
-        ent = pinfo.GetEntity(schema)
-        if ent is None or not ent.IsValid():
-            _log("model_folder: no valid entity on ProjectInformation")
-            return None
-        path = ent.Get[System.String](_FIELD_FOLDER)
-        _log("model_folder: read {0!r}".format(path))
-        return path or None
-    except Exception:
-        # Loud, not silent: a bare-swallowed ES read was exactly why this
-        # bug took multiple rounds to see. Surface the actual failure.
-        import traceback
-        _log("model_folder: ES read FAILED\n" + traceback.format_exc())
-        return None
+    """Back-compat convenience: the model's folder path or None. Returns the
+    path ONLY on a confirmed BOUND read; UNSET/CLEARED/UNKNOWN all give None.
+    Callers that must act on the distinction use read_model()."""
+    status, path = read_model_retry(doc)
+    return path if status == BOUND else None
 
 
 def folder_for(doc):
-    """Return this project's clash-data folder, or None. The tool's ONE
-    "is this project set up?" test. Never raises.
+    """Return this project's clash-data folder for DISPLAY/DATA, or None.
+    Never raises. Never writes the model (see _set_folder for the only
+    model-writing path).
 
-    Two layers, model first:
-      1. The Extensible Storage binding inside the model - the team truth
-         (travels with the saved .rvt to every user).
-      2. A per-machine registry (%APPDATA%/dbHMS_clash/bindings.json keyed
-         by the central model path) - the resilience layer. ES only becomes
-         permanent when the model is SAVED, so a close-without-save or a
-         mid-session pyRevit reload on an unsaved model would otherwise
-         "forget" the folder and flood Nathan with why-is-my-data-gone
-         questions. The registry remembers every binding this machine has
-         seen and answers when the model can't.
-    A model hit is written through to the registry; callers that can open a
-    transaction should heal the model when `needs_heal` says so."""
-    folder = model_folder(doc)
-    if folder:
-        remember_local(doc, folder)
-        _log("folder_for: -> {0!r} (from model)".format(folder))
-        return folder
-    local = _local_folder(doc)
-    _log("folder_for: model had none; registry -> {0!r}".format(local))
-    return local
-
-
-def needs_heal(doc):
-    """Return the folder to re-write into the model when the model has no
-    binding but this machine remembers one (the close-without-save case).
-    None when the model is already bound or nothing is remembered."""
-    if model_folder(doc):
+    Precedence, driven by the three-state read:
+      BOUND   -> the model's folder wins, always (team truth). Cache it.
+      UNSET   -> the model genuinely has no binding: fall back to this
+                 machine's registry (the close-without-save resilience case).
+      CLEARED -> the team deliberately cleared it: show nothing, and never
+                 let a stale local cache resurrect it.
+      UNKNOWN -> the read FAILED. Fall back to the registry so the tool isn't
+                 blank, but this is DISPLAY-ONLY: we do not cache it and no
+                 code path ever writes it back to the model. Self-corrects on
+                 the next good read."""
+    status, path = read_model_retry(doc)
+    if status == BOUND:
+        remember_local(doc, path)
+        _log("folder_for: -> {0!r} (model, BOUND)".format(path))
+        return path
+    if status == CLEARED:
+        _log("folder_for: model CLEARED -> None")
         return None
-    return _local_folder(doc)
+    local = _local_folder(doc)
+    _log("folder_for: model {0} -> registry {1!r}".format(status, local))
+    return local
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +308,28 @@ def remember_local(doc, folder):
         pass
 
 
+def forget_local(doc):
+    """Drop this doc's registry entries (all candidate keys). Used when the
+    binding is explicitly cleared, so the local cache stops answering."""
+    keys = set(_doc_keys(doc))
+    if not keys:
+        return
+    try:
+        import io
+        import json
+        reg = _read_registry()
+        removed = [k for k in list(reg.keys()) if k in keys]
+        if not removed:
+            return
+        for k in removed:
+            reg.pop(k, None)
+        with io.open(_registry_path(), "w", encoding="utf-8") as f:
+            f.write(json.dumps(reg, indent=2, sort_keys=True,
+                               ensure_ascii=False))
+    except Exception:
+        pass
+
+
 def _local_folder(doc):
     reg = _read_registry()
     for key in _doc_keys(doc):
@@ -233,33 +340,38 @@ def _local_folder(doc):
 
 
 def write_binding(doc, folder_path):
-    """Store `folder_path` on `doc`. MUST be called inside an open Revit
-    transaction (the caller owns it, because writing an entity mutates the
-    document). Raises on failure (e.g. ProjectInformation not editable in a
-    workshared model); the caller should surface a friendly message.
+    """Store `folder_path` on `doc`'s ProjectInformation. MUST be called
+    inside an open Revit transaction (the caller owns it, because writing an
+    entity mutates the document). Raises on failure (e.g. ProjectInformation
+    borrowed by a teammate on a workshared model); the caller catches it and
+    surfaces a friendly message.
 
-    Also writes through to the per-machine registry immediately: the model
-    copy only survives a SAVE, and the registry is what keeps the folder
-    across a close-without-save or pyRevit reload."""
+    Deliberately does NOT touch the per-machine registry: a transaction can
+    still roll back after this returns, which would poison the registry with
+    a folder the model never actually got (review finding). The caller writes
+    the registry with remember_local() only AFTER the transaction commits and
+    a read-back confirms the write landed."""
     import System
     from Autodesk.Revit.DB.ExtensibleStorage import Entity
     schema = _schema(create=True)
     ent = Entity(schema)
     ent.Set[System.String](_FIELD_FOLDER, folder_path)
     doc.ProjectInformation.SetEntity(ent)
-    remember_local(doc, folder_path)
     return folder_path
 
 
 def clear_binding(doc):
-    """Remove any stored folder path from `doc` (used if the user ever wants to
-    un-set a project). MUST be called inside an open transaction. Best-effort.
-    create=True for the same reason as folder_for: a fresh session may not have
-    the schema registered, and DeleteEntity needs a valid schema object."""
-    try:
-        schema = _schema(create=True)
-        if schema is None:
-            return
-        doc.ProjectInformation.DeleteEntity(schema)
-    except Exception:
-        pass
+    """Explicitly clear this project's folder, team-wide. Writes an empty-path
+    TOMBSTONE entity rather than deleting it, so a re-read is CLEARED (not
+    UNSET): teammates whose local registry still holds the old folder will
+    NOT resurrect it. MUST be called inside an open transaction (mutates the
+    doc); the caller saves/syncs to publish. Also clears this machine's
+    registry entries so the local cache can't answer for it either."""
+    import System
+    from Autodesk.Revit.DB.ExtensibleStorage import Entity
+    schema = _schema(create=True)
+    ent = Entity(schema)
+    ent.Set[System.String](_FIELD_FOLDER, "")
+    doc.ProjectInformation.SetEntity(ent)
+    forget_local(doc)
+    return None
