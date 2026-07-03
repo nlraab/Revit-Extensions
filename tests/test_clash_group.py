@@ -919,9 +919,10 @@ class WiringIntegrityTests(unittest.TestCase):
     _PANEL = os.path.abspath(os.path.join(
         _LIB, "..", "dbHMS Tools.tab", "Clash Detection.panel"))
 
+    # 2026-07: the legacy Run Clash Test writer was deleted with the old
+    # WPF suite; the Clash Detection web app is the only run pipeline.
     _WRITER_SCRIPTS = (
         os.path.join("Clash Detection.pushbutton", "script.py"),
-        os.path.join("Run Clash Test.pushbutton", "script.py"),
     )
 
     def test_every_run_writer_literal_carries_the_groups_key(self):

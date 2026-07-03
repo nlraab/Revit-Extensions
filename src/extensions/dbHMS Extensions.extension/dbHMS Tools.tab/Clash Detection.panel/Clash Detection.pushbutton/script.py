@@ -192,6 +192,14 @@ class CoordinationForm(forms.WPFWindow):
         self._webview = None
         self._vhost_ok = False
         self._model_version = 0
+        self._pushed_initial = False
+        # Route the binding module's diagnostics into coord.log so folder
+        # resolution is fully traceable in one place.
+        try:
+            from clash_core import binding
+            binding.set_logger(_log)
+        except Exception:
+            pass
         self.Closed += self._on_closed
         # Attach the web panel after layout so the host Border has a real size.
         self.Loaded += self._on_loaded
@@ -462,6 +470,73 @@ class CoordinationForm(forms.WPFWindow):
             _log("nav done: success={0}".format(getattr(args, 'IsSuccess', '?')))
         except Exception:
             pass
+        # Belt-and-suspenders: the page normally posts "ready" once its
+        # message listener is up, which triggers _push_initial. But if that
+        # single handshake message is ever dropped (timing, a reopened
+        # WebView2, a focus race), the tool would open blank and the user
+        # would think the project "lost its folder". So we ALSO arm a
+        # one-shot timer that pushes the data ~2.5s after navigation if the
+        # page never said ready. _push_initial is idempotent (guarded), so
+        # whichever fires first wins and the other is a no-op.
+        try:
+            from System.Windows.Threading import DispatcherTimer
+            from System import TimeSpan
+            t = DispatcherTimer()
+            t.Interval = TimeSpan.FromMilliseconds(2500)
+
+            def _fallback(s, e):
+                try:
+                    t.Stop()
+                except Exception:
+                    pass
+                if not getattr(self, "_pushed_initial", False):
+                    _log("ready: page never said ready in 2.5s - "
+                         "pushing data anyway (fallback)")
+                    self._push_initial("nav-fallback")
+            t.Tick += _fallback
+            t.Start()
+            self._ready_timer = t   # pin so it isn't GC'd
+        except Exception:
+            _log("nav done: fallback timer failed\n{0}".format(
+                traceback.format_exc()))
+
+    def _push_initial(self, why):
+        """Push the whole project feed to the page (settings, tests, clashes,
+        model info). Runs on both the page-ready handshake and the nav
+        fallback, so it MUST be idempotent and MUST NOT let one failing feed
+        block the others - a blank tool is exactly the symptom we're killing.
+        Every step is logged so a single reproduction shows precisely what
+        the tool saw."""
+        if getattr(self, "_pushed_initial", False):
+            _log("push_initial({0}): already pushed - skipping".format(why))
+            return
+        self._pushed_initial = True
+        # Loud folder diagnostic: the #1 confusion is "did the tool find the
+        # project's folder?". Answer it explicitly, with the source.
+        try:
+            from clash_core import binding
+            doc = revit.doc
+            model_f = binding.model_folder(doc) if doc is not None else None
+            resolved = binding.folder_for(doc) if doc is not None else None
+            src = ("model" if model_f else
+                   ("machine-registry" if resolved else "none"))
+            _log("push_initial({0}): doc={1} folder={2!r} source={3}".format(
+                why, getattr(doc, "Title", None), resolved, src))
+        except Exception:
+            _log("push_initial({0}): folder probe failed\n{1}".format(
+                why, traceback.format_exc()))
+        # Heal FIRST but never let it block the sends (own try/except inside).
+        self._heal_binding()
+        # Each feed independent: one failure can't blank the others.
+        for name, fn in (("settings", self._send_settings),
+                         ("tests", self._send_tests),
+                         ("clashes", self._send_clashes),
+                         ("model_info", self._send_model_info)):
+            try:
+                fn()
+            except Exception:
+                _log("push_initial({0}): {1} feed failed\n{2}".format(
+                    why, name, traceback.format_exc()))
 
     # --- host <-> page ------------------------------------------------
 
@@ -484,18 +559,8 @@ class CoordinationForm(forms.WPFWindow):
             if msg == "export":
                 self._do_export()
             elif msg == "ready":
-                # Page finished booting: hand it the test list + this project's
-                # clashes + settings + last-export info so every tab populates
-                # immediately. The MODEL is never auto-loaded; the page offers
-                # "Load last export" / "Update from Revit". Settings goes FIRST:
-                # it carries the link state (is this project pointed at a folder?)
-                # that the grid/home empty-states read to decide "not set up yet"
-                # vs "no clashes yet" -- never sample data.
-                self._heal_binding()
-                self._send_settings()
-                self._send_tests()
-                self._send_clashes()
-                self._send_model_info()
+                _log("ready: received from page")
+                self._push_initial("page-ready")
             elif msg == "loadlast":
                 self._load_last_export()
             elif msg.startswith("snapshot:"):

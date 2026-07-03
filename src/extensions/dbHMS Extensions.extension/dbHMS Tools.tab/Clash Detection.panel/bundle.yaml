@@ -1,8 +1,3 @@
 layout:
-  - Run Clash Test
-  - Clash Browser
-  - Reports
-  - 3D Viewer
   - Clash Detection
-  - Test Library
-  - Settings
+  - 3D Viewer

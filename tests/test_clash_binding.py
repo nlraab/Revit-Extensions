@@ -47,6 +47,21 @@ class BindingRegistryTests(unittest.TestCase):
             binding._local_folder(FakeDoc(r"t:/projects/niu/model.rvt")),
             r"P:\X")
 
+    def test_recall_survives_a_changed_primary_key(self):
+        # A mapping written when PathName was the identity must still resolve
+        # after code starts preferring a different identity path - the exact
+        # orphaning that broke it before. Simulate by hand-writing the
+        # registry under only the PathName key, then reading via a doc that
+        # also exposes an (unwritten) cloud-style key.
+        import io
+        import json
+        from clash_core import project
+        doc = FakeDoc(r"C:\cache\niu.rvt")
+        legacy_key = project.hash_path(r"C:\cache\niu.rvt")
+        with io.open(binding._registry_path(), "w", encoding="utf-8") as f:
+            f.write(json.dumps({legacy_key: {"folder": r"P:\NIU"}}))
+        self.assertEqual(binding._local_folder(doc), r"P:\NIU")
+
     def test_folder_for_falls_back_to_registry_when_model_unreadable(self):
         # Under CPython the ES path always fails -> exactly the
         # close-without-save / reload scenario.

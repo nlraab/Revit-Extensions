@@ -94,16 +94,39 @@ def project_hash_for(doc):
     return hash_path(central_model_path(doc))
 
 
-def resolve_key(doc):
-    """Legacy storage key (SHA-1 path hash) for the OLD, being-retired clash
-    buttons that still resolve data as <shared_root>/<key>/.
+def all_identity_paths(doc):
+    """Every identity path this doc could hash to, most-stable first: cloud
+    path, workshare central path, and PathName. Used by the binding registry
+    so a change in how we pick the 'primary' path can never orphan a mapping
+    that was written under a different pick - the registry tries them all."""
+    if doc is None:
+        return []
+    out = []
 
-    The kept tools (Coordination, 3D Viewer) do NOT use this: the tool's only
-    project state is now a single absolute clash-data folder path stored in the
-    model (`clash_core.binding.folder_for`), read/written directly with the
-    `*_at(folder)` persistence helpers. This shim only exists so the old
-    buttons keep working until they're removed."""
-    return project_hash_for(doc)
+    def _add(p):
+        if p and p not in out:
+            out.append(p)
+
+    try:
+        from Autodesk.Revit.DB import ModelPathUtils
+        try:
+            if getattr(doc, "IsModelInCloud", False):
+                mp = doc.GetCloudModelPath()
+                if mp is not None:
+                    _add(ModelPathUtils.ConvertModelPathToUserVisiblePath(mp))
+        except Exception:
+            pass
+        try:
+            if getattr(doc, "IsWorkshared", False):
+                mp = doc.GetWorksharingCentralModelPath()
+                if mp is not None:
+                    _add(ModelPathUtils.ConvertModelPathToUserVisiblePath(mp))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    _add(getattr(doc, "PathName", "") or "")
+    return out
 
 
 def display_name_for(doc):

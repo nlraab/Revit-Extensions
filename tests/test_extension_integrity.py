@@ -65,19 +65,18 @@ class ExtensionIntegrityTests(unittest.TestCase):
         self.assertTrue(expected.issubset(actual), "Missing one or more expected pushbuttons.")
 
     def test_clash_detection_pushbuttons_exist(self):
+        # The panel ships exactly TWO tools (2026-07: the legacy WPF suite -
+        # Run Clash Test, Clash Browser, Test Library, Reports, Settings -
+        # was deleted; the Clash Detection web app absorbed their jobs).
         expected = {
-            "Run Clash Test.pushbutton",
-            "Clash Browser.pushbutton",
-            "Test Library.pushbutton",
-            "Reports.pushbutton",
-            "Settings.pushbutton",
             "3D Viewer.pushbutton",
             "Clash Detection.pushbutton",
         }
         actual = {p.name for p in CLASH_PANEL.glob("*.pushbutton")}
-        self.assertTrue(
-            expected.issubset(actual),
-            "Missing one or more expected Clash Detection pushbuttons. Got: %s" % sorted(actual),
+        self.assertEqual(
+            expected, actual,
+            "Clash Detection panel drifted from the expected two tools. "
+            "Got: %s" % sorted(actual),
         )
 
     def test_clash_detection_panel_layout_matches_pushbuttons(self):
@@ -187,7 +186,7 @@ class ExtensionIntegrityTests(unittest.TestCase):
             self.assertIsInstance(discipline["plan_types"], list)
 
     def test_clash_default_tests_library_shape(self):
-        path = CLASH_PANEL / "Test Library.pushbutton" / "default_tests.json"
+        path = CLASH_PANEL / "Clash Detection.pushbutton" / "default_tests.json"
         self.assertTrue(path.exists(), "default_tests.json is missing.")
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertIsInstance(data, dict, "default_tests.json root must be an object.")

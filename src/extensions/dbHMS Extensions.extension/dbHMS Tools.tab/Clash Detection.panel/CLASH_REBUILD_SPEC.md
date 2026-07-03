@@ -655,6 +655,12 @@ Navisworks/Revizto-class power; 4 and 5 are scale and polish.
 Every current-tool capability and where it lands in the rebuild, so nothing
 is lost. If it is not on this list, flag it.
 
+> **COMPLETED 2026-07:** the legacy suite this table absorbs (Run Clash
+> Test, Clash Browser, Test Library, Reports, Settings pushbuttons) has
+> been deleted from the panel. The two shipping tools are the Clash
+> Detection web app and the 3D Viewer. References to the old buttons in
+> this spec are historical plan language.
+
 | Current capability | Rebuild home |
 |---|---|
 | Run Clash Test (pick tests, run detection, merge) | Tests: discipline matrix, run |

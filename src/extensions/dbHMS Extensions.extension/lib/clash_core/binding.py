@@ -30,6 +30,25 @@ _VENDOR_ID       = "dbHMS"
 _FIELD_FOLDER    = "folder_path"
 
 
+# Optional diagnostic logger. script.py sets this to its coord.log writer via
+# set_logger() so the folder-resolution path is fully visible in one place.
+# Default is a no-op so the module stays import-clean under CPython tests.
+_LOG = None
+
+
+def set_logger(fn):
+    global _LOG
+    _LOG = fn
+
+
+def _log(msg):
+    if _LOG is not None:
+        try:
+            _LOG("binding: " + msg)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Extensible Storage schema (Revit; lazily imported)
 # ---------------------------------------------------------------------------
@@ -74,16 +93,24 @@ def model_folder(doc):
         import System
         schema = _schema(create=True)
         if schema is None:
+            _log("model_folder: schema is None (ES unavailable)")
             return None
         pinfo = getattr(doc, "ProjectInformation", None)
         if pinfo is None:
+            _log("model_folder: no ProjectInformation")
             return None
         ent = pinfo.GetEntity(schema)
         if ent is None or not ent.IsValid():
+            _log("model_folder: no valid entity on ProjectInformation")
             return None
         path = ent.Get[System.String](_FIELD_FOLDER)
+        _log("model_folder: read {0!r}".format(path))
         return path or None
     except Exception:
+        # Loud, not silent: a bare-swallowed ES read was exactly why this
+        # bug took multiple rounds to see. Surface the actual failure.
+        import traceback
+        _log("model_folder: ES read FAILED\n" + traceback.format_exc())
         return None
 
 
@@ -106,8 +133,11 @@ def folder_for(doc):
     folder = model_folder(doc)
     if folder:
         remember_local(doc, folder)
+        _log("folder_for: -> {0!r} (from model)".format(folder))
         return folder
-    return _local_folder(doc)
+    local = _local_folder(doc)
+    _log("folder_for: model had none; registry -> {0!r}".format(local))
+    return local
 
 
 def needs_heal(doc):
@@ -123,21 +153,32 @@ def needs_heal(doc):
 # Per-machine binding registry (pure file I/O; CPython-testable)
 # ---------------------------------------------------------------------------
 
-def _doc_key(doc):
-    """Stable per-model key: hash of the central model path. None when the
-    document is unsaved/untitled or unreadable."""
+def _doc_keys(doc):
+    """ALL candidate registry keys for this model, most-stable first (cloud,
+    workshare-central, PathName). Returns [] for an unsaved/untitled doc.
+
+    Reading tries every key so a binding written under one identity path
+    still resolves after the 'primary' path pick changes - the exact way an
+    earlier ACC-path change orphaned a saved mapping. Writing uses the first
+    (most stable) key but ALSO back-fills the others."""
     if doc is None:
-        return None
+        return []
     try:
         from clash_core import project
-        try:
-            path = project.central_model_path(doc)
-        except Exception:
-            path = getattr(doc, "PathName", "") or ""
-        key = project.hash_path(path)
-        return key or None
+        paths = project.all_identity_paths(doc)
+        keys = []
+        for p in paths:
+            k = project.hash_path(p)
+            if k and k not in keys:
+                keys.append(k)
+        return keys
     except Exception:
-        return None
+        try:
+            from clash_core import project
+            k = project.hash_path(getattr(doc, "PathName", "") or "")
+            return [k] if k else []
+        except Exception:
+            return []
 
 
 def _registry_path():
@@ -158,18 +199,23 @@ def _read_registry():
 
 
 def remember_local(doc, folder):
-    """Record doc->folder in the per-machine registry. Best-effort; a failed
-    write must never break a read path."""
-    key = _doc_key(doc)
-    if not key or not folder:
+    """Record doc->folder in the per-machine registry under EVERY candidate
+    key, so the mapping resolves no matter which identity path a later read
+    uses. Best-effort; a failed write must never break a read path."""
+    keys = _doc_keys(doc)
+    if not keys or not folder:
         return
     try:
         import io
         import json
         reg = _read_registry()
-        if (reg.get(key) or {}).get("folder") == folder:
+        changed = False
+        for key in keys:
+            if (reg.get(key) or {}).get("folder") != folder:
+                reg[key] = {"folder": folder}
+                changed = True
+        if not changed:
             return
-        reg[key] = {"folder": folder}
         with io.open(_registry_path(), "w", encoding="utf-8") as f:
             f.write(json.dumps(reg, indent=2, sort_keys=True,
                                ensure_ascii=False))
@@ -178,10 +224,12 @@ def remember_local(doc, folder):
 
 
 def _local_folder(doc):
-    key = _doc_key(doc)
-    if not key:
-        return None
-    return (_read_registry().get(key) or {}).get("folder") or None
+    reg = _read_registry()
+    for key in _doc_keys(doc):
+        folder = (reg.get(key) or {}).get("folder")
+        if folder:
+            return folder
+    return None
 
 
 def write_binding(doc, folder_path):

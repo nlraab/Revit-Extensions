@@ -26,24 +26,25 @@ Revit Extensions/
             SheetSetup.pushbutton/
             View Range Helper.pushbutton/
             View Templates Manager.pushbutton/
-          Clash Detection.panel/            <- MEP clash coordination toolkit
-            Settings.pushbutton/
-            Test Library.pushbutton/
-            Run Clash Test.pushbutton/
-            Clash Browser.pushbutton/
-            Reports.pushbutton/
-            Walkthrough.pushbutton/
+          Clash Detection.panel/            <- MEP clash coordination platform
+            Clash Detection.pushbutton/     <- the coordination web app (WebView2)
+            3D Viewer.pushbutton/           <- federated model viewer web app
             README.md                       <- panel-specific architecture
+            CLASH_*.md                      <- design documents
         lib/
-          clash_core/                       <- shared data model + persistence
-          clash_detect/                     <- detection algorithms
-          clash_report/                     <- BCF / XLSX / HTML builders
-          clash_view/                       <- 3D view + walkthrough helpers
+          clash_core/                       <- data model, merge, persistence, folder binding
+          clash_detect/                     <- detection engines + broad phase + enrichment
+          clash_score/                      <- importance engine (Critical/Major/Minor)
+          clash_group/                      <- issue grouping engine
+          clash_report/                     <- BCF + meeting-agenda digest builders
+          clash_export/                     <- Revit -> glTF snapshot export
+          clash_identity/                   <- clash <-> glTF federation keys
+          clash_view/                       <- Revit-side viewpoint capture
+          clash_share/                      <- 3D Viewer share-to-browser packaging
           dbhms_ui/                         <- shared friendly popup dialog
   tests/
     test_extension_integrity.py
     test_clash_*.py                         <- pure-data unit tests for clash modules
-    test_walkthrough_*.py                   <- pure-data unit tests for walkthrough modules
   scripts/
     test.ps1
     build.ps1
@@ -71,27 +72,23 @@ General productivity tools:
 
 ### Clash Detection panel
 
-A complete clash-coordination toolkit. Six pushbuttons working against a
-shared per-project JSON database under a configurable shared root:
+The firm's clash-coordination platform: two WebView2 web-app tools over a
+shared pure-Python engine, working against a per-project clash-data
+folder stored inside the Revit model:
 
-- **Settings**: per-machine + per-project config; link role mapping
-  (Architectural / Structural / ignore).
-- **Test Library**: firm-wide default tests + per-project overrides.
-  Multi-source set support (host + linked-doc filtering).
-- **Run Clash Test**: real Revit `InterferenceCheck` over the host doc
-  + role-mapped linked models. Persistent identity via fingerprints —
-  re-runs preserve comments, status, history; auto-resolves disappeared
-  clashes; reopens reappearing ones.
-- **Clash Browser**: live grid + filter card + saved filter presets.
-  Status dropdown, trade reassign, comments, history all persist
-  immediately. Show in 3D + Walkthrough Here per-clash actions.
-- **Reports**: export filtered clashes as BCF 2.1 (.bcfzip) for
-  consultants, Excel (.xlsx) for internal review, or HTML summary for
-  client-facing handoffs (Save-as-PDF in any browser → PDF for free).
-- **Walkthrough**: free-fly through the model with WASD + mouse-look
-  (F-key toggle) for coordination meetings. Discipline visibility
-  toggles, per-project saved camera bookmarks, 1920×1080 ray-traced
-  PNG render export.
+- **Clash Detection**: the coordination hub. Runs detection (hard/soft
+  with a grid broad phase), ranks every clash Critical/Major/Minor with a
+  one-sentence reason (constraint-first importance engine), groups
+  clashes into persistent issues (racks / element runs) that survive
+  re-runs, and fronts it all with the "Quiet Ledger" browser: meeting
+  agenda, issue inspector, filters, comments, BCF-by-issue and
+  pre-meeting digest exports.
+- **3D Viewer**: federated glTF viewer for the whole model - category /
+  workset visibility, clash markers, share-to-browser (self-contained
+  HTML), used side-by-side with the coordination app.
+
+Deep design docs live in the panel folder (spec, importance research,
+grouping design, real-project calibration findings).
 
 Architecture, data model, and full tool documentation are in
 [Clash Detection.panel/README.md](src/extensions/dbHMS%20Extensions.extension/dbHMS%20Tools.tab/Clash%20Detection.panel/README.md).
