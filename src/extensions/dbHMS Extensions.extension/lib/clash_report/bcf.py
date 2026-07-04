@@ -217,6 +217,20 @@ def build_group_bcf_zip(project_meta, groups, clashes, viewpoints_dir,
     return written
 
 
+def _snapshot_file(viewpoints_dir, stem):
+    """(path on disk, name inside the topic folder) of a snapshot image,
+    preferring the web viewer's JPEG captures over legacy PNGs. BCF 2.1
+    allows PNG or JPEG snapshots; the markup references the name we pack.
+    (None, None) when no image exists."""
+    if not viewpoints_dir or stem is None:
+        return None, None
+    for ext in ('jpg', 'png'):
+        cand = os.path.join(viewpoints_dir, '{0}.{1}'.format(stem, ext))
+        if os.path.isfile(cand):
+            return cand, 'snapshot.{0}'.format(ext)
+    return None, None
+
+
 def _write_group_topic_to_zip(zf, group, clashes_by_id, viewpoints_dir):
     """Write one group's topic folder into the zip. Returns True/False."""
     gid = group.get('id')
@@ -241,19 +255,18 @@ def _write_group_topic_to_zip(zf, group, clashes_by_id, viewpoints_dir):
     viewpoint_guid = _ensure_guid(
         (rep_vp.get('id') if rep_vp else None) or _uuid.uuid4().hex)
 
-    # A snapshot PNG exists on disk if the rep clash was captured.
-    png_path = None
-    if rep is not None and viewpoints_dir:
-        cand = os.path.join(viewpoints_dir, '{}.png'.format(rep.get('id')))
-        if os.path.isfile(cand):
-            png_path = cand
+    # Snapshot: the aggregate issue photo (all members red/blue) when the
+    # web viewer has captured one, else the representative clash's image.
+    snap_path, snap_name = _snapshot_file(viewpoints_dir, 'issue_' + gid)
+    if snap_path is None and rep is not None:
+        snap_path, snap_name = _snapshot_file(viewpoints_dir, rep.get('id'))
 
     markup_xml = _build_group_markup_xml(
         group, members, topic_guid, viewpoint_guid,
-        has_snapshot=(png_path is not None))
+        snapshot_name=snap_name)
     zf.writestr(folder + 'markup.bcf', markup_xml)
 
-    if png_path is not None:
+    if snap_path is not None:
         # BCF references the snapshot from a Viewpoints element, which
         # needs a .bcfv. Reuse the rep clash's camera when it has one;
         # otherwise write a minimal VisualizationInfo so receivers that
@@ -265,13 +278,14 @@ def _write_group_topic_to_zip(zf, group, clashes_by_id, viewpoints_dir):
             zf.writestr(folder + 'viewpoint.bcfv',
                         _serialize(ET.Element('VisualizationInfo',
                                               {'Guid': viewpoint_guid})))
-        zf.write(png_path, folder + 'snapshot.png')
+        zf.write(snap_path, folder + snap_name)
 
     return True
 
 
 def _build_group_markup_xml(group, members, topic_guid, viewpoint_guid,
-                            has_snapshot):
+                            snapshot_name):
+    has_snapshot = snapshot_name is not None
     root = ET.Element('Markup')
     topic = ET.SubElement(root, 'Topic', {
         'Guid': topic_guid,
@@ -319,7 +333,7 @@ def _build_group_markup_xml(group, members, topic_guid, viewpoint_guid,
         viewpoints_el = ET.SubElement(root, 'Viewpoints',
                                       {'Guid': viewpoint_guid})
         _add_text_element(viewpoints_el, 'Viewpoint', 'viewpoint.bcfv')
-        _add_text_element(viewpoints_el, 'Snapshot', 'snapshot.png')
+        _add_text_element(viewpoints_el, 'Snapshot', snapshot_name)
 
     return _serialize(root)
 
@@ -394,26 +408,35 @@ def _write_topic_to_zip(zf, clash, viewpoints_dir):
     folder = topic_guid + '/'
 
     # Pick the first viewpoint dict (single-viewpoint-per-clash design).
+    # Web-captured clashes have an image on disk but no camera dict; they
+    # still get a Viewpoints ref (minimal .bcfv) so the snapshot ships.
     viewpoints = clash.get('viewpoints') or []
     viewpoint = viewpoints[0] if viewpoints else None
     viewpoint_guid = _ensure_guid(
         viewpoint.get('id') if viewpoint else _uuid.uuid4().hex)
 
+    snap_path, snap_name = _snapshot_file(viewpoints_dir, clash_id)
+    has_ref = viewpoint is not None or snap_path is not None
+
     # markup.bcf — always present.
     markup_xml = _build_markup_xml(clash, topic_guid, viewpoint_guid,
-                                   has_viewpoint=viewpoint is not None)
+                                   has_viewpoint=has_ref,
+                                   snapshot_name=snap_name)
     zf.writestr(folder + 'markup.bcf', markup_xml)
 
-    if viewpoint is not None:
-        # viewpoint.bcfv
-        viewpoint_xml = _build_viewpoint_xml(viewpoint, viewpoint_guid)
-        zf.writestr(folder + 'viewpoint.bcfv', viewpoint_xml)
-
-        # snapshot.png (skipped silently if the file isn't on disk)
-        if viewpoints_dir:
-            png_path = os.path.join(viewpoints_dir, '{}.png'.format(clash_id))
-            if os.path.isfile(png_path):
-                zf.write(png_path, folder + 'snapshot.png')
+    if has_ref:
+        # viewpoint.bcfv — the real camera when one was stored, else a
+        # minimal VisualizationInfo carrying just the guid.
+        if viewpoint is not None:
+            zf.writestr(folder + 'viewpoint.bcfv',
+                        _build_viewpoint_xml(viewpoint, viewpoint_guid))
+        else:
+            zf.writestr(folder + 'viewpoint.bcfv',
+                        _serialize(ET.Element('VisualizationInfo',
+                                              {'Guid': viewpoint_guid})))
+        # snapshot image (skipped silently if no file is on disk)
+        if snap_path is not None:
+            zf.write(snap_path, folder + snap_name)
 
     return True
 
@@ -442,7 +465,8 @@ def _build_project_xml(name, project_guid):
     return _serialize(root)
 
 
-def _build_markup_xml(clash, topic_guid, viewpoint_guid, has_viewpoint):
+def _build_markup_xml(clash, topic_guid, viewpoint_guid, has_viewpoint,
+                      snapshot_name=None):
     """markup.bcf for one topic.
 
     Schema reference: BCF 2.1 markup.xsd. Required Topic children:
@@ -501,7 +525,8 @@ def _build_markup_xml(clash, topic_guid, viewpoint_guid, has_viewpoint):
         viewpoints_el = ET.SubElement(root, 'Viewpoints',
                                       {'Guid': viewpoint_guid})
         _add_text_element(viewpoints_el, 'Viewpoint', 'viewpoint.bcfv')
-        _add_text_element(viewpoints_el, 'Snapshot', 'snapshot.png')
+        if snapshot_name:
+            _add_text_element(viewpoints_el, 'Snapshot', snapshot_name)
 
     return _serialize(root)
 

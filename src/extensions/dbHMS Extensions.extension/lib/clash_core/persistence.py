@@ -62,13 +62,37 @@ def _ensure_dir(path):
 
 
 def _atomic_write(path, text):
-    """Write `text` to <path>.tmp then rename onto path."""
+    """Write `text` to <path>.tmp then swap it onto path.
+
+    The swap prefers os.replace (atomic on Windows; CPython 3, the test
+    runtime). IronPython 2.7 has no os.replace, so it falls back to a
+    bak-swap: the old file is renamed ASIDE before the new one lands. The
+    old remove-then-rename had a window where a crash left NO file at all
+    (the data invisible in .tmp), and the per-keystroke clash edits from
+    the 3D review cockpit multiply how often that window is open. With the
+    bak-swap, the worst case leaves <path>.bak, which _read_json recovers
+    from."""
     tmp = path + ".tmp"
     with codecs.open(tmp, "w", "utf-8") as f:
         f.write(text)
+    replace = getattr(os, "replace", None)
+    if replace is not None:
+        replace(tmp, path)
+        return
+    bak = path + ".bak"
+    try:
+        if os.path.exists(bak):
+            os.remove(bak)
+    except OSError:
+        pass
     if os.path.exists(path):
-        os.remove(path)
+        os.rename(path, bak)
     os.rename(tmp, path)
+    try:
+        if os.path.exists(bak):
+            os.remove(bak)
+    except OSError:
+        pass
 
 
 def _read_json(path, default):
@@ -79,7 +103,13 @@ def _read_json(path, default):
     user-picked clash folder) is treated as absent when a dict is expected, so
     the readers below can safely do `data["..."]` / `data.get(...)`."""
     if not os.path.isfile(path):
-        return default
+        # Recover from an interrupted bak-swap write: the main file vanished
+        # mid-swap but the previous version survives as .bak.
+        bak = path + ".bak"
+        if os.path.isfile(bak):
+            path = bak
+        else:
+            return default
     try:
         with codecs.open(path, "r", "utf-8") as f:
             data = json.load(f)

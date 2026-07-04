@@ -50,21 +50,49 @@ def apply_status(clash_dict, new_status, author, at=None):
     return True
 
 
+def apply_deadline(clash_dict, new_deadline, author, at=None):
+    """Set `clash_dict['deadline']` (ISO date string, or None/'' to clear)
+    and append a deadline_changed history entry.
+
+    Returns True if the deadline changed, False if it was already at
+    `new_deadline` (in which case nothing is mutated). Unlike status/trade,
+    an empty value is meaningful here: it clears the due date.
+    """
+    if not clash_dict:
+        return False
+    new_deadline = new_deadline or None
+    old_deadline = clash_dict.get('deadline') or None
+    if old_deadline == new_deadline:
+        return False
+    clash_dict['deadline'] = new_deadline
+    entry = models.make_history_entry(
+        author, 'deadline_changed',
+        before=old_deadline or '-', after=new_deadline or '-',
+    )
+    if at:
+        entry['at'] = at
+    clash_dict.setdefault('history', []).append(entry)
+    return True
+
+
 def apply_trade(clash_dict, new_trade, author, at=None):
     """Set `clash_dict['assignee']` and append a reassigned history entry.
 
     Returns True if the trade changed, False if it was already at
-    `new_trade`.
+    `new_trade`. Like apply_deadline, an empty value is meaningful: it
+    UN-assigns the clash (the web card's "(unassigned)" choice), which
+    must round-trip as a real change rather than a silent no-op.
     """
-    if not clash_dict or not new_trade:
+    if not clash_dict:
         return False
-    old_trade = clash_dict.get('assignee') or '-'
+    new_trade = new_trade or None
+    old_trade = clash_dict.get('assignee') or None
     if old_trade == new_trade:
         return False
     clash_dict['assignee'] = new_trade
     entry = models.make_history_entry(
         author, 'reassigned',
-        before=old_trade, after=new_trade,
+        before=old_trade or '-', after=new_trade or '-',
     )
     if at:
         entry['at'] = at

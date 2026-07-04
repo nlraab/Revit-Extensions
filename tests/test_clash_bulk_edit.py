@@ -143,10 +143,74 @@ class ApplyTradeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(clash["history"][0]["before"], "-")
 
+    def test_unassign_is_a_real_change(self):
+        clash = _clash(assignee="Mechanical")
+        changed = bulk_edit.apply_trade(clash, "", "Nathan")
+        self.assertTrue(changed)
+        self.assertIsNone(clash["assignee"])
+        self.assertEqual(clash["history"][0]["after"], "-")
+
+    def test_unassign_when_already_unassigned_is_noop(self):
+        clash = {"id": "clash-1"}
+        self.assertFalse(bulk_edit.apply_trade(clash, "", "Nathan"))
+        self.assertFalse(bulk_edit.apply_trade(clash, None, "Nathan"))
+        self.assertNotIn("history", clash)
+
     def test_at_kwarg_pins_uniform_timestamp(self):
         clash = _clash(assignee="Mechanical")
         bulk_edit.apply_trade(clash, "Plumbing", "Nathan",
                               at="2026-05-06T12:00:00Z")
+        self.assertEqual(clash["history"][0]["at"], "2026-05-06T12:00:00Z")
+
+
+# ---------------------------------------------------------------------------
+# apply_deadline
+# ---------------------------------------------------------------------------
+
+class ApplyDeadlineTests(unittest.TestCase):
+
+    def test_sets_deadline_when_different(self):
+        clash = _clash()
+        changed = bulk_edit.apply_deadline(clash, "2026-08-01", "Nathan")
+        self.assertTrue(changed)
+        self.assertEqual(clash["deadline"], "2026-08-01")
+
+    def test_appends_history_entry_with_deadline_changed_action(self):
+        clash = _clash()
+        bulk_edit.apply_deadline(clash, "2026-08-01", "Nathan")
+        entry = clash["history"][0]
+        self.assertEqual(entry["action"], "deadline_changed")
+        self.assertEqual(entry["before"], "-")
+        self.assertEqual(entry["after"], "2026-08-01")
+
+    def test_clearing_deadline_is_a_real_change(self):
+        clash = _clash()
+        clash["deadline"] = "2026-08-01"
+        changed = bulk_edit.apply_deadline(clash, "", "Nathan")
+        self.assertTrue(changed)
+        self.assertIsNone(clash["deadline"])
+        self.assertEqual(clash["history"][0]["after"], "-")
+
+    def test_skips_when_already_at_target(self):
+        clash = _clash()
+        clash["deadline"] = "2026-08-01"
+        changed = bulk_edit.apply_deadline(clash, "2026-08-01", "Nathan")
+        self.assertFalse(changed)
+        self.assertNotIn("history", clash)
+
+    def test_skips_clearing_when_already_unset(self):
+        clash = _clash()
+        self.assertFalse(bulk_edit.apply_deadline(clash, None, "Nathan"))
+        self.assertFalse(bulk_edit.apply_deadline(clash, "", "Nathan"))
+        self.assertNotIn("history", clash)
+
+    def test_returns_false_for_none_clash(self):
+        self.assertFalse(bulk_edit.apply_deadline(None, "2026-08-01", "Nathan"))
+
+    def test_at_kwarg_pins_uniform_timestamp(self):
+        clash = _clash()
+        bulk_edit.apply_deadline(clash, "2026-08-01", "Nathan",
+                                 at="2026-05-06T12:00:00Z")
         self.assertEqual(clash["history"][0]["at"], "2026-05-06T12:00:00Z")
 
 

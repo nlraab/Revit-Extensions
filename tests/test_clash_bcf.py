@@ -238,7 +238,11 @@ class MarkupXmlTests(unittest.TestCase):
         vp = root.find("Viewpoints")
         self.assertIsNotNone(vp)
         self.assertEqual(vp.find("Viewpoint").text, "viewpoint.bcfv")
-        self.assertEqual(vp.find("Snapshot").text, "snapshot.png")
+        # No snapshot file is on disk here (viewpoints_dir=None), so the
+        # markup must NOT reference one: a Snapshot element pointing at a
+        # file the zip doesn't contain is a dangling ref strict readers
+        # reject. Snapshot references are tested in SnapshotInclusionTests.
+        self.assertIsNone(vp.find("Snapshot"))
 
     def test_viewpoint_reference_absent_when_clash_has_no_viewpoint(self):
         root = self._read_markup(_sample_clash(with_viewpoint=False))
@@ -399,6 +403,48 @@ class SnapshotInclusionTests(unittest.TestCase):
             out = os.path.join(tmpdir, "out.bcfzip")
             count = bcf.build_bcf_zip({}, [clash], None, out)
             self.assertEqual(count, 1)
+
+    def test_jpg_capture_preferred_and_referenced_in_markup(self):
+        # The web viewer captures JPEGs; they win over legacy PNGs and the
+        # markup's Snapshot element names the file that was actually packed.
+        clash = _sample_clash("clash-J")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vp_dir = os.path.join(tmpdir, "viewpoints")
+            os.makedirs(vp_dir)
+            with open(os.path.join(vp_dir, "clash-J.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0fakejpg")
+            with open(os.path.join(vp_dir, "clash-J.png"), "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\nfake")
+            out = os.path.join(tmpdir, "out.bcfzip")
+            bcf.build_bcf_zip({}, [clash], vp_dir, out)
+            with zipfile.ZipFile(out, "r") as zf:
+                names = zf.namelist()
+                self.assertTrue(any(n.endswith("snapshot.jpg") for n in names))
+                self.assertFalse(any(n.endswith("snapshot.png") for n in names))
+                markup_path = next(n for n in names if n.endswith("markup.bcf"))
+                root = ET.fromstring(zf.read(markup_path))
+                self.assertEqual(root.find("Viewpoints/Snapshot").text,
+                                 "snapshot.jpg")
+
+    def test_snapshot_ships_without_a_viewpoint_dict(self):
+        # Web-captured clashes have an image on disk but no camera dict;
+        # the topic still gets a Viewpoints ref, a minimal .bcfv, and the
+        # snapshot file.
+        clash = _sample_clash("clash-W", with_viewpoint=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vp_dir = os.path.join(tmpdir, "viewpoints")
+            os.makedirs(vp_dir)
+            with open(os.path.join(vp_dir, "clash-W.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0fakejpg")
+            out = os.path.join(tmpdir, "out.bcfzip")
+            bcf.build_bcf_zip({}, [clash], vp_dir, out)
+            with zipfile.ZipFile(out, "r") as zf:
+                names = zf.namelist()
+                self.assertTrue(any(n.endswith("snapshot.jpg") for n in names))
+                self.assertTrue(any(n.endswith("viewpoint.bcfv") for n in names))
+                markup_path = next(n for n in names if n.endswith("markup.bcf"))
+                root = ET.fromstring(zf.read(markup_path))
+                self.assertIsNotNone(root.find("Viewpoints"))
 
 
 # ---------------------------------------------------------------------------

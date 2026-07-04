@@ -70,6 +70,19 @@ DISABLE_GPU_COMPOSITING = False
 
 LOG_PATH = os.path.join(_DATA_ROOT, 'coord.log')
 
+# Model-size guardrails for the WebView2 renderer. Peak renderer memory when
+# xeokit loads a .glb is roughly 3-5x the file size (download buffer + decoded
+# typed arrays + GPU copies + per-element scene objects). Above the hard cap we
+# never hand the page a url: -- the renderer would run out of memory and Chromium
+# would swap in its "Out of Memory" page, which reads as the tool vanishing. The
+# clash DATA is never at risk either way (it's already on disk); only the
+# optional 3D snapshot + clash images need the model loaded. THESE ARE
+# UN-MEASURED PLACEHOLDERS: 580 MB was the observed OOM (a full Fine-detail
+# federated model); 350 blocks it with margin. Raise once there's field data or
+# after the leaner image-mode export lands.
+GLB_HARD_MAX  = 350 * 1048576   # bytes: never load past this
+GLB_SOFT_WARN = 220 * 1048576   # bytes: load, but warn the load may be slow
+
 
 def _log(msg):
     """Append a timestamped line to the tool log. Best-effort; never raises."""
@@ -193,6 +206,15 @@ class CoordinationForm(forms.WPFWindow):
         self._vhost_ok = False
         self._model_version = 0
         self._pushed_initial = False
+        # Run/export progress + abort state. `_op_busy` gates re-entrancy: while
+        # a blocking op (detection, export) pumps the message loop to keep the
+        # page's Abort button live, only `abortrun` is honored, so a stray
+        # double-click can't start a second run mid-flight. `_abort_run` is the
+        # flag the pumped `abortrun` sets; `_cancel_check` reads it. `_last_pump`
+        # throttles the pump so it never slows the export to a crawl.
+        self._op_busy = False
+        self._abort_run = False
+        self._last_pump = 0
         # Route the binding module's diagnostics into coord.log so folder
         # resolution is fully traceable in one place.
         try:
@@ -405,9 +427,23 @@ class CoordinationForm(forms.WPFWindow):
             self._log_dpi_state()
             self._schedule_bounds_nudge()
             try:
+                # Kill Chromium's own right-click menu everywhere in the app:
+                # its "Reload" entry restarts the whole tool mid-meeting, and
+                # the 3D tab ships its own right-click menu.
+                core.Settings.AreDefaultContextMenusEnabled = False
+            except Exception:
+                pass
+            try:
                 core.WebMessageReceived += self._on_web_message
             except Exception:
                 _log("init: WebMessageReceived wire failed\n{0}".format(traceback.format_exc()))
+            try:
+                # The single hole that made the OOM crash invisible: with no
+                # ProcessFailed handler, a dead renderer just shows Chromium's
+                # "Out of Memory" page and the tool looks like it closed itself.
+                core.ProcessFailed += self._on_process_failed
+            except Exception:
+                _log("init: ProcessFailed wire failed\n{0}".format(traceback.format_exc()))
             try:
                 core.NavigationStarting += self._on_nav_starting
                 core.NavigationCompleted += self._on_nav_completed
@@ -465,6 +501,104 @@ class CoordinationForm(forms.WPFWindow):
         except Exception:
             pass
 
+    def _pf_kind_name(self, args):
+        """Name of the ProcessFailedKind ('RenderProcessExited', ...); '?' if
+        it can't be read. Kept as a string so version skew never throws."""
+        try:
+            return str(args.ProcessFailedKind)
+        except Exception:
+            return "?"
+
+    def _pf_reason_name(self, args):
+        """Name of the ProcessFailedReason ('OutOfMemory', 'Crashed', ...).
+        Newer property, absent on Revit-2024's older Core where READING it
+        throws -- hence its own guard."""
+        try:
+            return str(args.Reason)
+        except Exception:
+            return "?"
+
+    def _on_process_failed(self, sender, args):
+        """A WebView2 process died. Without this the big-model renderer OOM
+        silently swaps the page for Chromium's error screen and the tool looks
+        like it "just closed". We log it, keep the clash data safe (it was never
+        in the renderer), and for a recoverable render-process crash reload the
+        page and re-push the project feed.
+
+        Recovery by kind:
+          RenderProcessExited / RenderProcessUnresponsive -> the CONTROL is
+              alive, the PAGE is dead: Reload() + re-map vhosts + re-push.
+          BrowserProcessExited -> the control is dead, Reload() would throw:
+              show a message telling the user to reopen the tool.
+          GPU / Utility / other support processes -> Chromium auto-restarts
+              them and the page keeps running: do NOTHING (a reload would
+              destroy a healthy page)."""
+        kind = self._pf_kind_name(args)
+        reason = self._pf_reason_name(args)
+        exit_code = None
+        try:
+            exit_code = args.ExitCode
+        except Exception:
+            pass
+        _log("ProcessFailed: kind={0} reason={1} exit={2}".format(
+            kind, reason, exit_code))
+
+        if kind not in ("RenderProcessExited", "RenderProcessUnresponsive",
+                        "BrowserProcessExited"):
+            _log("ProcessFailed: {0} is auto-recovered by Chromium; "
+                 "no action".format(kind))
+            return
+
+        # Clear the busy gate so the reloaded page can drive again (any in-flight
+        # export runs on the UI thread, unaffected by the renderer dying).
+        self._op_busy = False
+        self._abort_run = False
+
+        if kind == "BrowserProcessExited":
+            self._show_viewport_message(
+                "The embedded browser stopped unexpectedly.\n\n"
+                "Your clash data is saved -- nothing was lost. Please close "
+                "this window and reopen the Clash Detection tool.\n\n"
+                "(Technical: WebView2 browser process exited, "
+                "reason={0}.)".format(reason))
+            return
+
+        # Render-process crash (the big-model OOM case). The control is alive;
+        # the page is dead. Reload to a blank page, then re-establish everything
+        # it needs, because a reload starts it from scratch.
+        oom = (reason == "OutOfMemory")
+        _log("ProcessFailed: render process gone (oom={0}); reloading".format(oom))
+        self._pushed_initial = False   # let _push_initial run again
+        self._crash_oom = oom          # read by _on_nav_completed after reload
+        try:
+            core = self._webview.CoreWebView2
+            # Re-map BOTH virtual hosts before the reloaded page fetches assets:
+            # the app host is stable (_DATA_ROOT); the data host follows the
+            # bound folder. Mapping is idempotent, so re-adding is safe.
+            try:
+                ak_type = core.GetType().Assembly.GetType(
+                    "Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind")
+                allow = System.Enum.Parse(ak_type, "Allow")
+                self._allow = allow
+                core.SetVirtualHostNameToFolderMapping(VHOST, _DATA_ROOT, allow)
+                from clash_core import binding
+                folder = binding.folder_for(revit.doc) if revit.doc else None
+                self._map_data_host(folder)
+            except Exception:
+                _log("ProcessFailed: vhost re-map failed\n{0}".format(
+                    traceback.format_exc()))
+            core.Reload()
+            _log("ProcessFailed: Reload() issued")
+        except Exception:
+            _log("ProcessFailed: recovery failed\n{0}".format(
+                traceback.format_exc()))
+            self._show_viewport_message(
+                "The 3D view ran out of memory and couldn't be restarted "
+                "automatically.\n\nYour clash data is saved. Please close and "
+                "reopen the tool. If it was a very large model, skip loading "
+                "the 3D snapshot for images -- your clashes are all there "
+                "without it.")
+
     def _on_nav_completed(self, sender, args):
         try:
             _log("nav done: success={0}".format(getattr(args, 'IsSuccess', '?')))
@@ -499,6 +633,15 @@ class CoordinationForm(forms.WPFWindow):
         except Exception:
             _log("nav done: fallback timer failed\n{0}".format(
                 traceback.format_exc()))
+        # If this navigation is the recovery reload after a renderer OOM, tell
+        # the page so it shows a "model too large for 3D" banner instead of
+        # silently re-loading the same monster .glb.
+        if getattr(self, "_crash_oom", False):
+            self._crash_oom = False
+            try:
+                self._post("hostcrash:oom")
+            except Exception:
+                pass
 
     def _push_initial(self, why):
         """Push the whole project feed to the page (settings, tests, clashes,
@@ -550,6 +693,39 @@ class CoordinationForm(forms.WPFWindow):
         except Exception:
             _log("post failed: {0}".format(traceback.format_exc().splitlines()[-1]))
 
+    def _do_events(self):
+        """Pump the WPF dispatcher once so queued input -- crucially the page's
+        Abort button posting `abortrun` -- gets processed while a blocking op
+        (detection / model export) holds the UI thread. Same mechanism the View
+        Range Helper uses for its abortable region export."""
+        try:
+            from System.Windows.Threading import (
+                Dispatcher, DispatcherFrame, DispatcherPriority)
+            from System import Action, Object
+            frame = DispatcherFrame()
+
+            def _exit(f):
+                f.Continue = False
+            Dispatcher.CurrentDispatcher.BeginInvoke(
+                DispatcherPriority.Background, Action[Object](_exit), frame)
+            Dispatcher.PushFrame(frame)
+        except Exception:
+            pass
+
+    def _cancel_check(self):
+        """Hook handed to the exporter (and polled between detection tests).
+        Pumps the UI a few times a second -- NOT on every poll, which would
+        crawl the export -- so the Abort button stays clickable, then reports
+        whether the user asked to stop. The flag read itself is instant."""
+        try:
+            tc = System.Environment.TickCount
+            if tc - self._last_pump >= 150:    # ms; ~6-7 pumps/sec is plenty
+                self._last_pump = tc
+                self._do_events()
+        except Exception:
+            pass
+        return self._abort_run
+
     def _on_web_message(self, sender, args):
         try:
             msg = args.TryGetWebMessageAsString()
@@ -557,9 +733,51 @@ class CoordinationForm(forms.WPFWindow):
             msg = None
         if not msg:
             return
+        # Abort is honored at any time (it's the whole point of pumping the
+        # loop mid-op). While a blocking op runs, every OTHER message is
+        # dropped: it arrived via a re-entrant pump, and starting a second
+        # run / export / group-write on top of the first would corrupt state.
+        if msg == "abortrun":
+            self._abort_run = True
+            _log("abortrun: user requested stop")
+            return
+        if self._op_busy:
+            # A clash edit made while detection/export holds the thread must
+            # NOT vanish silently (the page shows an optimistic "saved" state):
+            # nack it so the page queues the op and retries after the run.
+            if msg.startswith("clashop:"):
+                try:
+                    import json
+                    op = json.loads(msg[8:])
+                    self._post("clashopdone:" + json.dumps(
+                        {"ok": False, "busy": True,
+                         "op_id": op.get("op_id"),
+                         "clash_id": op.get("clash_id")}))
+                except Exception:
+                    _log("busy: clashop nack itself failed\n{0}".format(
+                        traceback.format_exc()))
+                _log("busy: nacked clashop (an operation is already running)")
+                return
+            # Group edits get an explicit failure too - a silent drop leaves
+            # the page's "Applying group change..." status stuck forever.
+            if msg.startswith("groupop:"):
+                try:
+                    import json
+                    self._post("groupdone:" + json.dumps(
+                        {"ok": False,
+                         "error": "The tool is busy running detection or an "
+                                  "export. Make the change again when it "
+                                  "finishes."}))
+                except Exception:
+                    pass
+                _log("busy: nacked groupop")
+                return
+            _log("busy: ignoring '{0}' (an operation is already running)".format(
+                msg[:40]))
+            return
         try:
             if msg == "export":
-                self._do_export()
+                self._export_flow(manual=True)
             elif msg == "ready":
                 _log("ready: received from page")
                 self._push_initial("page-ready")
@@ -567,6 +785,10 @@ class CoordinationForm(forms.WPFWindow):
                 self._load_last_export()
             elif msg.startswith("snapshot:"):
                 self._save_snapshot(msg[9:])
+            elif msg.startswith("gsnapshot:"):
+                self._save_group_snapshot(msg[10:])
+            elif msg == "clearthumbs":
+                self._clear_thumbs()
             elif msg.startswith("setrole:"):
                 import json
                 try:
@@ -584,38 +806,84 @@ class CoordinationForm(forms.WPFWindow):
                 self._run_tests(ids)
             elif msg.startswith("groupop:"):
                 self._handle_groupop(msg[8:])
+            elif msg.startswith("clashop:"):
+                self._handle_clashop(msg[8:])
+            elif msg.startswith("showinrevit:"):
+                self._handle_showinrevit(msg[12:])
             elif msg.startswith("diag:"):
                 _log("page: {0}".format(msg[5:]))
             # cam:/filters:/other page messages are ignored for now
         except Exception:
             _log("on_web_message: {0}".format(traceback.format_exc()))
 
-    def _do_export(self):
-        """Export the active Revit model to glTF and hand its URL to the page."""
+    def _export_flow(self, manual=False):
+        """Run one model export behind the page's run modal, abortable throughout.
+        `manual=True` is the '3D Viewer > Update from Revit' button; otherwise
+        it's the auto-export tail after a clash run. Sets the busy gate (so the
+        Abort button's pumped `abortrun` is the only message honored mid-export)
+        and translates the export outcome into a page stage message."""
+        self._abort_run = False
+        self._op_busy = True
+        try:
+            self._post("runstage:export" if not manual else "runstage:exportmanual")
+            code = self._do_export(is_canceled=self._cancel_check)
+        finally:
+            self._op_busy = False
+        if code == "canceled":
+            self._post("runstage:canceled")
+        elif code == "fail":
+            self._post("runstage:exportfail")
+        # "ok": _do_export already posted url:, the page moves itself to the
+        # image-capture stage on receiving it.
+        return code
+
+    def _do_export(self, is_canceled=None):
+        """Export the active Revit model to glTF and hand its URL to the page.
+        Returns "ok" | "canceled" | "fail". `is_canceled` is polled by the
+        CustomExporter so the user can abort a multi-minute export; a clean
+        abort never touches user data (the export runs in a throwaway view)."""
+        from clash_export import custom_export
         try:
             doc = revit.doc
         except Exception:
             doc = None
         if doc is None:
             self._post("status:No active Revit document to export.")
-            return
+            return "fail"
         try:
             if not os.path.isdir(MODELS_DIR):
                 os.makedirs(MODELS_DIR)
             path = os.path.join(MODELS_DIR, _safe_title(doc) + '.glb')
             _log("export: starting -> {0}".format(path))
-            self._post("status:Exporting model from Revit... (large models take a bit)")
+            self._post("status:Exporting the model snapshot from Revit... "
+                       "(large models take a few minutes)")
             stats = None
             try:
-                from clash_export import custom_export
-                ce = custom_export.export_view(doc, path)
+                # image_mode: a leaner snapshot tuned for clash images -- drops
+                # pure-context clutter categories (furniture, casework, ...),
+                # per-vertex normals, and textures, so a huge federated model
+                # fits the renderer. keep_category_ids protects any category a
+                # clash test actually uses (incl. custom tests) from the prune.
+                ce = custom_export.export_view(
+                    doc, path, is_canceled=is_canceled,
+                    image_mode=True, keep_category_ids=self._test_category_ids())
                 if ce.get("elements", 0) > 0 and ce.get("bytes", 0) > 0:
                     stats = ce
                     _log("export: CustomExporter ok ({0} elements)".format(ce.get("elements")))
+            except custom_export.ExportCanceled:
+                # Clean user abort: the throwaway view is already gone and the
+                # partial file removed. Do NOT fall back (that restarts a full
+                # export the user just cancelled).
+                _log("export: canceled by user")
+                return "canceled"
             except Exception:
                 _log("export: CustomExporter failed\n{0}".format(traceback.format_exc()))
                 stats = None
             if stats is None:
+                # Geometry-API fallback has no cancel hook; a stop request here
+                # bails before we relaunch a long export.
+                if is_canceled is not None and is_canceled():
+                    return "canceled"
                 try:
                     from clash_export import revit_geometry
                     revit_geometry.export_model(doc, path)
@@ -623,16 +891,59 @@ class CoordinationForm(forms.WPFWindow):
                 except Exception:
                     _log("export: fallback failed\n{0}".format(traceback.format_exc()))
                     self._post("status:Export failed. See coord.log.")
-                    return
+                    return "fail"
             self._model_version += 1
+            try:
+                size_bytes = os.path.getsize(path)
+            except Exception:
+                size_bytes = 0
+            size_mb = int(round(size_bytes / 1048576.0))
+            if size_bytes > GLB_HARD_MAX:
+                # Loading this in the renderer would OOM (peak ~= 3-5x file).
+                # Do NOT hand it to the page. The clashes are already saved; the
+                # images are the only thing skipped, and the page says so.
+                _log("export: {0} MB exceeds hard cap {1} MB -- NOT loading "
+                     "(would OOM); posting toobig".format(
+                         size_mb, GLB_HARD_MAX // 1048576))
+                self._post("runstage:toobig:{0}".format(size_mb))
+                self._send_clashes()
+                return "ok"
+            if size_bytes > GLB_SOFT_WARN:
+                self._post("modelwarn:{0}".format(size_mb))
             url = "https://{0}/models/{1}?v={2}".format(
                 VHOST, os.path.basename(path), self._model_version)
-            _log("export: done, posting {0}".format(url))
+            _log("export: done ({0} MB), posting {1}".format(size_mb, url))
             self._post("url:" + url)
             self._send_clashes()
+            return "ok"
         except Exception:
             _log("export: EXCEPTION\n{0}".format(traceback.format_exc()))
             self._post("status:Export error. See coord.log.")
+            return "fail"
+
+    def _test_category_ids(self):
+        """The set of BuiltInCategory ints referenced by the project's effective
+        clash tests (set_a/set_b category lists). Handed to the image-mode
+        exporter so its context-clutter prune NEVER drops a category a clash
+        could involve -- including any custom test's categories. Empty set on
+        any failure (which just means the exporter prunes its default blocklist
+        outright -- still safe, those categories are never clash participants)."""
+        ids = set()
+        try:
+            from Autodesk.Revit.DB import BuiltInCategory
+            names = set()
+            for t in self._effective_tests():
+                for side in ('set_a', 'set_b'):
+                    for c in ((t.get(side) or {}).get('categories') or []):
+                        names.add(c)
+            for n in names:
+                try:
+                    ids.add(int(getattr(BuiltInCategory, n)))
+                except Exception:
+                    pass
+        except Exception:
+            _log("test_category_ids failed\n{0}".format(traceback.format_exc()))
+        return ids
 
     # --- model persistence + clash snapshots -------------------------------
 
@@ -673,6 +984,19 @@ class CoordinationForm(forms.WPFWindow):
             if not os.path.isfile(path):
                 self._post("status:No previous export found. Use 'Update from Revit'.")
                 return
+            try:
+                size_bytes = os.path.getsize(path)
+            except Exception:
+                size_bytes = 0
+            if size_bytes > GLB_HARD_MAX:
+                # Same guard as _do_export: the reopen path can hit the same
+                # oversized file. Refuse it rather than OOM the renderer.
+                size_mb = int(round(size_bytes / 1048576.0))
+                _log("loadlast: {0} MB exceeds hard cap -- not loading".format(size_mb))
+                self._post("status:The last export ({0} MB) is too large to show "
+                           "in 3D here. Your clash data is unaffected.".format(size_mb))
+                self._post("toobiglast:{0}".format(size_mb))
+                return
             self._model_version += 1
             url = "https://{0}/models/{1}?v={2}".format(
                 VHOST, os.path.basename(path), self._model_version)
@@ -681,19 +1005,122 @@ class CoordinationForm(forms.WPFWindow):
         except Exception:
             _log("loadlast: EXCEPTION\n{0}".format(traceback.format_exc()))
 
+    def _viewpoints_dir(self):
+        """The bound folder's viewpoints/ dir (created), or None if unbound."""
+        from clash_core import binding
+        doc = revit.doc
+        folder = binding.folder_for(doc) if doc is not None else None
+        if not folder:
+            return None
+        vp_dir = os.path.join(folder, 'viewpoints')
+        if not os.path.isdir(vp_dir):
+            os.makedirs(vp_dir)
+        return vp_dir
+
+    @staticmethod
+    def _safe_image_id(image_id):
+        """Ids are uuids from merge/grouping; never let one walk the path."""
+        return bool(image_id) and "/" not in image_id and "\\" not in image_id \
+            and ".." not in image_id
+
+    @staticmethod
+    def _decode_dataurl(dataurl):
+        """(bytes, ext) from a page data URL. The page captures JPEG now;
+        PNG is kept for compatibility with anything older."""
+        import base64
+        ext = '.jpg' if dataurl.startswith('data:image/jpeg') else '.png'
+        b64 = dataurl.split(",", 1)[1] if "," in dataurl else dataurl
+        return base64.b64decode(b64), ext
+
+    @staticmethod
+    def _write_image(vp_dir, stem, raw, ext):
+        """Atomic image write; drops the other-extension leftover so a JPEG
+        recapture replaces a legacy PNG instead of shadowing it."""
+        out = os.path.join(vp_dir, stem + ext)
+        tmp = out + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(raw)
+        if os.path.isfile(out):
+            os.remove(out)
+        os.rename(tmp, out)
+        other = os.path.join(vp_dir, stem + ('.png' if ext == '.jpg' else '.jpg'))
+        try:
+            if os.path.isfile(other):
+                os.remove(other)
+        except Exception:
+            pass
+        return out
+
     def _save_snapshot(self, payload):
         """Persist one clash's context image: 'snapshot:<clash-id>:<dataurl>'
-        -> <folder>/viewpoints/<clash-id>.png, directly inside this project's
+        -> <folder>/viewpoints/<clash-id>.jpg, directly inside this project's
         clash-data folder. Images survive across sessions, so a clash can show
         its context view without the 3D model being loaded."""
-        import base64
         try:
             clash_id, dataurl = payload.split(":", 1)
-            b64 = dataurl.split(",", 1)[1] if "," in dataurl else dataurl
-            png = base64.b64decode(b64)
-            # basic sanity: ids are uuids from merge; never write elsewhere
-            if not clash_id or "/" in clash_id or "\\" in clash_id or ".." in clash_id:
+            if not self._safe_image_id(clash_id):
                 return
+            raw, ext = self._decode_dataurl(dataurl)
+            vp_dir = self._viewpoints_dir()
+            if not vp_dir:
+                return
+            self._write_image(vp_dir, clash_id, raw, ext)
+        except Exception:
+            _log("save_snapshot: EXCEPTION\n{0}".format(traceback.format_exc()))
+
+    def _save_group_snapshot(self, payload):
+        """Persist one issue's aggregate photo:
+        'gsnapshot:<group-id>:<member-hash>:<dataurl>'
+        -> <folder>/viewpoints/issue_<group-id>.jpg plus a row in
+        viewpoints/issues.json recording the member-roster hash, so a
+        membership change on a later run invalidates the photo."""
+        import json
+        try:
+            group_id, rest = payload.split(":", 1)
+            member_hash, dataurl = rest.split(":", 1)
+            if not self._safe_image_id(group_id) \
+                    or not self._safe_image_id(member_hash):
+                return
+            raw, ext = self._decode_dataurl(dataurl)
+            vp_dir = self._viewpoints_dir()
+            if not vp_dir:
+                return
+            fname = 'issue_' + group_id + ext
+            self._write_image(vp_dir, 'issue_' + group_id, raw, ext)
+            manifest = self._read_issue_manifest(vp_dir)
+            manifest[group_id] = {'hash': member_hash, 'file': fname}
+            mpath = os.path.join(vp_dir, 'issues.json')
+            tmp = mpath + '.tmp'
+            with open(tmp, 'wb') as f:
+                f.write(json.dumps(manifest, ensure_ascii=False).encode('utf-8'))
+            if os.path.isfile(mpath):
+                os.remove(mpath)
+            os.rename(tmp, mpath)
+        except Exception:
+            _log("save_group_snapshot: EXCEPTION\n{0}".format(
+                traceback.format_exc()))
+
+    @staticmethod
+    def _read_issue_manifest(vp_dir):
+        """viewpoints/issues.json -> {group_id: {hash, file}}; {} on any
+        failure (a corrupt manifest just means photos re-capture)."""
+        import json
+        try:
+            mpath = os.path.join(vp_dir, 'issues.json')
+            if not os.path.isfile(mpath):
+                return {}
+            with open(mpath, 'rb') as f:
+                data = json.loads(f.read().decode('utf-8'))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _clear_thumbs(self):
+        """Delete every saved clash/issue image (viewpoints/ only ever holds
+        tool-written captures) so the page can rebuild them in the current
+        style. Fired by the page's 'Recapture images' button, which confirms
+        with the user first."""
+        try:
             from clash_core import binding
             doc = revit.doc
             folder = binding.folder_for(doc) if doc is not None else None
@@ -701,16 +1128,21 @@ class CoordinationForm(forms.WPFWindow):
                 return
             vp_dir = os.path.join(folder, 'viewpoints')
             if not os.path.isdir(vp_dir):
-                os.makedirs(vp_dir)
-            out = os.path.join(vp_dir, clash_id + '.png')
-            tmp = out + '.tmp'
-            with open(tmp, 'wb') as f:
-                f.write(png)
-            if os.path.isfile(out):
-                os.remove(out)
-            os.rename(tmp, out)
+                return
+            n = 0
+            for name in os.listdir(vp_dir):
+                low = name.lower()
+                if low.endswith('.png') or low.endswith('.jpg') \
+                        or name == 'issues.json':
+                    try:
+                        os.remove(os.path.join(vp_dir, name))
+                        n += 1
+                    except Exception:
+                        pass
+            _log("clear_thumbs: removed {0} file(s)".format(n))
+            self._send_clashes()
         except Exception:
-            _log("save_snapshot: EXCEPTION\n{0}".format(traceback.format_exc()))
+            _log("clear_thumbs: EXCEPTION\n{0}".format(traceback.format_exc()))
 
     def _map_data_host(self, folder):
         """(Re)point the clash-data virtual host at `folder` so the page can load
@@ -737,17 +1169,36 @@ class CoordinationForm(forms.WPFWindow):
     def _thumb_url(self, folder, clash_id):
         """URL of a clash's persisted thumbnail under this project's folder, or
         None. The data vhost maps to `folder`, so the path is a flat
-        '/viewpoints/<id>.png'."""
+        '/viewpoints/<id>.jpg' (new captures) or '.png' (legacy)."""
         try:
             if not getattr(self, '_datahost_ok', False) or not folder or not clash_id:
                 return None
-            p = os.path.join(folder, 'viewpoints', clash_id + '.png')
-            if os.path.isfile(p):
-                return "https://{0}/viewpoints/{1}.png?v={2}".format(
-                    VHOST_DATA, clash_id, int(os.path.getmtime(p)))
+            for ext in ('.jpg', '.png'):
+                p = os.path.join(folder, 'viewpoints', clash_id + ext)
+                if os.path.isfile(p):
+                    return "https://{0}/viewpoints/{1}{2}?v={3}".format(
+                        VHOST_DATA, clash_id, ext, int(os.path.getmtime(p)))
         except Exception:
             pass
         return None
+
+    def _group_thumb(self, folder, manifest, group_id):
+        """(url, member-hash) of an issue's persisted aggregate photo, from the
+        issues.json manifest. (None, None) when there's no fresh photo."""
+        try:
+            info = manifest.get(group_id) or {}
+            fname = info.get('file')
+            if not getattr(self, '_datahost_ok', False) or not folder \
+                    or not fname or not self._safe_image_id(fname):
+                return None, None
+            p = os.path.join(folder, 'viewpoints', fname)
+            if os.path.isfile(p):
+                url = "https://{0}/viewpoints/{1}?v={2}".format(
+                    VHOST_DATA, fname, int(os.path.getmtime(p)))
+                return url, info.get('hash')
+        except Exception:
+            pass
+        return None, None
 
     # --- settings ---------------------------------------------------------
 
@@ -1005,6 +1456,33 @@ class CoordinationForm(forms.WPFWindow):
         _log("send_tests: {0} tests".format(len(rows)))
         self._post("tests:" + payload)
 
+    def _detect_status(self, prefix, test_index, test_count):
+        """Build the per-test status callback the detector calls on every
+        heartbeat. It (1) pumps the UI so Abort stays live, (2) streams the
+        text to the page, and (3) parses the '<done>/<total> elements' count
+        into an overall run percentage for the modal's progress bar."""
+        import re
+        elem_re = re.compile(r'(\d+)\s*/\s*(\d+)\s+elements')
+
+        def _cb(m):
+            self._cancel_check()   # throttled pump; keeps Abort responsive
+            self._post("status:" + prefix + m)
+            try:
+                mo = elem_re.search(m)
+                if mo:
+                    done_n = float(mo.group(1))
+                    total_n = float(mo.group(2)) or 1.0
+                    frac = done_n / total_n
+                    if frac < 0:
+                        frac = 0.0
+                    if frac > 1:
+                        frac = 1.0
+                    pct = (test_index + frac) / max(1, test_count) * 100.0
+                    self._post("runprog:{0:.1f}".format(pct))
+            except Exception:
+                pass
+        return _cb
+
     def _run_tests(self, test_ids):
         """Run the selected clash tests through the real detection pipeline --
         the same steps as the Run Clash Test button (runner -> dedupe -> merge ->
@@ -1102,22 +1580,42 @@ class CoordinationForm(forms.WPFWindow):
         errors = []
         tess_cache = {}   # one cache for the whole run: shared elements tessellate once
         ins_cache = {}    # one insulation map per document per run
-        for i, t in enumerate(tests):
-            name = t.get('name') or t.get('id')
-            self._post("status:Running {0}/{1}: {2}...".format(i + 1, len(tests), name))
-            _log("run_tests: {0}/{1} {2}".format(i + 1, len(tests), name))
-            # Live heartbeat inside long tests: the page status line shows
-            # "N/M elements checked, K clashes" instead of going silent.
-            prefix = "Running {0}/{1}: {2} - ".format(i + 1, len(tests), name)
-            status = (lambda p: lambda m: self._post("status:" + p + m))(prefix)
-            try:
-                raw.extend(runner.run_test(doc, t, role_map, log=_log,
-                                           tess_cache=tess_cache,
-                                           ins_cache=ins_cache,
-                                           status=status))
-            except Exception:
-                errors.append(name)
-                _log("run_tests: test '{0}' FAILED\n{1}".format(name, traceback.format_exc()))
+        # Detection blocks the UI thread. Set the busy gate and pump the loop
+        # through the status callback so the modal's Abort button stays live;
+        # the abort is acted on between tests (a single test can't be stopped
+        # mid-pass) and discards everything -- nothing is written on cancel.
+        self._abort_run = False
+        self._op_busy = True
+        canceled = False
+        n = len(tests)
+        try:
+            for i, t in enumerate(tests):
+                if self._abort_run:
+                    canceled = True
+                    break
+                name = t.get('name') or t.get('id')
+                self._post("status:Running {0}/{1}: {2}...".format(i + 1, n, name))
+                _log("run_tests: {0}/{1} {2}".format(i + 1, n, name))
+                # Live heartbeat inside long tests: the page status line shows
+                # "N/M elements checked, K clashes" and the modal bar advances.
+                prefix = "Running {0}/{1}: {2} - ".format(i + 1, n, name)
+                status = self._detect_status(prefix, i, n)
+                try:
+                    raw.extend(runner.run_test(doc, t, role_map, log=_log,
+                                               tess_cache=tess_cache,
+                                               ins_cache=ins_cache,
+                                               status=status))
+                except Exception:
+                    errors.append(name)
+                    _log("run_tests: test '{0}' FAILED\n{1}".format(name, traceback.format_exc()))
+        finally:
+            self._op_busy = False
+        if canceled:
+            _log("run_tests: canceled by user before saving (nothing written)")
+            done(False, "Run canceled before saving. Nothing was changed -- "
+                        "your previous clash data is untouched.")
+            self._post("runstage:detectcancel")
+            return
         try:
             if raw:
                 raw, _dropped = dedupe.drop_soft_overlapping_hard(raw)
@@ -1165,9 +1663,11 @@ class CoordinationForm(forms.WPFWindow):
             _log("run_tests: merge/write FAILED\n{0}".format(traceback.format_exc()))
             done(False, "Detection ran but saving results failed. See coord.log.")
             return
-        # No image rendering on run: detection writes results and the grid shows
-        # them immediately. Clash context views are captured on demand from the
-        # 3D pane, not by grinding a temporary 3D view per clash on every run.
+        # No Revit-side image rendering on run: detection writes results and
+        # the grid shows them immediately. Images come from the web viewer:
+        # the auto-export below hands the page a fresh model snapshot and the
+        # page captures clash/issue photos in the background while the user
+        # reviews (the old per-clash temp-3D-view pipeline took hours).
         msg = "Run complete: {0} new, {1} persisting, {2} auto-resolved, {3} reopened.".format(
             summary.get('new', 0), summary.get('persisting', 0),
             summary.get('auto_resolved', 0), summary.get('reopened', 0))
@@ -1176,9 +1676,27 @@ class CoordinationForm(forms.WPFWindow):
         if link_warning:
             msg += " " + link_warning
         _log("run_tests: " + msg)
+        # Safe point: clash data is on disk. Everything after this is the
+        # optional image tail -- fully abortable, and its failure never risks
+        # the saved run.
         done(True, msg, summary)
         self._send_clashes()
         self._send_tests()
+        # Auto-refresh the 3D snapshot so images capture right away and match
+        # the model state that was just tested. Skipped when there is nothing
+        # to photograph. _export_flow owns the abort + stage messaging; the
+        # page's modal reacts to the stages it posts.
+        if merged:
+            try:
+                self._export_flow(manual=False)
+            except Exception:
+                _log("run_tests: auto-export failed (non-fatal)\n{0}".format(
+                    traceback.format_exc()))
+                self._post("runstage:exportfail")
+        else:
+            # No clashes to photograph -- tell the page so its modal closes out
+            # instead of hanging on "preparing images".
+            self._post("runstage:noimages")
 
     def _handle_groupop(self, payload):
         """Apply one human group operation (the tool's first write-back
@@ -1223,6 +1741,394 @@ class CoordinationForm(forms.WPFWindow):
         if ok:
             self._send_clashes()
 
+    def _handle_clashop(self, payload):
+        """Apply one per-clash edit (status / trade / deadline / comment):
+        the per-clash sibling of _handle_groupop, and the channel that makes
+        the clash card editable in both tabs. Read-modify-write of
+        clashes.json, one atomic write, always acks with clashopdone: (the
+        page runs optimistically and reconciles on the ack). The op may
+        carry 'camera' (host feet {position,target,up}) which is stored as
+        the clash's viewpoint so reopening the clash lands in the view the
+        decision was made in."""
+        import json
+        ok, error, clash_id, op_id = False, None, None, None
+        ph, delta, rollup_gid = None, None, None
+        try:
+            op = json.loads(payload)
+            clash_id = op.get('clash_id')
+            op_id = op.get('op_id')
+            kind = op.get('op')
+            from clash_core import binding, persistence, bulk_edit, models
+            doc = revit.doc
+            ph = binding.folder_for(doc) if doc is not None else None
+            if not ph:
+                error = 'This project is not pointed at a clash-data folder yet.'
+            elif not clash_id:
+                error = 'No clash id in the request.'
+            else:
+                data = persistence.read_clashes_at(ph)
+                clashes = data.get('clashes') or []
+                target = None
+                for c in clashes:
+                    if c.get('id') == clash_id:
+                        target = c
+                        break
+                if target is None:
+                    error = 'That clash is not in the database any more.'
+                else:
+                    try:
+                        from clash_core import users
+                        user = users.current_user(revit.uiapp)
+                    except Exception:
+                        user = 'user'
+                    changed = False
+                    if kind == 'status':
+                        st = op.get('status')
+                        if not st:
+                            error = 'No status value in the request.'
+                        else:
+                            changed = bulk_edit.apply_status(target, st, user)
+                            # The Approve flow rides its reason along as a
+                            # note: one write, one ack, and the "why it was
+                            # accepted" lands in the comment record.
+                            note = (op.get('note') or '').strip()
+                            if note:
+                                target.setdefault('comments', []).append(
+                                    models.make_comment(user, note))
+                                changed = True
+                    elif kind == 'assign':
+                        changed = bulk_edit.apply_trade(
+                            target, op.get('assignee'), user)
+                    elif kind == 'deadline':
+                        changed = bulk_edit.apply_deadline(
+                            target, op.get('deadline'), user)
+                    elif kind == 'comment':
+                        body = (op.get('body') or '').strip()
+                        if body:
+                            target.setdefault('comments', []).append(
+                                models.make_comment(user, body))
+                            changed = True
+                        else:
+                            error = 'Empty comment.'
+                    elif kind == 'saveview':
+                        # No data change - just persist the current 3D view on
+                        # the clash (the "Save this view" button). The view is
+                        # stamped below; mark changed so it writes + re-pushes.
+                        changed = bool(op.get('view'))
+                        if not changed:
+                            error = 'No view to save.'
+                    else:
+                        error = 'Unknown clash operation: {0}'.format(kind)
+                    if error is None:
+                        # The full saved view (Phase D): camera + section box +
+                        # view mode + see-through. Falls back to the legacy
+                        # camera-only payload for older pages.
+                        view = op.get('view')
+                        cam = op.get('camera')
+                        if view and changed:
+                            self._stamp_clash_view(target, view, user)
+                        elif cam and changed:
+                            self._stamp_clash_view(target, {'camera': cam}, user)
+                        # Status changes ripple into the group's rollup so
+                        # the agenda/queue chips stay honest between runs.
+                        if changed and kind == 'status' and target.get('group_id'):
+                            rollup_gid = self._refresh_group_rollup(
+                                data, target.get('group_id'))
+                        if changed:
+                            data['clashes'] = clashes
+                            persistence.write_clashes_at(ph, data)
+                        # A no-op edit (already at the value) still acks ok:
+                        # the page state and disk already agree.
+                        ok = True
+                        delta = target
+        except Exception:
+            _log("clashop failed\n{0}".format(traceback.format_exc()))
+            error = 'The edit failed. See coord.log.'
+        try:
+            self._post("clashopdone:" + json.dumps(
+                {"ok": ok, "error": error, "clash_id": clash_id,
+                 "op_id": op_id}, ensure_ascii=False))
+        except Exception:
+            pass
+        if ok and delta is not None:
+            self._post_clash_delta(ph, data, delta, rollup_gid)
+        elif not ok and clash_id and ph:
+            # A failed edit resyncs the page: the optimistic UI must never
+            # keep showing state that is not on disk.
+            try:
+                self._send_clashes()
+            except Exception:
+                pass
+
+    def _stamp_clash_view(self, clash, view, user):
+        """Overwrite the clash's single viewpoint with the full 3D view the
+        page sent. `view` = {camera:{position,target,up} host feet Z-up,
+        box_on, box_pad_ft, mode, fade, ortho}. Keeps the existing snapshot
+        path so the saved photo stays paired. The extra web state lives under
+        a `web` key so the BCF exporter (camera + section_box) is unaffected.
+        Never raises: a bad view just isn't saved."""
+        try:
+            cam = (view or {}).get('camera') or {}
+            pos, tgt = cam.get('position'), cam.get('target')
+            if (not pos or not tgt or len(pos) != 3 or len(tgt) != 3):
+                return
+            from clash_core import models
+            old = None
+            try:
+                old = (clash.get('viewpoints') or [None])[0]
+            except Exception:
+                old = None
+            vp = models.make_viewpoint(
+                pos, tgt, cam.get('up') or [0.0, 0.0, 1.0],
+                snapshot_relpath=(old or {}).get('snapshot_relpath'),
+                captured_by=user)
+            vp['source'] = 'web-decide'
+            # Keep a legacy viewpoint's section box: BCF export emits it as
+            # ClippingPlanes, and a decide must not strip it.
+            sb = (old or {}).get('section_box')
+            if sb:
+                vp['section_box'] = sb
+            # The web-viewer restore state (mode/box/fade/ortho); ignored by BCF.
+            web = {}
+            for k in ('box_on', 'box_pad_ft', 'mode', 'fade', 'ortho'):
+                if view.get(k) is not None:
+                    web[k] = view.get(k)
+            if web:
+                vp['web'] = web
+            clash['viewpoints'] = [vp]
+        except Exception:
+            _log("stamp view failed\n{0}".format(traceback.format_exc()))
+
+    def _handle_showinrevit(self, payload):
+        """Select + zoom the clash elements in Revit itself, then minimize
+        this window so Revit is actually visible (the tool is modal: Revit
+        can be LOOKED at but not edited until the window closes). Host
+        elements select directly via UniqueId; linked elements cannot be
+        selected, so the zoom falls back to a box around the clash midpoint,
+        which works for both cases."""
+        import json
+        try:
+            req = json.loads(payload)
+        except Exception:
+            return
+        try:
+            doc = revit.doc
+            uidoc = revit.uidoc
+            if doc is None or uidoc is None:
+                return
+            from Autodesk.Revit.DB import ElementId
+            from System.Collections.Generic import List
+            ids = []
+            for key in (req.get('keys') or []):
+                if not key or '|' in key:
+                    continue    # linked element: lives in the link's document
+                try:
+                    el = doc.GetElement(key)   # UniqueId lookup
+                except Exception:
+                    el = None
+                if el is not None:
+                    ids.append(el.Id)
+            shown = False
+            if ids:
+                sel = List[ElementId]()
+                for i in ids:
+                    sel.Add(i)
+                try:
+                    uidoc.Selection.SetElementIds(sel)
+                except Exception:
+                    pass
+                try:
+                    uidoc.ShowElements(sel)
+                    shown = True
+                except Exception:
+                    pass
+            if not shown and req.get('mid'):
+                self._zoom_active_view_to(req.get('mid'))
+            try:
+                from System.Windows import WindowState
+                self.WindowState = WindowState.Minimized
+            except Exception:
+                pass
+            self._post("status:Showing in Revit. Bring this window back up "
+                       "from the taskbar when you're done looking.")
+        except Exception:
+            _log("showinrevit failed\n{0}".format(traceback.format_exc()))
+
+    def _zoom_active_view_to(self, mid, half_ft=8.0):
+        """Zoom the active Revit view's UIView to a box around a point
+        (host feet). The linked-element fallback for Show in Revit."""
+        try:
+            from Autodesk.Revit.DB import XYZ, View3D, ViewPlan, ViewSection
+            uidoc = revit.uidoc
+            av = uidoc.ActiveView
+            # Model-space coordinates only make sense in a model view: on a
+            # sheet or schedule the zoom would land in nonsense paper space.
+            if av is None or not isinstance(av, (View3D, ViewPlan, ViewSection)):
+                return
+            for uv in uidoc.GetOpenUIViews():
+                if uv.ViewId == av.Id:
+                    uv.ZoomAndCenterRectangle(
+                        XYZ(mid[0] - half_ft, mid[1] - half_ft, mid[2] - half_ft),
+                        XYZ(mid[0] + half_ft, mid[1] + half_ft, mid[2] + half_ft))
+                    break
+        except Exception:
+            _log("zoom failed\n{0}".format(traceback.format_exc()))
+
+    def _view_row(self, c):
+        """Flatten the clash's saved viewpoint into the page's `vp` shape:
+        {camera, box_on, box_pad_ft, mode, fade, ortho} or None. camera is
+        the host-feet {position,target,up}; the rest is the web restore
+        state stored under the viewpoint's `web` key."""
+        vp0 = (c.get("viewpoints") or [None])[0] or {}
+        cam = vp0.get("camera")
+        if not cam:
+            return None
+        out = {"camera": cam}
+        web = vp0.get("web") or {}
+        for k in ("box_on", "box_pad_ft", "mode", "fade", "ortho"):
+            if web.get(k) is not None:
+                out[k] = web.get(k)
+        return out
+
+    def _clash_row(self, ph, c, tol_by_test):
+        """One clash record -> the page's row dict. Shared by the full
+        clashes: push and the per-edit clashupd: delta."""
+        a = c.get("ref_a") or {}
+        b = c.get("ref_b") or {}
+        comments = [{
+            "author": cm.get("author") or "?",
+            "at":     cm.get("at") or "",
+            "body":   cm.get("body") or "",
+        } for cm in (c.get("comments") or [])]
+        # Real importance when the engine has stamped it; otherwise the
+        # provisional placeholder (pre-scoring records).
+        imp = c.get("importance") or {}
+        return {
+            "id":     c.get("id"),
+            "thumb":  self._thumb_url(ph, c.get("id")),
+            "mid":    c.get("midpoint"),
+            "seq":    c.get("seq"),
+            "score":  imp.get("score") if imp.get("score") is not None
+                      else self._placeholder_score(c),
+            "reason":     imp.get("reason"),
+            "brk":        imp.get("brk"),
+            "rule":       imp.get("rule"),
+            "suppressed": bool(imp.get("suppressed")),
+            "supReason":  imp.get("suppress_reason"),
+            "conf":       imp.get("confidence"),
+            "flags":      imp.get("flags") or [],
+            "status": c.get("status") or "Open",
+            "kind":   c.get("kind") or "hard",
+            "pair":   self._pair_label(a, b),
+            "a":      a.get("name") or a.get("category") or "?",
+            "b":      b.get("name") or b.get("category") or "?",
+            "catA":   a.get("category") or "?",
+            "catB":   b.get("category") or "?",
+            "srcA":   a.get("source") or "host",
+            "srcB":   b.get("source") or "host",
+            "level":  a.get("level") or b.get("level") or "",
+            "owner":  c.get("assignee") or "",
+            "gap":    c.get("gap_inches"),
+            "contact":    c.get("is_contact"),
+            "gapMethod":  c.get("gap_method"),
+            # Prefer the tolerance stamped on the record at run time (what
+            # the score used); library lookup covers old rows.
+            "tol":        c.get("tolerance_inches")
+                          if c.get("tolerance_inches") is not None
+                          else tol_by_test.get(c.get("test_id")),
+            "first_seen": c.get("first_seen_run"),
+            "deadline":   c.get("deadline"),
+            # The saved 3D view from the last decide-in-3D: camera (host feet)
+            # plus the restore state (mode/box/fade/ortho). The page restores
+            # all of it on select.
+            "vp": self._view_row(c),
+            "comments":   comments,
+            "fedA":   a.get("fed_key"),
+            "fedB":   b.get("fed_key"),
+            "gid":    c.get("group_id"),
+            "scored": bool(imp),
+        }
+
+    def _group_row(self, ph, issue_manifest, g):
+        """One group record -> the page's group dict. Shared by the full
+        groups: push and the per-edit groupupd: delta."""
+        gthumb, ghash = self._group_thumb(ph, issue_manifest, g.get("id"))
+        return {
+            "id":         g.get("id"),
+            "seq":        g.get("seq"),
+            "axis":       g.get("axis"),
+            # anchor element name + representative clash id: the issue
+            # inspector's "why together" sentence and its fallback photo.
+            "anchor":     (g.get("anchor") or {}).get("name"),
+            "rep":        g.get("rep_clash_id"),
+            # Aggregate issue photo + the member-roster hash it was captured
+            # against; the page recaptures on mismatch.
+            "thumb":      gthumb,
+            "thumbHash":  ghash,
+            "title":      g.get("title") or "",
+            "titleLocked": bool(g.get("title_locked")),
+            "status":     g.get("status") or "Open",
+            "assignee":   g.get("assignee"),
+            "members":    g.get("member_ids") or [],
+            "suggested":  g.get("suggested_ids") or [],
+            "needsReview": bool(g.get("needs_review")),
+            "created":    g.get("created_at"),
+            "comments": [{
+                "author": cm.get("author") or "?",
+                "at":     cm.get("at") or "",
+                "body":   cm.get("body") or "",
+            } for cm in (g.get("comments") or [])],
+            "rollup":     g.get("rollup") or {},
+        }
+
+    def _refresh_group_rollup(self, data, gid):
+        """Recompute one group's rollup after a member edit, so the Home
+        agenda and the queue chips don't sit stale until the next run.
+        Returns the gid on success, None otherwise."""
+        try:
+            import clash_group
+            for g in (data.get('groups') or []):
+                if g.get('id') == gid:
+                    by_id = dict((c.get('id'), c)
+                                 for c in (data.get('clashes') or []))
+                    g['rollup'] = clash_group.rollup(g, by_id)
+                    return gid
+        except Exception:
+            _log("rollup refresh failed\n{0}".format(traceback.format_exc()))
+        return None
+
+    def _post_clash_delta(self, ph, data, clash, gid):
+        """Tiny per-edit reconcile: ONE clashupd: row (server authorship and
+        timestamps replacing the page's optimistic guesses) plus the touched
+        group via groupupd:. The full clashes:+groups: re-push is a few MB of
+        JSON per decide keystroke on big projects; this is a few KB."""
+        import json
+        tol_by_test = {}
+        try:
+            for t in self._effective_tests():
+                tol_by_test[t.get('id')] = t.get('tolerance_inches')
+        except Exception:
+            pass
+        try:
+            row = self._clash_row(ph, clash, tol_by_test)
+            self._post("clashupd:" + json.dumps([row], ensure_ascii=False))
+        except Exception:
+            _log("clash delta failed\n{0}".format(traceback.format_exc()))
+            self._send_clashes()
+            return
+        if gid:
+            try:
+                manifest = self._read_issue_manifest(
+                    os.path.join(ph, 'viewpoints'))
+                for g in (data.get('groups') or []):
+                    if g.get('id') == gid and g.get('status') != 'MergedInto':
+                        grow = self._group_row(ph, manifest, g)
+                        self._post("groupupd:" + json.dumps(
+                            [grow], ensure_ascii=False))
+                        break
+            except Exception:
+                _log("group delta failed\n{0}".format(traceback.format_exc()))
+
     def _send_clashes(self):
         """Read the active project's clash database and hand the grid its rows.
         Fully defensive: a missing / unconfigured / corrupt database just sends
@@ -1265,56 +2171,7 @@ class CoordinationForm(forms.WPFWindow):
         rows = []
         for c in data.get("clashes", []):
             try:
-                a = c.get("ref_a") or {}
-                b = c.get("ref_b") or {}
-                comments = [{
-                    "author": cm.get("author") or "?",
-                    "at":     cm.get("at") or "",
-                    "body":   cm.get("body") or "",
-                } for cm in (c.get("comments") or [])]
-                # Real importance when the engine has stamped it; otherwise
-                # the provisional placeholder (pre-scoring records).
-                imp = c.get("importance") or {}
-                rows.append({
-                    "id":     c.get("id"),
-                    "thumb":  self._thumb_url(ph, c.get("id")),
-                    "mid":    c.get("midpoint"),
-                    "seq":    c.get("seq"),
-                    "score":  imp.get("score") if imp.get("score") is not None
-                              else self._placeholder_score(c),
-                    "reason":     imp.get("reason"),
-                    "brk":        imp.get("brk"),
-                    "rule":       imp.get("rule"),
-                    "suppressed": bool(imp.get("suppressed")),
-                    "supReason":  imp.get("suppress_reason"),
-                    "conf":       imp.get("confidence"),
-                    "flags":      imp.get("flags") or [],
-                    "status": c.get("status") or "Open",
-                    "kind":   c.get("kind") or "hard",
-                    "pair":   self._pair_label(a, b),
-                    "a":      a.get("name") or a.get("category") or "?",
-                    "b":      b.get("name") or b.get("category") or "?",
-                    "catA":   a.get("category") or "?",
-                    "catB":   b.get("category") or "?",
-                    "srcA":   a.get("source") or "host",
-                    "srcB":   b.get("source") or "host",
-                    "level":  a.get("level") or b.get("level") or "",
-                    "owner":  c.get("assignee") or "",
-                    "gap":    c.get("gap_inches"),
-                    "contact":    c.get("is_contact"),
-                    "gapMethod":  c.get("gap_method"),
-                    # Prefer the tolerance stamped on the record at run time
-                    # (what the score used); library lookup covers old rows.
-                    "tol":        c.get("tolerance_inches")
-                                  if c.get("tolerance_inches") is not None
-                                  else tol_by_test.get(c.get("test_id")),
-                    "first_seen": c.get("first_seen_run"),
-                    "comments":   comments,
-                    "fedA":   a.get("fed_key"),
-                    "fedB":   b.get("fed_key"),
-                    "gid":    c.get("group_id"),
-                    "scored": bool(imp),
-                })
+                rows.append(self._clash_row(ph, c, tol_by_test))
             except Exception:
                 continue
         try:
@@ -1330,34 +2187,13 @@ class CoordinationForm(forms.WPFWindow):
         # by gid). Trimmed to what the grid/inspector render; comments ride
         # so the group inspector can show them.
         gout = []
+        issue_manifest = self._read_issue_manifest(
+            os.path.join(ph, 'viewpoints'))
         for g in (data.get("groups") or []):
             try:
                 if g.get("status") == "MergedInto":
                     continue
-                gout.append({
-                    "id":         g.get("id"),
-                    "seq":        g.get("seq"),
-                    "axis":       g.get("axis"),
-                    # anchor element name + representative clash id: the
-                    # issue inspector's "why together" sentence and its
-                    # interim photo slot.
-                    "anchor":     (g.get("anchor") or {}).get("name"),
-                    "rep":        g.get("rep_clash_id"),
-                    "title":      g.get("title") or "",
-                    "titleLocked": bool(g.get("title_locked")),
-                    "status":     g.get("status") or "Open",
-                    "assignee":   g.get("assignee"),
-                    "members":    g.get("member_ids") or [],
-                    "suggested":  g.get("suggested_ids") or [],
-                    "needsReview": bool(g.get("needs_review")),
-                    "created":    g.get("created_at"),
-                    "comments": [{
-                        "author": cm.get("author") or "?",
-                        "at":     cm.get("at") or "",
-                        "body":   cm.get("body") or "",
-                    } for cm in (g.get("comments") or [])],
-                    "rollup":     g.get("rollup") or {},
-                })
+                gout.append(self._group_row(ph, issue_manifest, g))
             except Exception:
                 continue
         try:

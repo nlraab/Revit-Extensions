@@ -175,6 +175,10 @@ def make_clash(test_id, ref_a, ref_b, midpoint_xyz, kind=None,
         "closest_point_b": _xyz_to_list(closest_point_b) if closest_point_b is not None else None,
         "is_contact":      is_contact,
         "gap_method":      gap_method,
+        # Human field (like status/comments): a due date the coordinator sets
+        # in review, ISO date string or None. Merge preserves it across runs
+        # because persisting clashes keep their existing record.
+        "deadline":        None,
     }
 
 

@@ -61,6 +61,31 @@ def mep_facts(elem, bucket, cat_id=None):
     return facts
 
 
+def display_facts(elem):
+    """System + size facts for one element, no document context needed.
+
+    A lighter sibling of mep_facts for the glTF exporter's element-info
+    extras (click-an-element card in the web viewers): system class/name/
+    abbreviation and dims, nothing that needs a bucket (no insulation map,
+    no level, no discipline). Never raises; absent values are simply
+    missing from the dict.
+    """
+    out = {}
+    try:
+        for key, param in (('sys_class', 'RBS_SYSTEM_CLASSIFICATION_PARAM'),
+                           ('sys_name', 'RBS_SYSTEM_NAME_PARAM'),
+                           ('sys_abbr', 'RBS_DUCT_PIPE_SYSTEM_ABBREVIATION_PARAM')):
+            v = _bip_str(elem, param)
+            if v:
+                out[key] = v
+        dims = _dims_in(elem)
+        if dims:
+            out['dims_in'] = dims
+    except Exception:
+        pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Parameter helpers
 # ---------------------------------------------------------------------------

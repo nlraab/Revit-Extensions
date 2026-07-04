@@ -96,7 +96,7 @@ class GltfExportContext(_CONTEXT_BASE):
     """
 
     def __init__(self, doc, writer, offset, lod, filter_color=None,
-                 is_canceled=None):
+                 is_canceled=None, image_mode=False, keep_category_ids=None):
         self.doc = doc
         self.writer = writer
         # Optional caller hook polled by CustomExporter during Export(). It returns
@@ -104,6 +104,14 @@ class GltfExportContext(_CONTEXT_BASE):
         # so an Abort button stays clickable while the (main-thread) export blocks.
         self._is_canceled = is_canceled
         self.was_canceled = False
+        # image_mode: a leaner export tuned for clash preview IMAGES (flat-shaded
+        # pair + ghosted context, never inspected up close). It drops per-vertex
+        # normals + textures/UVs and skips pure-context clutter categories
+        # (furniture, casework, ...) that are never clash participants, so a huge
+        # federated model fits the WebView2 renderer. keep_category_ids protects
+        # any category a clash test actually references from the prune.
+        self.image_mode = image_mode
+        self._skip_cats = self._build_skip_cats(keep_category_ids) if image_mode else set()
         self.ox, self.oy, self.oz = offset
         self.lod = lod                      # Revit ViewNode.LevelOfDetail, int 0..15
         # Optional resolver el -> (r,g,b) 0..1 from the source plan's view-filter
@@ -133,6 +141,36 @@ class GltfExportContext(_CONTEXT_BASE):
         self.normals_dist = {}
         self.cat_counts = {}        # category name -> element count (what exported)
         self.model_counts = {}      # model (doc) title -> element count
+        self.skipped_cats = 0       # elements dropped by the image-mode prune
+
+    @staticmethod
+    def _build_skip_cats(keep_category_ids):
+        """BuiltInCategory ints to SKIP in image_mode: pure visual-context
+        clutter that is never a clash participant AND is triangle-heavy
+        (furniture alone was ~55% of a real federated model's triangles;
+        specialty equipment + casework another ~11%). Deliberately NOT pruned
+        despite never clashing: curtain panels/mullions (the glass facade --
+        cheap triangles, load-bearing for orientation), railings, and generic
+        models. `keep_category_ids` (the categories the project's tests
+        actually reference) is subtracted so a custom test can never have its
+        category pruned. Revit-only; returns an empty set off-Revit so the
+        module still parses under CPython for the test suite."""
+        keep = set(keep_category_ids or [])
+        block = set()
+        try:
+            from Autodesk.Revit.DB import BuiltInCategory as BIC
+            names = (
+                'OST_Furniture', 'OST_FurnitureSystems', 'OST_Casework',
+                'OST_SpecialtyEquipment', 'OST_Planting', 'OST_Entourage',
+            )
+            for n in names:
+                try:
+                    block.add(int(getattr(BIC, n)))
+                except Exception:
+                    pass
+        except Exception:
+            return set()
+        return block - keep
 
     # ---- transform + document stacks -------------------------------------
     def _topxf(self):
@@ -226,6 +264,18 @@ class GltfExportContext(_CONTEXT_BASE):
                 # show in a 3D view -- Nathan wants just the real building geometry.
                 if _is_non_model(el):
                     return RenderNodeAction.Skip
+                # image_mode: drop pure-context clutter categories (furniture,
+                # casework, ...) that never participate in a clash, so the .glb
+                # is small enough for the renderer. Never drops a category a
+                # clash test references (protected in _build_skip_cats).
+                if self._skip_cats:
+                    try:
+                        cat = el.Category
+                        if cat is not None and eid_int(cat.Id) in self._skip_cats:
+                            self.skipped_cats += 1
+                            return RenderNodeAction.Skip
+                    except Exception:
+                        pass
                 md = rg._metadata_for_element(el)         # uses el.Document internally
                 if md:
                     self._meta = md
@@ -238,7 +288,9 @@ class GltfExportContext(_CONTEXT_BASE):
                 self._alpha = alpha
                 self._roughness = rough
                 self._metallic = metal
-                self._texture = tex
+                # image_mode ghosts/flat-shades everything, so textures (and the
+                # UVs that ride with them) are dead weight -- drop them.
+                self._texture = None if self.image_mode else tex
                 # Plan view-filter colour override (host elements only): make MEP
                 # read in its plan colour (e.g. green waste piping). Wins over the
                 # material colour + the live OnMaterial colour for this element.
@@ -276,9 +328,22 @@ class GltfExportContext(_CONTEXT_BASE):
                 nvert = len(self._pos) // 3
                 # only ship UVs when there's a texture to map (and the count lines up)
                 uvs = self._uv if (self._texture and len(self._uv) == nvert * 2) else None
+                color = self._color
+                if self.image_mode:
+                    # Flat gray palette: red/blue are reserved for the clash
+                    # pair, so context must carry no hue (red primer steel etc.
+                    # reads as a clash). Luminance keeps the value contrast
+                    # (dark frames vs light walls); alpha keeps glass glassy.
+                    try:
+                        lum = (0.299 * color[0] + 0.587 * color[1]
+                               + 0.114 * color[2])
+                    except Exception:
+                        lum = 0.6
+                    v = 0.38 + 0.50 * lum   # map into a light architectural range
+                    color = (v, v, v)
                 self.writer.add(Mesh(
                     positions=self._pos, indices=self._idx, normals=normals,
-                    color=self._color, alpha=self._alpha,
+                    color=color, alpha=self._alpha,
                     roughness=self._roughness, metallic=self._metallic,
                     uvs=uvs, texture=(self._texture if uvs else None),
                     metadata=self._meta))
@@ -388,41 +453,48 @@ class GltfExportContext(_CONTEXT_BASE):
             self._pos.append((q.X - ox) * FT_TO_M)
             self._pos.append((q.Z - oz) * FT_TO_M)
             self._pos.append(-(q.Y - oy) * FT_TO_M)
-        # texture coordinates per vertex (Revit supplies them when the surface is
-        # textured); pad (0,0) when absent so _uv stays parallel to the vertex count
-        # across an element's multiple polymeshes. glTF V is top-down vs Revit's V.
-        try:
-            uvs = node.GetUVs()
-        except Exception:
-            uvs = None
-        if uvs is not None and len(uvs) == len(pts):
-            for uv in uvs:
-                self._uv.append(uv.U); self._uv.append(1.0 - uv.V)
-        else:
-            for _ in pts:
-                self._uv.append(0.0); self._uv.append(0.0)
-        # per-vertex normals when Revit gives them at each point (smooth shading)
-        try:
-            from Autodesk.Revit.DB import DistributionOfNormals
-            dist = node.DistributionOfNormals
-            self.normals_dist[str(dist)] = self.normals_dist.get(str(dist), 0) + 1
-            if dist == DistributionOfNormals.AtEachPoint:
-                nrms = node.GetNormals()
-                if nrms is not None and len(nrms) == len(pts):
-                    for nv in nrms:
-                        m = xf.OfVector(nv)
-                        nx, ny, nz = m.X, m.Z, -m.Y
-                        l = math.sqrt(nx * nx + ny * ny + nz * nz)
-                        if l > 1e-9:
-                            self._nrm.append(nx / l); self._nrm.append(ny / l); self._nrm.append(nz / l)
-                        else:
-                            self._nrm.append(0.0); self._nrm.append(1.0); self._nrm.append(0.0)
+        # image_mode: skip UVs and normals (but still build the triangle indices
+        # below). UVs are useless without textures; normals are ~half the vertex
+        # bytes, and xeokit computes flat face normals on the GPU (autoNormals)
+        # when NORMAL is absent -- exactly right for a flat-shaded clash
+        # thumbnail. The single biggest per-vertex saving after the category prune.
+        if not self.image_mode:
+            # texture coordinates per vertex (Revit supplies them when the surface
+            # is textured); pad (0,0) when absent so _uv stays parallel to the
+            # vertex count across an element's multiple polymeshes. glTF V is
+            # top-down vs Revit's V.
+            try:
+                uvs = node.GetUVs()
+            except Exception:
+                uvs = None
+            if uvs is not None and len(uvs) == len(pts):
+                for uv in uvs:
+                    self._uv.append(uv.U); self._uv.append(1.0 - uv.V)
+            else:
+                for _ in pts:
+                    self._uv.append(0.0); self._uv.append(0.0)
+            # per-vertex normals when Revit gives them at each point (smooth shading)
+            try:
+                from Autodesk.Revit.DB import DistributionOfNormals
+                dist = node.DistributionOfNormals
+                self.normals_dist[str(dist)] = self.normals_dist.get(str(dist), 0) + 1
+                if dist == DistributionOfNormals.AtEachPoint:
+                    nrms = node.GetNormals()
+                    if nrms is not None and len(nrms) == len(pts):
+                        for nv in nrms:
+                            m = xf.OfVector(nv)
+                            nx, ny, nz = m.X, m.Z, -m.Y
+                            l = math.sqrt(nx * nx + ny * ny + nz * nz)
+                            if l > 1e-9:
+                                self._nrm.append(nx / l); self._nrm.append(ny / l); self._nrm.append(nz / l)
+                            else:
+                                self._nrm.append(0.0); self._nrm.append(1.0); self._nrm.append(0.0)
+                    else:
+                        self._mark_normals_unavailable()
                 else:
                     self._mark_normals_unavailable()
-            else:
+            except Exception:
                 self._mark_normals_unavailable()
-        except Exception:
-            self._mark_normals_unavailable()
         # facets -> triangle indices (already indexed by Revit)
         for f in facets:
             self._idx.append(base + f.V1)
@@ -477,13 +549,15 @@ def _view_offset(doc, view):
     return ((mnx + mxx) / 2.0, (mny + mxy) / 2.0, (mnz + mxz) / 2.0)
 
 
-def _make_export_view(doc, hide_subcats=None):
+def _make_export_view(doc, hide_subcats=None, image_mode=False):
     """Create a fresh, throwaway isometric 3D view with EVERYTHING on (all model
     categories, all worksets, links) at Fine detail, for a complete export that
     doesn't depend on the user's active view (works even from a sheet/2D view).
     Visibility is then controlled entirely inside the web viewer. `hide_subcats`
     is an optional list of subcategory ElementId ints to turn OFF in the export
     view (host-model only), so e.g. equipment Clearances stay out of the .glb.
+    `image_mode` is accepted for signature parity but detail stays Fine either
+    way (MEP curves vanish below Fine -- see the comment at DetailLevel).
     Returns the view, or None if creation failed."""
     from Autodesk.Revit.DB import (View3D, ViewFamilyType, ViewFamily,
                                    FilteredElementCollector, ViewDetailLevel,
@@ -504,6 +578,13 @@ def _make_export_view(doc, hide_subcats=None):
     try:
         v3 = View3D.CreateIsometric(doc, vft.Id)
         try:
+            # ALWAYS Fine, image_mode included: pipes/ducts/conduit/cable tray
+            # render as CENTERLINES (no surfaces, so nothing exports) at Coarse
+            # and Medium -- an image_mode=Medium export shipped with every MEP
+            # curve segment silently missing. Fine draws them as real solids;
+            # the image export's triangle savings come from the low
+            # LevelOfDetail (coarse curve tessellation), the category prune,
+            # and dropping normals -- not from the view detail level.
             v3.DetailLevel = ViewDetailLevel.Fine
         except Exception:
             pass
@@ -532,7 +613,8 @@ def _make_export_view(doc, hide_subcats=None):
                     pass
             _log("export: hid {0} of {1} requested subcategories".format(hidden, len(hide_subcats)))
         t.Commit()
-        _log("export: created dedicated all-on Fine 3D view")
+        _log("export: created dedicated all-on Fine 3D view{0}".format(
+            " (image mode)" if image_mode else ""))
         return v3
     except Exception:
         try:
@@ -543,17 +625,37 @@ def _make_export_view(doc, hide_subcats=None):
         return None
 
 
-def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None):
+def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None,
+                is_canceled=None, image_mode=False, keep_category_ids=None):
     """Export the WHOLE model (everything on) to a .glb via CustomExporter, using
     a dedicated throwaway 3D view so it works from any context and captures all
     geometry (visibility is controlled in the viewer). `hide_subcats` optionally
-    turns off host subcategories (e.g. Clearances) for this export. Returns a stats
-    dict; raises on hard failure so the caller can fall back to the old path."""
+    turns off host subcategories (e.g. Clearances) for this export. `is_canceled`
+    is an optional caller hook the CustomExporter polls; return True to abort,
+    which raises ExportCanceled (a clean stop -- no user data is ever touched,
+    the export runs in a throwaway view).
+
+    `image_mode` produces a much leaner .glb tuned for clash preview IMAGES:
+    a lower LevelOfDetail (coarser curve tessellation; detail level stays Fine
+    because MEP curves export nothing below Fine), no per-vertex normals, no
+    textures/UVs, gray-scale context colors, and heavy pure-context categories
+    (furniture, casework, ...) skipped. `keep_category_ids` (BuiltInCategory
+    ints the project's clash tests reference) is never pruned. This is what
+    keeps a huge federated model (a real one was 580 MB / 35M tris at the full
+    export) small enough for the WebView2 renderer. The 3D Viewer tool keeps
+    the full default export (image_mode=False). Returns a stats dict; raises
+    on hard failure so the caller can fall back to the old path."""
     if not _HAVE_REVIT:
         raise RuntimeError("CustomExporter unavailable (no Revit API)")
     from Autodesk.Revit.DB import CustomExporter
 
-    temp_view = _make_export_view(doc, hide_subcats=hide_subcats)
+    # Coarser curve tessellation for images (octagonal pipes read fine at
+    # thumbnail size); the full export stays at the crisp default.
+    if image_mode:
+        lod = 3
+
+    temp_view = _make_export_view(doc, hide_subcats=hide_subcats,
+                                  image_mode=image_mode)
     if temp_view is None:
         raise RuntimeError("could not create an export 3D view")
     src = temp_view
@@ -567,7 +669,9 @@ def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None):
     })
 
     writer = GlbWriter(out_path, asset_extras=extras)
-    ctx = GltfExportContext(doc, writer, offset, lod)
+    ctx = GltfExportContext(doc, writer, offset, lod, is_canceled=is_canceled,
+                            image_mode=image_mode,
+                            keep_category_ids=keep_category_ids)
     try:
         import clash_export.revit_geometry as _rg
         _rg.TEXTURE_DEBUG[:] = []        # fresh per-material texture diagnostics this export
@@ -589,9 +693,24 @@ def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None):
         size = writer.finalize()
     except Exception:
         writer.close()
+        # A user abort surfaces as CustomExporter raising once IsCanceled()
+        # returns True; translate it to the clean ExportCanceled signal (no
+        # fallback, no partial file left behind).
+        if ctx.was_canceled:
+            _delete_view(doc, temp_view)
+            _remove_quietly(out_path)
+            _log("export ABORTED by user")
+            raise ExportCanceled("export aborted by user")
         _log("export FAILED: {0}".format(_exc_last()))
         _delete_view(doc, temp_view)
         raise
+    # Export() can also return normally once IsCanceled() starts saying True.
+    if ctx.was_canceled:
+        writer.close()
+        _delete_view(doc, temp_view)
+        _remove_quietly(out_path)
+        _log("export ABORTED by user")
+        raise ExportCanceled("export aborted by user")
     secs = time.time() - t0
     _delete_view(doc, temp_view)
     # textures: how many distinct materials resolved a base-color image (vs flat)
@@ -603,11 +722,12 @@ def export_view(doc, out_path, lod=8, asset_extras=None, hide_subcats=None):
         "normals_dist": ctx.normals_dist,
         "materials": mats_seen, "textured_materials": mats_textured,
         "elements_with_unique_id": ctx.with_uid,
+        "image_mode": image_mode, "skipped_context_elements": ctx.skipped_cats,
     }
-    _log("export done: {0} elements, {1:,} tris, {2:,} bytes, {3:.0f}s, normals={4}, "
-         "textures={5}/{6} materials".format(
-             ctx.elements, ctx.triangles, size, secs, ctx.normals_dist,
-             mats_textured, mats_seen))
+    _log("export done: {0} elements, {1:,} tris, {2:,} bytes ({3} MB), {4:.0f}s, "
+         "image_mode={5}, skipped_context={6}".format(
+             ctx.elements, ctx.triangles, size, size // 1048576, secs,
+             image_mode, ctx.skipped_cats))
     _log("identity: {0}/{1} exported elements carry a stable Revit unique_id".format(
         ctx.with_uid, ctx.elements))
     # per-material texture diagnostics (one TEX line each) so a misbehaving material can

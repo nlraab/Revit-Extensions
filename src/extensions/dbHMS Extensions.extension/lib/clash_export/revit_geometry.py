@@ -839,6 +839,16 @@ def _metadata_for_element(el):
     md["model"] = _safe(lambda: src_doc.Title, None)
     md["family"] = _family_name(src_doc, el)
     md["creator"] = _creator_name(src_doc, el)   # who placed it (workshared models)
+    # System + size for MEP elements only (a handful of parameter reads per
+    # element; arch/structural context skips them). Powers the click-an-
+    # element card in the web viewers: "Supply Air - SA-1, 24x20".
+    if md.get("discipline") in ("Mechanical", "Electrical", "Plumbing",
+                                "Fire Protection", "Technology"):
+        try:
+            from clash_detect.enrich import display_facts
+            md.update(display_facts(el))
+        except Exception:
+            pass
     return dict((k, v) for k, v in md.items() if v is not None)
 
 
@@ -877,17 +887,31 @@ def _creator_name(src_doc, el):
 def _level_name(src_doc, el):
     if src_doc is None:
         return None
+    name = None
     try:
         lid = el.LevelId
+        if lid is not None and eid_int(lid) > 0:
+            lvl = src_doc.GetElement(lid)
+            name = lvl.Name if lvl is not None else None
     except Exception:
-        return None
+        name = None
+    if name:
+        return name
+    # Many MEP elements report no LevelId and carry their level through the
+    # reference-level parameter instead (same fallback clash_detect/enrich
+    # uses). Without this, exactly the elements the clash viewer cares about
+    # show "Level: -" on click.
     try:
-        if lid is None or eid_int(lid) <= 0:
-            return None
-        lvl = src_doc.GetElement(lid)
-        return lvl.Name if lvl is not None else None
+        from Autodesk.Revit.DB import BuiltInParameter
+        bip = getattr(BuiltInParameter, 'RBS_START_LEVEL_PARAM', None)
+        if bip is not None:
+            p = el.get_Parameter(bip)
+            if p is not None:
+                s = p.AsString() or p.AsValueString()
+                return s or None
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _workset_name(src_doc, el):

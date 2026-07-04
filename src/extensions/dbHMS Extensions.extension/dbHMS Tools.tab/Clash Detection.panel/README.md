@@ -7,7 +7,7 @@ sometimes a linked structural model).
 
 > **Read this file before making serious changes** to anything under
 > `dbHMS Tools.tab/Clash Detection.panel/` or `lib/clash_*/`. Deep design
-> rationale lives in the four design documents next to this file.
+> rationale lives in the five design documents next to this file.
 
 ---
 
@@ -64,7 +64,10 @@ written directly in that folder via `persistence.*_at(folder)`:
     clashes.json          # clash database + issue groups
     project.json          # display name, disciplines, link role map
     test_overrides.json   # per-project test tweaks
-    viewpoints/<id>.png   # clash context thumbnails
+    viewpoints/           # web-viewer captures (JPEG; legacy captures are .png)
+        <clash-id>.jpg        # per-clash image: A red / B blue, ghosted context
+        issue_<group-id>.jpg  # per-issue aggregate photo
+        issues.json           # issue photo manifest (member-roster hash per group)
 ```
 
 Resilience layer: every binding this machine sees is mirrored to
@@ -95,5 +98,7 @@ Revit by hand - see each module's docstring for its manual check.
   tier-rule design, calibration decisions (rev 3).
 - `CLASH_GROUPING_DESIGN.md` - Layer C issue grouping design + S1-S8
   churn scenarios.
+- `CLASH_3D_VIEWER_DESIGN.md` - the 3D Viewer tab design + build plan
+  (review cockpit: controls, review loop, model tools, phases A-D).
 - `NIUHTC_CALIBRATION_FINDINGS.md` - the real-project audit that
   produced scoring revs 2-3 (band autopsy, retune packages, judges).
