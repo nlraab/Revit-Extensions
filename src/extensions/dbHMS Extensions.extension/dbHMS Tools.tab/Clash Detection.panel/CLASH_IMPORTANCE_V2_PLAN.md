@@ -571,6 +571,46 @@ v1 totals (population roughly triples per the 5,651-row calibration run).
 
 ## 8. Phase 4 (rev 8) — clearance engine + NEC zones + sprinkler test
 
+> **IMPLEMENTATION STATUS (2026-07-05): BUILT, awaiting a Revit run to
+> validate the geometry.** The clearance engine ships as
+> `lib/clash_detect/clearance_engine.py` (a new peer of hard/soft/pairgeom),
+> dispatched from `runner._run_clearance` (the old `kind=='clearance'` stub is
+> gone). It SYNTHESIZES a zone Solid per owner and flags intruders via
+> `ElementIntersectsSolidFilter`, emitting rows with ref_a=intruder /
+> ref_b=owner (both real elements, so fingerprints/`_make_ref` are unchanged).
+> - **Four firm tests** in `default_tests.json` (`C-NEC`, `C-NEC-W`,
+>   `M-NEC-PROT`, `M-SPR`); the test id IS the scoring discriminator
+>   (`clearance_rule`). set_b = owner gear, set_a = intruders.
+> - **Zones**: C-NEC = footprint extruded from gear top to min(+6 ft,
+>   structural ceiling); C-NEC-W = working-space box in front (facing +
+>   voltage depth, built only when the facing is trustworthy + axis-aligned,
+>   else skipped — never guess a direction); M-NEC-PROT = the band between +6
+>   ft and a REAL structural ceiling (empty when there is no headroom, so no
+>   next-floor false-flags); M-SPR = NFPA radius box around a head (dormant —
+>   zero heads in the model). Housekeeping pads are excluded as zone owners.
+> - **Identity**: `clash_fingerprint` gained `include_midpoint`; `merge_runs`
+>   keys clearance rows on (test id + element pair) with the midpoint EXCLUDED
+>   so a nudged intruder keeps status/comments. Every hard/soft row hashes
+>   byte-identically (regression-tested). The five clearance fields are in
+>   `_PER_RUN_FIELDS`. Clearance rows take the test's `default_assignee`
+>   (Electrical / Fire Protection), not the intruder's trade.
+> - **Scoring**: the four rules dispatch at the TOP of `_tier` (above C1, above
+>   the mover-None guard) so C2/C4 can never steal a zone violation and an arch
+>   intruder with no mover still routes correctly; C-NEC-W with an arch/unmapped
+>   intruder demotes to Minor + `flag_design_team`. Composed sentences +
+>   `CLEARANCE_CODE_BY_RULE` citations; clearance facts show Intrusion / Zone
+>   cap instead of bare "(not captured)" pen/overlap. rev 7 -> 8.
+> - **Tested**: 640 CPython tests pass. Testable = the NEC/NFPA math + owner /
+>   leak / facing / axis classification (`test_clash_clearance.py`), the
+>   fingerprint + merge identity (`test_clash_merge.py`), and the scoring rules
+>   (`test_clash_score.py`). RUNTIME-ONLY (needs a real run): solid extrusion,
+>   `ElementIntersectsSolidFilter`, `FacingOrientation`, linked transforms, the
+>   structural-cap scan. **Validation gate**: run the four tests on a model
+>   with electrical gear; confirm C-NEC/C-NEC-W emit sane rows on the 46 gear
+>   elements, M-SPR emits 0 without error, no existing hard/soft row re-keys.
+>   The sprinkler half cannot be validated until a sprinklered model exists.
+
+
 **The clearance detection engine does not exist** (`runner.py:67-70` stub; M-CODE is dead
 code today). Scope it as a subsystem, built once, shared by everything below:
 zone solids via GeometryCreationUtilities, `ElementIntersectsSolidFilter` over broadphase

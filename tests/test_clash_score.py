@@ -409,14 +409,17 @@ class TierScenarioTests(unittest.TestCase):
         clash_score.score_all(rows)
         self.assertEqual(rows[0]['importance']['rule'], 'N1')
 
-    def test_c2_clearance_arm_is_wired_dormant(self):
-        # Design 9.4: a code-clearance test vs structure with a rigidity-4
-        # mover escalates to C2 (dormant until clearance detection ships).
+    def test_clearance_row_without_rule_falls_to_mcode(self):
+        # Phase 4 superseded the old dormant "clearance escalates to C2" arm.
+        # Clearance rows now dispatch by clearance_rule at the TOP of the tier
+        # ladder; a clearance row with no recognized rule degrades to the
+        # M-CODE residual (Major) and is never stolen by a hard-clash rule
+        # like C2.
         duct = ref(category='Ducts', dims_in=[30.0, 20.0])
         c = clash(duct, ref(**BEAM), kind='clearance', gap_inches=2.0,
                   tolerance_inches=12.0)
         imp = score_one(c)
-        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C2'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-CODE'))
 
     def test_enriched_class_primary_categories_are_not_degraded(self):
         # Tray/sprinkler/equipment classify BY category by design; that is
@@ -573,7 +576,7 @@ class TierScenarioTests(unittest.TestCase):
     def test_config_rev_is_current(self):
         imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
                               ref(**BEAM)))
-        self.assertEqual(imp['config_rev'], 7)
+        self.assertEqual(imp['config_rev'], 8)
 
     def test_c3_equipment_vs_gravity_is_major_not_critical(self):
         # Stage 2: equipment placement vs a gravity main is coordination
@@ -683,13 +686,15 @@ class CongestionTests(unittest.TestCase):
 
 class InvariantTests(unittest.TestCase):
     def test_clamp_score_never_leaves_its_band(self):
-        # Max out every sub-term on a Minor-band clash: the score must stay
+        # Push the sub-terms hard on a Minor-band clash: the score must stay
         # under 40. Band changes require a rule-input change, never weight.
-        # (Midpoints spread far apart so congestion cannot promote to M4.)
+        # (Midpoints spread far apart so congestion cannot promote to M4. The
+        # duct is sleeve-sized (16 in) so it stays the N1 sleeve path, not the
+        # oversized-opening M-PEN path.)
         rows = []
         for i in range(30):
             duct = ref(element_id=100 + i, category='Ducts',
-                       dims_in=[30.0, 20.0], ins_in=2.0)
+                       dims_in=[16.0, 14.0], ins_in=2.0)
             wall = dict(ARCH_WALL)
             wall['element_id'] = 500 + i
             c = clash(duct, ref(**wall), midpoint=[200.0 * i, 0.0, 0.0],
@@ -1152,11 +1157,15 @@ class Phase3ArchRulesTests(unittest.TestCase):
         self.assertEqual(imp['rule'], 'N1')
         self.assertEqual(imp['code_ref'], 'IBC 714.4.1')
 
-    def test_m_pen_partial_penetration(self):
+    def test_small_run_through_wall_is_n1_not_m_pen(self):
+        # V4 fix: a sleeve-sized run (8 in duct) through a wall is a routine
+        # sleeve/damper item (N1), NOT M-PEN -- even when the measured
+        # penetration_depth (the overlap min-extent) reads below the wall
+        # thickness. M-PEN is reserved for runs too big for a standard sleeve.
         duct = ref(category='Ducts', dims_in=[8.0, 6.0])
         imp = score_one(clash(duct, ref(**self._wall()),
                               penetration_depth_in=2.0, geom_method='boolean'))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-PEN'))
+        self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N1'))
 
     def test_m_pen_oversized_full_penetration(self):
         big = ref(category='Ducts', dims_in=[30.0, 20.0])
@@ -1211,19 +1220,40 @@ class Phase3ArchRulesTests(unittest.TestCase):
                               penetration_depth_in=0.125, geom_method='boolean'))
         self.assertNotEqual(imp['rule'], 'M-PEN')
 
+    def test_rating_unknown_flag_on_duct_through_unread_wall(self):
+        # Fire rating couldn't be read (is_rated absent -> None): flag a duct
+        # penetration so the coordinator verifies whether a damper is needed.
+        duct = ref(category='Ducts', dims_in=[14.0, 10.0])
+        imp = score_one(clash(duct, ref(**self._wall())))
+        self.assertEqual(imp['rule'], 'N1')
+        self.assertIn('rating_unknown', imp['flags'])
+
+    def test_no_rating_flag_when_wall_known_unrated(self):
+        # A positively-read "not rated" wall needs no verification flag.
+        duct = ref(category='Ducts', dims_in=[14.0, 10.0])
+        imp = score_one(clash(duct, ref(**self._wall(is_rated=False))))
+        self.assertNotIn('rating_unknown', imp['flags'])
+
+    def test_no_rating_flag_on_pipe(self):
+        # Ducts only -- dampers are the air-side concern; pipe firestop differs.
+        pipe = ref(category='Pipes', sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**self._wall())))
+        self.assertNotIn('rating_unknown', imp['flags'])
+
     def _pen_fact(self, imp):
         return [f for f in imp['facts'] if f['k'] == 'Penetration'][0]
 
-    def test_facts_annotate_partial_penetration(self):
-        # The facts table surfaces the engine's own read of the depth so the
-        # number is legible: 2 in into an 8 in wall = "partial".
+    def test_facts_no_annotation_for_ambiguous_partial(self):
+        # A depth below the wall thickness is AMBIGUOUS (a thin run passes
+        # straight through yet shows a small min-extent), so the facts must NOT
+        # assert "stops inside" -- no method annotation in that case.
         duct = ref(category='Ducts', dims_in=[8.0, 6.0])
         imp = score_one(clash(duct, ref(**self._wall()),
                               penetration_depth_in=2.0, geom_method='boolean'))
-        self.assertEqual(self._pen_fact(imp).get('method'),
-                         'partial - stops inside')
+        self.assertIsNone(self._pen_fact(imp).get('method'))
 
     def test_facts_annotate_full_penetration(self):
+        # depth >= thickness unambiguously spans the wall -> the reliable read.
         duct = ref(category='Ducts', dims_in=[8.0, 6.0])
         imp = score_one(clash(duct, ref(**self._wall()),
                               penetration_depth_in=8.0, geom_method='boolean'))
@@ -1250,7 +1280,119 @@ class Phase3ArchRulesTests(unittest.TestCase):
     def test_config_rev_is_current(self):
         imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
                               ref(**BEAM)))
-        self.assertEqual(imp['config_rev'], 7)
+        self.assertEqual(imp['config_rev'], 8)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: clearance (code-zone) rules -- C-NEC / C-NEC-W / M-NEC-PROT / M-SPR
+# ---------------------------------------------------------------------------
+
+EQUIP = dict(source='host', element_id=800, category='Electrical Equipment',
+             name='MSB-1 Switchboard')
+
+
+def _clearance(rule, intruder=None, owner=None, **extra):
+    """A clearance clash: ref_a = intruder, ref_b = equipment owner (runner
+    convention). clearance_rule is the scoring discriminator."""
+    intruder = intruder if intruder is not None else ref(
+        category='Ducts', dims_in=[16.0, 12.0])
+    owner = owner if owner is not None else ref(**EQUIP)
+    return clash(intruder, owner, kind='clearance', clearance_rule=rule, **extra)
+
+
+class Phase4ClearanceRulesTests(unittest.TestCase):
+    def test_c_nec_is_critical_and_cited(self):
+        imp = score_one(_clearance('C-NEC'))
+        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C-NEC'))
+        self.assertEqual(imp['code_ref'], 'NEC 110.26(E)(1)(a)')
+        self.assertEqual(imp['resolve_by'], 'gear_setting')
+        self.assertTrue(70 <= imp['score'] <= 99)
+
+    def test_c_nec_w_mep_intruder_is_critical(self):
+        imp = score_one(_clearance('C-NEC-W',
+                                   intruder=ref(category='Pipes',
+                                                sys_class='Domestic Cold Water',
+                                                dims_in=[3.0])))
+        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C-NEC-W'))
+        self.assertEqual(imp['code_ref'], 'NEC 110.26(A)')
+
+    def test_c_nec_w_arch_intruder_demotes_and_flags(self):
+        # An architectural wall obstructing working space is not an MEP action.
+        imp = score_one(_clearance('C-NEC-W', intruder=ref(**ARCH_WALL)))
+        self.assertEqual(imp['band'], 'Minor')
+        self.assertEqual(imp['rule'], 'C-NEC-W')
+        self.assertIn('flag_design_team', imp['flags'])
+
+    def test_c_nec_w_structural_intruder_also_demotes(self):
+        # A STRUCTURAL wall/beam obstructing working space is equally immovable
+        # by MEP -> design-team flag, not a Critical against the MEP model.
+        shear = dict(source='link:Architectural', element_id=903,
+                     category='Walls', name='Shear wall', is_structural=True)
+        imp = score_one(_clearance('C-NEC-W', intruder=ref(**shear)))
+        self.assertEqual(imp['band'], 'Minor')
+        self.assertIn('flag_design_team', imp['flags'])
+
+    def test_m_nec_prot_is_major_and_cited(self):
+        imp = score_one(_clearance('M-NEC-PROT',
+                                   intruder=ref(category='Pipes',
+                                                sys_class='Domestic Cold Water',
+                                                dims_in=[2.0])))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-NEC-PROT'))
+        self.assertEqual(imp['code_ref'], 'NEC 110.26(E)(1)(b)')
+        self.assertTrue(40 <= imp['score'] <= 69)
+
+    def test_m_spr_is_major_and_cites_nfpa_only_with_measure(self):
+        imp = score_one(_clearance('M-SPR', spr_clearance_in=6.0,
+                                   owner=ref(source='host', element_id=810,
+                                             category='Sprinklers',
+                                             name='Pendent head')))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-SPR'))
+        self.assertEqual(imp['code_ref'], 'NFPA 13 10.2.7')
+
+    def test_unknown_clearance_rule_falls_to_mcode(self):
+        imp = score_one(_clearance('C-BOGUS'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-CODE'))
+
+    def test_c_nec_outranks_c2_structure_escalation(self):
+        # A big duct's clearance row against structural gear must dispatch as
+        # C-NEC at the top of the ladder, never be stolen by the C2 structure
+        # arm (proves the insertion order).
+        imp = score_one(_clearance('C-NEC',
+                                   intruder=ref(category='Ducts',
+                                                dims_in=[30.0, 20.0]),
+                                   owner=ref(**BEAM)))
+        self.assertEqual(imp['rule'], 'C-NEC')
+
+    def test_clearance_relevance_class_is_error_not_field(self):
+        for rule in ('C-NEC', 'C-NEC-W', 'M-NEC-PROT', 'M-SPR'):
+            imp = score_one(_clearance(rule))
+            self.assertEqual(imp['relevance_class'], 'error',
+                             '{0} should be a genuine clash'.format(rule))
+
+    def test_clearance_facts_show_intrusion_not_pen_noise(self):
+        imp = score_one(_clearance('C-NEC', intrusion_depth_in=4.0,
+                                   zone_cap_ft=6.0))
+        keys = [f['k'] for f in imp['facts']]
+        self.assertIn('Intrusion', keys)
+        self.assertIn('Zone cap', keys)
+        # No bare "(not captured)" penetration/overlap rows for clearance.
+        self.assertNotIn('Penetration', keys)
+        self.assertNotIn('Overlap', keys)
+
+    def test_clearance_score_never_leaves_its_band(self):
+        for rule, lo, hi in (('C-NEC', 70, 99), ('C-NEC-W', 70, 99),
+                             ('M-NEC-PROT', 40, 69), ('M-SPR', 40, 69)):
+            imp = score_one(_clearance(
+                rule, intruder=ref(category='Pipes',
+                                   sys_class='Domestic Cold Water',
+                                   dims_in=[2.0]),
+                owner=ref(source='host', element_id=811,
+                          category='Sprinklers' if rule == 'M-SPR'
+                          else 'Electrical Equipment', name='gear'),
+                spr_clearance_in=6.0))
+            self.assertTrue(lo <= imp['score'] <= hi,
+                            '{0} score {1} escaped {2}-{3}'.format(
+                                rule, imp['score'], lo, hi))
 
 
 if __name__ == '__main__':

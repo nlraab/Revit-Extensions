@@ -202,6 +202,19 @@ def _load_webview2_type():
 class CoordinationForm(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, FORM_XAML, handle_esc=False)
+        # Parent the window to Revit's main HWND. Without an owner, a modal WPF
+        # dialog falls BEHIND the Revit window whenever a Revit API call
+        # activates Revit (during detection or a glTF export) -- the tool would
+        # vanish behind Revit mid-run. Owning it to Revit keeps it reliably in
+        # front and off the taskbar as a separate entry. (Same pattern as Sheet
+        # Manager / Revisions Manager.)
+        try:
+            from System.Windows.Interop import WindowInteropHelper
+            import System.Diagnostics
+            hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
+            WindowInteropHelper(self).Owner = hwnd
+        except Exception:
+            pass
         self._webview = None
         self._vhost_ok = False
         self._model_version = 0
@@ -225,6 +238,15 @@ class CoordinationForm(forms.WPFWindow):
         self.Closed += self._on_closed
         # Attach the web panel after layout so the host Border has a real size.
         self.Loaded += self._on_loaded
+        # WebView2's compositor can leave stale paint after the window is
+        # resized (a view hidden during the resize shows at its old width when
+        # you switch back). Re-run the proven bounds nudge when the size
+        # settles, debounced so a drag-resize doesn't thrash it.
+        self._resize_timer = None
+        try:
+            self.SizeChanged += self._on_size_changed
+        except Exception:
+            pass
 
     # --- Web panel ----------------------------------------------------
 
@@ -360,6 +382,27 @@ class CoordinationForm(forms.WPFWindow):
             wv.UpdateLayout()
             wv.Margin = Thickness(0)
             wv.UpdateLayout()
+        except Exception:
+            pass
+
+    def _on_size_changed(self, sender, args):
+        """Debounced WebView2 repaint on window resize. SizeChanged fires many
+        times during a drag; we (re)start a short timer and only nudge once the
+        size stops changing, so the browser recomposites at the final size."""
+        try:
+            from System.Windows.Threading import DispatcherTimer
+            t = self._resize_timer
+            if t is None:
+                t = DispatcherTimer()
+                t.Interval = System.TimeSpan.FromMilliseconds(160)
+
+                def _tick(s, e):
+                    t.Stop()
+                    self._nudge_webview_bounds()
+                t.Tick += _tick
+                self._resize_timer = t
+            t.Stop()
+            t.Start()
         except Exception:
             pass
 
@@ -781,6 +824,10 @@ class CoordinationForm(forms.WPFWindow):
             elif msg == "ready":
                 _log("ready: received from page")
                 self._push_initial("page-ready")
+            elif msg == "viewshown":
+                # The page switched tabs; nudge WebView2 so a view that went
+                # stale while hidden during a resize repaints at the right size.
+                self._nudge_webview_bounds()
             elif msg == "loadlast":
                 self._load_last_export()
             elif msg.startswith("snapshot:"):
@@ -1671,13 +1718,16 @@ class CoordinationForm(forms.WPFWindow):
                     traceback.format_exc()))
             # Zero-row alarm: flag suspect tests (rows==0 with an empty side
             # or an unresolved link role) and ride the diagnostics into
-            # last_run_summary. clearance-stub tests are expected-empty and
-            # never suspect (v2 plan 5.7).
+            # last_run_summary. Expected-empty clearance tests are never
+            # suspect: a clearance test with no owner gear (e.g. M-SPR on a
+            # model with no modeled sprinkler heads) is dormant by design, not
+            # a silent failure (v2 plan 5.7 + Phase 4).
             for d in diags:
                 rr = d.get('roles_resolved') or {}
                 d['suspect'] = bool(
                     d.get('rows', 0) == 0
-                    and d.get('skipped_reason') != 'clearance_stub'
+                    and d.get('skipped_reason') not in (
+                        'clearance_stub', 'no_owner_elements')
                     and (d.get('skipped_reason') in ('side_a_empty', 'side_b_empty')
                          or any(v == 0 for v in rr.values())))
             try:

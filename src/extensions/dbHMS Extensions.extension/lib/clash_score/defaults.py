@@ -170,7 +170,13 @@ DEFAULTS = {
     # and the raw_realistic_max retune 30 -> 48 (once real boolean geometry
     # filled the score terms, 30 re-piled the Major band into 60-69). Scores
     # shift WITHIN bands only; no band cutoff moved.
-    'rev': 7,
+    # rev 8 = Phase 4 clearance engine + NEC 110.26 zones (C-NEC dedicated
+    # space, C-NEC-W working space, M-NEC-PROT leak-capable-above-cap) + the
+    # NFPA 13 sprinkler-obstruction test (M-SPR, dormant on models with no
+    # modeled sprinkler heads). New synthetic clearance rows key on (test id +
+    # element pair) with the midpoint EXCLUDED from the fingerprint. Band
+    # movement across this bump is a rule change, not resolved work.
+    'rev': 8,
 
     # Layer A rule toggles (all on).
     'rules': {
@@ -210,8 +216,14 @@ DEFAULTS = {
 
     # Phase 3: rated assemblies + penetration classification.
     'rated_wall_min_hr': 1.0,    # >= this fire rating -> rated (damper/firestop)
-    'sleeve_rect_max_in': 10.0,  # ~250 mm: a full pen wider needs a framed opening
-    'sleeve_round_max_in': 16.0, # ~400 mm dia
+    # M-PEN "needs a framed/linteled opening" size gate (the ONLY use of
+    # _over_sleeve). Rect ducts up to 16 in through a partition get a routine
+    # cut opening (N1); wider needs an engineered opening (M-PEN). Retuned
+    # 10 -> 16 on the V4 run: 10 in flagged ordinary 12-16 in duct openings as
+    # design work. TUNABLE -- confirm against firm practice; raise toward
+    # 20-24 if even 18 in openings are routine in your partitions.
+    'sleeve_rect_max_in': 16.0,  # ~400 mm: rect opening wider needs framing
+    'sleeve_round_max_in': 16.0, # ~400 mm dia round
     'pen_full_frac': 0.85,       # depth >= thickness*this -> full (through) pen
     'beam_edge_frac': 0.30,      # clash within this fraction of a beam's top or
                                  # bottom -> flexural/edge zone (escalate)
@@ -317,4 +329,14 @@ SLOPE_CODE_BY_KLASS = {
     'gravity_vent': 'IPC 905.2',
     'condensate':   'IMC 307.2.1',
     'medgas':       'NFPA 99',
+}
+
+# Phase 4 clearance-rule code citations. The zone test IS the measurement (the
+# intrusion is the measured fact), so each cite is earned (doctrine 2). The
+# composer reads these rather than inlining the clause numbers.
+CLEARANCE_CODE_BY_RULE = {
+    'C-NEC':      'NEC 110.26(E)(1)(a)',   # dedicated equipment space
+    'C-NEC-W':    'NEC 110.26(A)',         # working space in front of gear
+    'M-NEC-PROT': 'NEC 110.26(E)(1)(b)',   # foreign systems above, protected
+    'M-SPR':      'NFPA 13 10.2.7',        # sprinkler obstruction clearance
 }

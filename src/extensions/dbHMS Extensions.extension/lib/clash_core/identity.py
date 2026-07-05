@@ -63,26 +63,35 @@ def _bucket_xyz(xyz, bucket_ft=SPATIAL_BUCKET_FT):
 
 
 def clash_fingerprint(test_id, ref_a, ref_b, midpoint_xyz,
-                      spatial_bucket_ft=SPATIAL_BUCKET_FT):
+                      spatial_bucket_ft=SPATIAL_BUCKET_FT,
+                      include_midpoint=True):
     """Return a stable hex fingerprint identifying this clash across runs.
 
     The fingerprint is invariant under:
       - swap of ref_a vs ref_b
       - midpoint shifts of less than `spatial_bucket_ft` on each axis
+        (when `include_midpoint` is True)
 
     The fingerprint changes when:
       - the test_id changes
       - either element changes (different element_id, or moves between
         host vs linked)
       - the clash moves more than `spatial_bucket_ft` from its previous
-        location
+        location (when `include_midpoint` is True)
+
+    `include_midpoint=False` drops the spatial-bucket term entirely, so the
+    key is just (test_id, sorted element pair). This is for CLEARANCE rows
+    (Phase 4): a clearance clash is one intruder element violating one
+    equipment's code zone, and that identity must NOT re-key when the
+    intruder is nudged along a large zone -- the pair + test_id already
+    identify the violation uniquely, so the midpoint would only cause
+    spurious churn. The default True path is BYTE-IDENTICAL to before, so no
+    existing hard/soft fingerprint changes (doctrine 5 / plan section 14.7).
     """
     pair = sorted([_ref_key(ref_a), _ref_key(ref_b)])
-    bucket = _bucket_xyz(midpoint_xyz, spatial_bucket_ft)
-    key = '|'.join([
-        test_id or '',
-        pair[0],
-        pair[1],
-        ','.join(str(c) for c in bucket),
-    ])
+    parts = [test_id or '', pair[0], pair[1]]
+    if include_midpoint:
+        bucket = _bucket_xyz(midpoint_xyz, spatial_bucket_ft)
+        parts.append(','.join(str(c) for c in bucket))
+    key = '|'.join(parts)
     return hashlib.sha1(key.encode('utf-8')).hexdigest()[:FINGERPRINT_LENGTH]

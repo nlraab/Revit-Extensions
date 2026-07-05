@@ -98,6 +98,43 @@ class FingerprintTests(unittest.TestCase):
         f2 = clash_fingerprint("t", a, b, [50.0, 2.0, 3.0])
         self.assertNotEqual(f1, f2)
 
+    def test_include_midpoint_true_is_unchanged(self):
+        """The default (include_midpoint=True) path must be byte-identical to the
+        implicit default, so no existing hard/soft clash ever re-keys (doctrine 5)."""
+        from clash_core.identity import clash_fingerprint
+        a, b = _ref("host", 100), _ref("host", 200)
+        implicit = clash_fingerprint("t", a, b, [1.0, 2.0, 3.0])
+        explicit = clash_fingerprint("t", a, b, [1.0, 2.0, 3.0],
+                                     include_midpoint=True)
+        self.assertEqual(implicit, explicit)
+
+    def test_include_midpoint_false_ignores_midpoint(self):
+        """Phase 4: a clearance fingerprint drops the midpoint, so an intruder
+        nudged far along a large zone keeps the same key (no spurious churn)."""
+        from clash_core.identity import clash_fingerprint
+        a, b = _ref("host", 100), _ref("host", 200)
+        f1 = clash_fingerprint("t", a, b, [1.0, 2.0, 3.0], include_midpoint=False)
+        f2 = clash_fingerprint("t", a, b, [50.0, 9.0, 9.0], include_midpoint=False)
+        self.assertEqual(f1, f2)
+
+    def test_include_midpoint_false_still_separates_test_ids(self):
+        """C-NEC vs C-NEC-W on the SAME (owner, intruder) pair must stay two
+        distinct violations -- the test id separates them even without a midpoint."""
+        from clash_core.identity import clash_fingerprint
+        a, b = _ref("host", 100), _ref("host", 200)
+        f1 = clash_fingerprint("C-NEC", a, b, None, include_midpoint=False)
+        f2 = clash_fingerprint("C-NEC-W", a, b, None, include_midpoint=False)
+        self.assertNotEqual(f1, f2)
+
+    def test_include_midpoint_false_differs_from_true(self):
+        """The two keying schemes must not collide for the same inputs."""
+        from clash_core.identity import clash_fingerprint
+        a, b = _ref("host", 100), _ref("host", 200)
+        with_mid = clash_fingerprint("t", a, b, [1.0, 2.0, 3.0])
+        without = clash_fingerprint("t", a, b, [1.0, 2.0, 3.0],
+                                    include_midpoint=False)
+        self.assertNotEqual(with_mid, without)
+
 
 # ---------------------------------------------------------------------------
 # merge_runs
@@ -368,6 +405,77 @@ class MergeRunsTests(unittest.TestCase):
         merge_runs([original], raw, run_iso="new-time")
         # last_seen_run on the input should be unchanged
         self.assertEqual(original["last_seen_run"], old_snapshot["last_seen_run"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 clearance rows: synthetic (intruder vs equipment-zone) identity
+# ---------------------------------------------------------------------------
+
+class ClearanceMergeTests(unittest.TestCase):
+
+    def _clearance_raw(self, midpoint, rule="C-NEC"):
+        r = _raw("C-NEC", _ref("host", 500), _ref("host", 900), midpoint,
+                 kind="clearance", assignee="Electrical")
+        r["clearance_rule"] = rule
+        r["zone_cap_ft"] = 6.0
+        r["intrusion_depth_in"] = 4.0
+        return r
+
+    def test_fresh_clearance_row_retains_discriminator(self):
+        """clearance_rule must land on the fresh row -- it's in _PER_RUN_FIELDS,
+        so the whitelist-only fresh-row copy doesn't drop it (scoring needs it)."""
+        from clash_core.merge import merge_runs
+        merged, summary = merge_runs([], [self._clearance_raw([1.0, 1.0, 8.0])])
+        self.assertEqual(summary["new"], 1)
+        self.assertEqual(merged[0]["clearance_rule"], "C-NEC")
+        self.assertEqual(merged[0]["kind"], "clearance")
+        self.assertEqual(merged[0]["zone_cap_ft"], 6.0)
+
+    def test_clearance_row_survives_a_large_midpoint_nudge(self):
+        """A duct nudged 5 ft along a big panel's zone is the SAME violation:
+        the clearance fingerprint ignores the midpoint, so status/comments
+        survive (this is the whole point of include_midpoint=False)."""
+        from clash_core.merge import merge_runs
+        # Run 1: create the violation.
+        merged1, _ = merge_runs([], [self._clearance_raw([1.0, 1.0, 8.0])])
+        clash = merged1[0]
+        clash["status"] = "Acknowledged"
+        clash["comments"] = [{"text": "reroute planned"}]
+        original_id = clash["id"]
+        # Run 2: same pair + test, midpoint moved 5 ft.
+        merged2, summary = merge_runs(merged1,
+                                      [self._clearance_raw([6.0, 1.0, 8.0])])
+        self.assertEqual(summary["persisting"], 1)
+        self.assertEqual(summary["new"], 0)
+        self.assertEqual(len(merged2), 1)
+        self.assertEqual(merged2[0]["id"], original_id)
+        self.assertEqual(merged2[0]["status"], "Acknowledged")
+        self.assertEqual(merged2[0]["comments"], [{"text": "reroute planned"}])
+
+    def test_two_clearance_tests_same_pair_are_two_rows(self):
+        """C-NEC and C-NEC-W on the same (intruder, owner) pair are two distinct
+        violations -- separated by test id even without a midpoint term."""
+        from clash_core.merge import merge_runs
+        c_nec = self._clearance_raw([1.0, 1.0, 8.0], rule="C-NEC")
+        c_necw = _raw("C-NEC-W", _ref("host", 500), _ref("host", 900),
+                      [1.0, 1.0, 4.0], kind="clearance", assignee="Electrical")
+        c_necw["clearance_rule"] = "C-NEC-W"
+        merged, summary = merge_runs([], [c_nec, c_necw])
+        self.assertEqual(summary["new"], 2)
+        self.assertEqual(len(merged), 2)
+
+    def test_clearance_pair_key_is_not_none(self):
+        """Both refs are real elements, so dedupe's pair key resolves (a
+        synthetic zone is never a ref)."""
+        from clash_core.dedupe import _pair_key
+        self.assertIsNotNone(_pair_key(self._clearance_raw([1.0, 1.0, 8.0])))
+
+    def test_clearance_assignee_uses_default_not_intruder_trade(self):
+        """A NEC violation goes to the coordination owner (Electrical), not the
+        intruding duct's Mechanical trade."""
+        from clash_core.merge import merge_runs
+        merged, _ = merge_runs([], [self._clearance_raw([1.0, 1.0, 8.0])])
+        self.assertEqual(merged[0]["assignee"], "Electrical")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from clash_core import models
 from clash_detect import hard as hard_mod
 from clash_detect import soft as soft_mod
 from clash_detect import linked
+from clash_detect import clearance_engine
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +111,8 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
             log("  - trade filter: {}".format(", ".join(sorted(trade_filter))))
 
     if kind == 'clearance':
-        if log:
-            log("  - skipped (clearance detection isn't implemented yet)")
-        diag['skipped_reason'] = 'clearance_stub'
-        return [], diag
+        return _run_clearance(doc, test_dict, role_map, diag, log, status,
+                              geom_cache)
 
     if log:
         log("  - resolving set_a (source `{}`):".format(set_a.get('source', 'host')))
@@ -210,6 +209,89 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
     diag['rows'] = len(out)
     if log:
         log("  - **total: {} clash(es)** for this test".format(len(out)))
+    return out, diag
+
+
+# ---------------------------------------------------------------------------
+# Clearance (Phase 4): owner-zone vs intruder, not the pairwise a-vs-b of
+# hard/soft. set_b is the OWNER side (the gear the code zone belongs to);
+# set_a is the INTRUDER side, so ref_a = intruder and ref_b = owner.
+# ---------------------------------------------------------------------------
+
+def _run_clearance(doc, test_dict, role_map, diag, log, status, geom_cache):
+    """Run one clearance test. The test id is the scoring discriminator
+    (stamped as clearance_rule). Owner-empty is dormant-safe, not a suspect."""
+    test_id = test_dict.get('id') or ''
+    set_a = test_dict.get('set_a') or {}   # intruders
+    set_b = test_dict.get('set_b') or {}   # owners (gear / heads)
+    tolerance_in = float(test_dict.get('tolerance_inches') or 0.0)
+    default_assignee = test_dict.get('default_assignee')
+
+    if log:
+        log("  - resolving OWNER side (set_b, source `{}`):".format(
+            set_b.get('source', 'host')))
+    owner_buckets = list(_resolve_buckets(doc, set_b, role_map, log=log))
+    if log:
+        log("  - resolving INTRUDER side (set_a, source `{}`):".format(
+            set_a.get('source', 'host')))
+    intruder_buckets = list(_resolve_buckets(doc, set_a, role_map, log=log))
+
+    ins_cache = {}
+    for bucket in owner_buckets + intruder_buckets:
+        bucket['_ins_cache'] = ins_cache
+
+    owner_total = sum(len(b['elements']) for b in owner_buckets)
+    intr_total = sum(len(b['elements']) for b in intruder_buckets)
+    diag['side_a_elements'] = intr_total   # set_a is the intruder side
+    diag['side_b_elements'] = owner_total   # set_b is the owner side
+    if log:
+        log("  - owner gear (set_b): **{}**; intruders (set_a): **{}**".format(
+            owner_total, intr_total))
+
+    # Dormant-safe: no owner gear (e.g. M-SPR on a model with no modeled
+    # sprinkler heads) is an EXPECTED empty, not a silent-failure suspect.
+    if owner_total == 0:
+        diag['skipped_reason'] = 'no_owner_elements'
+        if log:
+            log("  - no owner elements -> 0 zones (dormant, not a failure)")
+        return [], diag
+    if intr_total == 0:
+        diag['skipped_reason'] = 'side_a_empty'
+        return [], diag
+
+    out = []
+    for ob in owner_buckets:
+        try:
+            rows = clearance_engine.find_clearance_intrusions(
+                doc, ob['elements'], ob.get('link_instance'),
+                intruder_buckets, test_id, role_map,
+                geom_cache=geom_cache, log=log, status=status)
+        except Exception as ex:
+            if log:
+                log("  - **clearance error**: {}".format(ex))
+            continue
+        for r in rows:
+            ib = r.pop('_intruder_bucket', None) or {}
+            clash = {
+                'test_id':          test_id,
+                'kind':             'clearance',
+                'ref_a':            _make_ref(r['elem_a'], ib),
+                'ref_b':            _make_ref(r['elem_b'], ob),
+                'midpoint':         _xyz_to_list(r.get('midpoint')),
+                'default_assignee': default_assignee,
+                'tolerance_inches': tolerance_in,
+                'clearance_rule':   r.get('clearance_rule'),
+            }
+            for k in ('zone_cap_ft', 'spr_clearance_in', 'intrusion_depth_in',
+                      'xref_hard'):
+                if r.get(k) is not None:
+                    clash[k] = r[k]
+            out.append(clash)
+
+    diag['rows'] = len(out)
+    if log:
+        log("  - **total: {} clearance violation(s)** for `{}`".format(
+            len(out), test_id))
     return out, diag
 
 

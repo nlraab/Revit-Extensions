@@ -728,6 +728,20 @@ function switchView(v) {
   const view = $("view-" + v);
   if (view) view.classList.add("on");
   if (v === "3d") setTimeout(() => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} }, 30);
+  // Force the newly-shown view to REPAINT. WebView2's compositor can leave a
+  // view that was hidden while the window was resized painted at its old
+  // (stale) width -- the layout is already correct but the pixels aren't, so
+  // Home looks squished into a narrow column until something forces a
+  // composite. A one-frame transform nudge forces a fresh composite. It is
+  // removed on the next frame so it never affects layout or containing blocks.
+  // (The host also nudges WebView2 on window resize; belt and suspenders.)
+  else if (view) {
+    requestAnimationFrame(() => {
+      view.style.transform = "translateZ(0)";
+      requestAnimationFrame(() => { view.style.transform = ""; });
+    });
+    toHost("viewshown");   // let the host re-nudge the WebView2 HWND too
+  }
   // The inspector card follows the active tab (one selection, one card,
   // two mounts), and entering the 3D tab re-focuses whatever is selected.
   try {
@@ -2593,6 +2607,12 @@ const SAMPLE = [
     brk: [{ k: "Mover constraint", v: 6 }, { k: "Size", v: 1 }, { k: "Code", v: 6 }] },
 ];
 let clashes = [], realData = false, selectedClash = null;
+// True from open until the host's FIRST clash feed arrives. While booting, the
+// UI shows a clear "loading" state instead of the real empty-project messaging
+// ("no clashes", "no folder") -- the data always lands a moment later, and an
+// empty-looking tool on open reads as "my data is gone". Cleared in loadClashes
+// (the host always posts a clashes: feed after "ready", even clashes:[]).
+let booting = HOSTED;
 // Layer C sample: one element-star issue so the standalone page demos the
 // grouped grid, inspector, and agenda card without a host.
 const SAMPLE_GROUPS = [
@@ -2789,6 +2809,7 @@ function statusCell(status) {
 function descMeta(c) {
   const bits = [];
   if ((c.flags || []).indexOf("penetration_candidate") >= 0) bits.push("sleeve item");
+  if ((c.flags || []).indexOf("rating_unknown") >= 0) bits.push("rating?");
   if ((c.flags || []).indexOf("mounting_check") >= 0) bits.push("mounting check");
   if (c.conf === "degraded") bits.push("estimated");
   return bits.length ? ` <span class="kindmeta">· ${bits.join(" · ")}</span>` : "";
@@ -3120,6 +3141,7 @@ function mergeReRender() {
   if (q) q.scrollTop = qs;
 }
 function loadClashes(rows) {
+  booting = false;   // the host's clash feed has arrived; leave the loading state
   if (mergeNextClashes && realData && rows && rows.length && clashes.length) {
     mergeNextClashes = false;
     mergeClashes(rows);
@@ -3293,7 +3315,7 @@ function renderClashCard(c, mount) {
     ${crumbHtml(c)}
     <div class="kv" style="font-size:14px"><b>Clash ${c.seq == null ? "" : c.seq}</b>
       <span class="chip" style="background:${bg};color:${fg}">${c.score} ${bn}</span>
-      ${(c.flags || []).indexOf("escalate_candidate") >= 0 ? ' <span class="chip" style="background:#FFF5F5;color:#742A2A" title="Resolving this may need a structural penetration or opening owned by another consultant - longest lead time, raise it early.">Escalate to consultant?</span>' : ""}${(c.flags || []).indexOf("penetration_candidate") >= 0 ? ' <span class="chip" style="background:#EBF8FF;color:#0C447C" title="Likely an intended wall/floor penetration - belongs on the sleeve schedule pass, not the clash agenda.">Penetration candidate</span>' : ""}${(c.flags || []).indexOf("mounting_check") >= 0 ? ' <span class="chip" style="background:#EAF3DE;color:#27500A" title="A fixture or equipment touching the surface it mounts in/on - by design. Verify the mounting, not the routing.">Mounting check</span>' : ""}${(c.flags || []).indexOf("field_fix") >= 0 ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Small device overlap the installing trade resolves in the field.">Field fix</span>' : ""}${c.conf === "degraded" ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Scored from category fallback - re-run detection to capture system and size detail.">estimated</span>' : ""}</div>
+      ${(c.flags || []).indexOf("escalate_candidate") >= 0 ? ' <span class="chip" style="background:#FFF5F5;color:#742A2A" title="Resolving this may need a structural penetration or opening owned by another consultant - longest lead time, raise it early.">Escalate to consultant?</span>' : ""}${(c.flags || []).indexOf("penetration_candidate") >= 0 ? ' <span class="chip" style="background:#EBF8FF;color:#0C447C" title="Likely an intended wall/floor penetration - belongs on the sleeve schedule pass, not the clash agenda.">Penetration candidate</span>' : ""}${(c.flags || []).indexOf("rating_unknown") >= 0 ? ' <span class="chip" style="background:#FFFBEA;color:#744210" title="This duct penetrates an assembly whose fire rating could not be read from the model. If the wall/floor is rated, the penetration needs a fire/smoke damper (not just a sleeve) - verify the rating before assuming it is unrated.">Rating unknown</span>' : ""}${(c.flags || []).indexOf("mounting_check") >= 0 ? ' <span class="chip" style="background:#EAF3DE;color:#27500A" title="A fixture or equipment touching the surface it mounts in/on - by design. Verify the mounting, not the routing.">Mounting check</span>' : ""}${(c.flags || []).indexOf("field_fix") >= 0 ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Small device overlap the installing trade resolves in the field.">Field fix</span>' : ""}${c.conf === "degraded" ? ' <span class="chip" style="background:#F1EFE8;color:#444441" title="Scored from category fallback - re-run detection to capture system and size detail.">estimated</span>' : ""}</div>
     <div class="kv muted">${kindLine(c)}</div>
     ${softSubtitle(c)}
     <div id="ctxbox" title="Click to enlarge">${ctxInner}</div>
@@ -4438,6 +4460,15 @@ function applyRunInfo(info) {
   b.textContent = txt;
 }
 function renderHome() {
+  // While booting (open -> first host feed), show a clear loading state rather
+  // than zeroed metrics + a "Nothing open" agenda, which read as "no data".
+  if (booting) {
+    ["m-open", "m-crit", "m-maj", "m-min"].forEach((id) => { const e = $(id); if (e) e.textContent = "–"; });
+    const ag = $("agenda");
+    if (ag) ag.innerHTML = '<div class="kv muted">Loading clash data…</div>';
+    const hb = $("health-banner"); if (hb) hb.textContent = "Loading clash data…";
+    return;
+  }
   // All Home metrics count ACTIVE work only: suppressed rows are noise and
   // Approved/Resolved records are kept forever, so counting them would make
   // the health numbers never go down.
@@ -4581,6 +4612,7 @@ function linkState() {
   return "linked";
 }
 function emptyStateMsg() {
+  if (booting) return "Loading clash data…";
   switch (linkState()) {
     case "unlinked": return "This project isn't pointed at a clash-data folder yet. Open Settings and click “Set up folder”.";
     case "linked":   return "No clashes in this folder yet. Open Tests and run a clash test.";
@@ -4588,13 +4620,16 @@ function emptyStateMsg() {
   }
 }
 function showLoading() {
-  // Neutral state shown inside Revit until the host's first real message
-  // arrives -- replaces the old eager sample render.
+  // Neutral loading state shown inside Revit until the host's first real
+  // message arrives -- replaces the old eager sample render. Covers BOTH the
+  // clash grid AND the Home tab (the default view), so the tool never opens
+  // reading as an empty/unlinked project while the data is a moment away.
+  booting = true;
   clashes = []; realData = true; groups = []; groupsById = {}; clashById = {};
-  $("cl-rows").innerHTML = '<tr><td colspan="12" class="muted" style="padding:20px 14px">Loading this project…</td></tr>';
+  $("cl-rows").innerHTML = '<tr><td colspan="12" class="muted" style="padding:20px 14px">Loading clash data…</td></tr>';
   const fc = $("f-count"); if (fc) fc.innerHTML = "";
   $("cl-banner").textContent = "";
-  const hb = $("health-banner"); if (hb) hb.textContent = "Loading this project…";
+  renderHome();   // paints the agenda + metrics in their booting state
 }
 function renderSettings(s) {
   settings = s;

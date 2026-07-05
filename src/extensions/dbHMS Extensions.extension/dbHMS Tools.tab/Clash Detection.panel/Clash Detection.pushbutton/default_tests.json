@@ -109,6 +109,86 @@
         ]
       },
       "default_assignee": "Mechanical"
+    },
+    {
+      "$comment": "Phase 4 clearance tests. kind=clearance rows are code-zone violations, not element-vs-element hits: set_b is the OWNER (the gear the zone belongs to), set_a is the INTRUDER. The test id IS the scoring discriminator (clearance_rule) -- the ids C-NEC / C-NEC-W / M-NEC-PROT / M-SPR must stay exactly as written.",
+      "id": "C-NEC",
+      "name": "NEC 110.26 Dedicated Space",
+      "kind": "clearance",
+      "tolerance_inches": 0.0,
+      "set_a": {
+        "source": "host",
+        "categories": [
+          "OST_DuctCurves", "OST_DuctFitting", "OST_DuctAccessory", "OST_FlexDuctCurves",
+          "OST_PipeCurves", "OST_PipeFitting", "OST_PipeAccessory", "OST_FlexPipeCurves",
+          "OST_MechanicalEquipment"
+        ]
+      },
+      "set_b": {
+        "source": "host",
+        "categories": ["OST_ElectricalEquipment"]
+      },
+      "default_assignee": "Electrical"
+    },
+    {
+      "$comment": "set_a is MEP obstructions only (no OST_Walls): the actionable C-NEC-W violation is a duct/pipe/conduit routed through a panel's working space. Walls were dropped (V4 deep dive) -- recessed-panel bounding boxes caught the electrical-room's own boundary walls, producing ~100 non-actionable false flags, and a wall in the working space is an architectural room-sizing issue, not an MEP reroute.",
+      "id": "C-NEC-W",
+      "name": "NEC 110.26 Working Space",
+      "kind": "clearance",
+      "tolerance_inches": 0.0,
+      "set_a": {
+        "source": "host",
+        "categories": [
+          "OST_DuctCurves", "OST_DuctFitting", "OST_FlexDuctCurves",
+          "OST_PipeCurves", "OST_PipeFitting", "OST_FlexPipeCurves",
+          "OST_Conduit", "OST_ConduitFitting", "OST_CableTray", "OST_CableTrayFitting",
+          "OST_MechanicalEquipment", "OST_PlumbingFixtures"
+        ]
+      },
+      "set_b": {
+        "source": "host",
+        "categories": ["OST_ElectricalEquipment"]
+      },
+      "default_assignee": "Electrical"
+    },
+    {
+      "id": "M-NEC-PROT",
+      "name": "NEC 110.26(E)(1)(b) Foreign Systems Above",
+      "kind": "clearance",
+      "tolerance_inches": 0.0,
+      "set_a": {
+        "source": "host",
+        "categories": [
+          "OST_PipeCurves", "OST_PipeFitting", "OST_PipeAccessory", "OST_FlexPipeCurves",
+          "OST_Sprinklers"
+        ]
+      },
+      "set_b": {
+        "source": "host",
+        "categories": ["OST_ElectricalEquipment"]
+      },
+      "default_assignee": "Electrical"
+    },
+    {
+      "$comment": "Dormant on models with no modeled sprinkler heads (set_b resolves to zero); the runner reports skipped_reason no_owner_elements and does not flag it a suspect test.",
+      "id": "M-SPR",
+      "name": "NFPA 13 Sprinkler Obstruction",
+      "kind": "clearance",
+      "tolerance_inches": 0.0,
+      "set_a": {
+        "source": ["host", "link:Structural"],
+        "categories": [
+          "OST_DuctCurves", "OST_DuctFitting", "OST_FlexDuctCurves",
+          "OST_PipeCurves", "OST_PipeFitting",
+          "OST_Conduit", "OST_CableTray",
+          "OST_MechanicalEquipment", "OST_StructuralFraming"
+        ]
+      },
+      "set_b": {
+        "source": "host",
+        "categories": ["OST_Sprinklers"]
+      },
+      "default_assignee": "Fire Protection"
     }
   ]
 }

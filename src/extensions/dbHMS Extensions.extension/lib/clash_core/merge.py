@@ -62,7 +62,15 @@ def _derive_assignee(raw_clash):
 
     Wrapped in try/except so callers without a Revit API in scope (the test
     suite) safely fall through to the default.
+
+    Clearance rows are the exception: a NEC/NFPA zone violation is an
+    electrical (or fire-protection) COORDINATION item, not the intruding
+    trade's clash. Auto-derivation would hand a duct-in-the-panel-space row to
+    Mechanical; the test's default_assignee (Electrical / Fire Protection) is
+    the intended owner, so we return it directly.
     """
+    if raw_clash.get('kind') == models.ClashKind.CLEARANCE:
+        return raw_clash.get('default_assignee')
     for ref in (raw_clash.get('ref_a'), raw_clash.get('ref_b')):
         if not ref:
             continue
@@ -116,7 +124,13 @@ _PER_RUN_FIELDS = ('midpoint', 'gap_inches', 'closest_point_a',
                    'tolerance_inches',
                    'penetration_depth_in', 'overlap_volume_cf',
                    'overlap_bbox_in', 'overlap_centroid', 'pen_class',
-                   'geom_method')
+                   'geom_method',
+                   # Phase 4 clearance (per-run DERIVED). clearance_rule is
+                   # the scoring discriminator (= the clearance test id), so it
+                   # MUST be here or the fresh-row branch below would drop it
+                   # and scoring would see kind=='clearance' with no rule.
+                   'clearance_rule', 'spr_clearance_in', 'zone_cap_ft',
+                   'intrusion_depth_in', 'xref_hard')
 
 
 def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
@@ -152,11 +166,18 @@ def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
     next_seq = _next_seq(old_clashes)
 
     for raw in raw_new_clashes:
+        # Clearance rows key on (test_id, element pair) WITHOUT the midpoint
+        # bucket: a code-zone violation is identified by the intruder + the
+        # equipment + which clearance test fired, and must survive the
+        # intruder being nudged along a large zone (plan section 8 identity
+        # rule). Every hard/soft row keeps the midpoint term, byte-identical.
+        _is_clearance = (raw.get('kind') == models.ClashKind.CLEARANCE)
         fp = clash_fingerprint(
             raw.get('test_id'),
             raw.get('ref_a', {}),
             raw.get('ref_b', {}),
             raw.get('midpoint'),
+            include_midpoint=not _is_clearance,
         )
         # Avoid double-counting if the detection engine reports the same
         # logical clash twice (e.g. same pair, same midpoint).

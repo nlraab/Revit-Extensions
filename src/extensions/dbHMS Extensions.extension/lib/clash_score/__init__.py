@@ -687,6 +687,36 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
     kind = c.get('kind') or 'hard'
     flags = []
 
+    # --- Phase 4: clearance (code-zone) rows -----------------------------
+    # A clearance clash is an intruder element sitting in a code-mandated
+    # zone around a piece of equipment. It is dispatched purely by its
+    # clearance_rule (= the clearance test id) ABOVE every hard/soft rule
+    # AND above the mover-None guard, so an architectural element intruding
+    # a working space (both sides fixed -> no mover) still routes here, and
+    # so C2's structure escalation / C4 deep-pen can never steal a zone
+    # violation. Runner convention: ref_a is the intruder, ref_b the
+    # equipment owner, so pa is the intruder.
+    if kind == 'clearance':
+        crule = c.get('clearance_rule')
+        if crule == 'C-NEC':
+            return ('Critical', 'C-NEC', '', flags)
+        if crule == 'C-NEC-W':
+            # An architectural, STRUCTURAL, or unmapped intruder obstructing the
+            # working space is not an MEP action -- flag it to the design team,
+            # never rank it Critical against the MEP model (MEP cannot move a
+            # wall or a beam). Keep the rule id so the composer still explains
+            # WHAT it is. A movable MEP intruder stays Critical.
+            if pa['fixed_kind'] in ('architectural', 'unknown', 'structural'):
+                flags.append('flag_design_team')
+                return ('Minor', 'C-NEC-W', '', flags)
+            return ('Critical', 'C-NEC-W', '', flags)
+        if crule == 'M-NEC-PROT':
+            return ('Major', 'M-NEC-PROT', '', flags)
+        if crule == 'M-SPR':
+            return ('Major', 'M-SPR', '', flags)
+        # Residual: a clearance row with an unrecognized rule id.
+        return ('Major', 'M-CODE', '', flags)
+
     if mover is None:
         return ('Minor', 'FB',
                 'No movable dbHMS element in this pair; flag to the design '
@@ -713,17 +743,16 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
                       'a structural penetration request.'.format(sys_label))
         return 'Critical', 'C1', reason, flags
 
-    # C2: the size gate reads the MOVER's dimension (not either participant),
-    # and a code-clearance test vs structure escalates too (dormant until
-    # clearance detection ships -- same pattern as C4/R-GRAZE).
+    # C2: the size gate reads the MOVER's dimension (not either participant).
     # klass guard: C2 is about DUCTWORK too big to reroute. Equipment never
     # carries dims_in today, but the day bounding-box capture ships, a
     # pad-mounted AHU on its foundation must stay N3 bearing, never flip
     # Critical (review finding; pinned by a fixture test).
-    if (vs_struct and rig == 4 and mover['klass'] != 'equipment' and (
-            (kind == 'hard' and mover['dim_in'] is not None
-             and mover['dim_in'] >= float(cfg.get('big_duct_in') or 24.0))
-            or kind == 'clearance')):
+    # (Clearance rows were historically escalated here too; they now dispatch
+    # at the top of _tier, so this is hard-only.)
+    if (vs_struct and rig == 4 and mover['klass'] != 'equipment'
+            and kind == 'hard' and mover['dim_in'] is not None
+            and mover['dim_in'] >= float(cfg.get('big_duct_in') or 24.0)):
         return ('Critical', 'C2',
                 '{0} vs structure: a reroute this large consumes space that '
                 'is not there; pre-pour / steel-fabrication deadline.'.format(
@@ -759,10 +788,7 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
     # --- Major before Minor, with two carve-outs learned from the NIUHTC
     # calibration: mounting adjacency (N3) and penetrations (N1) leave the
     # Major path BEFORE structure/congestion can promote them ---------------
-    if kind == 'clearance':
-        return ('Major', 'M-CODE',
-                'Code clearance consumed: a clearance test predicts an '
-                'inspection failure, not a graze.', flags)
+    # (Clearance rows are handled at the top of _tier; they never reach here.)
 
     # N3: mounting/bearing adjacency (stage-1 retune). A troffer in its
     # ceiling, a lav on its carrier wall, equipment standing on a slab -
@@ -826,22 +852,39 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
             and mover['cat'] is not None and mover['cat'] in _d.DUCT_CATS):
         return ('Major', 'M-RATED', '', flags)
 
-    # M-PEN (Phase 3): a partial penetration can't be sleeved (the routing or
-    # the assembly must change), and an oversized full penetration needs a
-    # framed opening -- both are design work, not opening-schedule items.
+    # M-PEN (Phase 3): a penetration TOO BIG for a standard sleeve needs a
+    # framed/linteled opening -- design work, not an opening-schedule item.
+    # Size is the only reliable discriminator here: penetration_depth_in is the
+    # MIN extent of the overlap solid, so for a run SMALLER than the assembly
+    # is thick it is just the run's own cross-section, NOT how far the run
+    # stopped inside. The old 'partial penetration' trigger read that as
+    # "stops part-way" and mislabeled ordinary through-penetrations by small
+    # pipes/conduits as design work (V4: ~987 false Majors). Same min-extent
+    # trap that restricted C4 to structure. So M-PEN now fires ONLY when the
+    # run is oversized for a sleeve; everything else routed through a
+    # significant assembly falls to the N1 sleeve/damper path below.
     if (kind == 'hard' and vs_arch
             and other['cat'] in _d.PENETRABLE_ARCH_CATS
             and mover['cat'] is not None and _is_routed(mover['cat'])
-            and _significant_assembly(other, cfg)):
-        _pc = _pen_class(c, other, cfg)
-        if _pc == 'partial' or (_pc == 'full' and _over_sleeve(mover, cfg)):
-            flags.append('penetration_candidate')
-            return ('Major', 'M-PEN', '', flags)
+            and _significant_assembly(other, cfg)
+            and _over_sleeve(mover, cfg)):
+        flags.append('penetration_candidate')
+        return ('Major', 'M-PEN', '', flags)
 
     if (kind == 'hard' and vs_arch
             and other['cat'] in _d.PENETRABLE_ARCH_CATS
             and mover['cat'] is not None and _is_routed(mover['cat'])):
         flags.append('penetration_candidate')
+        # Rating unknown (V4 deep dive): fire ratings are captured on almost no
+        # walls in practice, so M-RATED (duct through a rated assembly -> needs
+        # a fire/smoke damper) silently under-fires. When a DUCT penetrates an
+        # assembly whose rating we could NOT read (is_rated is None -- not a
+        # positive "unrated"), flag it so a coordinator verifies the rating
+        # rather than assuming a plain sleeve. Ducts only: dampers are the
+        # air-side concern; pipe/conduit firestop is already in the wording.
+        if (mover['cat'] in _d.DUCT_CATS
+                and (other.get('ref') or {}).get('is_rated') is None):
+            flags.append('rating_unknown')
         return ('Minor', 'N1',
                 'Likely intended penetration through {0}: confirm sleeve / '
                 'fire damper (IMC 607.4).'.format(other['desc']), flags)
@@ -981,9 +1024,13 @@ def _over_sleeve(mover, cfg):
         return False
     if not vals:
         return False
-    if len(vals) == 1:
+    # Rect vs round is decided by the ORIGINAL dims arity, not the filtered
+    # list: a rect duct with one null axis ([w, None]) must not collapse to the
+    # ROUND sleeve test. (Latent today -- enrich only emits [w, h] with both
+    # axes -- but a trap if capture ever partial-fills.)
+    if len(dims) == 1:
         return vals[0] > float(cfg.get('sleeve_round_max_in') or 16.0)
-    return max(vals) > float(cfg.get('sleeve_rect_max_in') or 10.0)
+    return max(vals) > float(cfg.get('sleeve_rect_max_in') or 16.0)
 
 
 def _clash_z(c):
@@ -1324,20 +1371,44 @@ def _sysword(p):
     return s or None
 
 
+def _clean_ident(x, cat):
+    """A real identity string for a parenthetical, or None. Rejects blanks,
+    'none', the bare category, and placeholder type names ('TYPICAL')."""
+    if not x:
+        return None
+    xs = str(x).strip()
+    if (not xs or xs.lower() == 'none' or xs == cat
+            or xs.upper() in _d.PLACEHOLDER_TYPE_NAMES):
+        return None
+    return xs
+
+
 def _desc_phrase(p):
     """Short human phrase for one participant: '24 in supply duct',
-    'mechanical unit (4' x 2')', 'duct'. Degrades gracefully on missing
+    'mechanical unit (528 GALLONS)', 'duct'. Degrades gracefully on missing
     data and is length-capped so headlines fit."""
     if not p:
         return 'element'
     cat = p.get('cat')
     noun = _CAT_NOUN.get(cat) or (cat or 'element')
     if cat in _d.EQUIPMENT_CATS or cat in _d.MOUNTED_CATS:
-        sysw = _sysword(p)
+        # System word ONLY when it is single-valued and real: a multi-connector
+        # equipment's sys like 'Undefined,Hydronic Return' otherwise printed
+        # 'Undefined mechanical unit' / a wrong single system (V4 deep dive).
+        sys = p.get('sys')
+        sysw = None
+        if sys and ',' not in sys:
+            t = sys.strip()
+            if t and t.lower() != 'undefined':
+                sysw = t
         base = (sysw + ' ' + noun) if sysw else noun
-        nm = p.get('desc')
-        if nm and nm.strip().lower() not in ('none', '') and nm != cat:
-            base = base + ' (' + _truncate(nm, 22) + ')'
+        # Parenthetical identity: the type name, or the FAMILY name when the
+        # type is a placeholder ('TYPICAL') -- the family carries the real
+        # identity (CONDENSATE PUMP, FIRE PUMP, EXPANSION TANK) (V4 deep dive).
+        label = _clean_ident(p.get('desc'), cat) or _clean_ident(
+            (p.get('ref') or {}).get('family'), cat)
+        if label:
+            base = base + ' (' + _truncate(label, 22) + ')'
         return _truncate(base, 46)
     parts = []
     dim = p.get('dim_in')
@@ -1357,8 +1428,30 @@ def _level_of(c):
     return None
 
 
-def _loc_phrase(c):
-    lvl = _level_of(c)
+def _level_for(c, ctx):
+    """Best level to CITE for this clash. Refs carry only a level NAME (no
+    elevation), and the engine has no level table to resolve the true clash
+    (midpoint Z) against -- so when the two sides disagree on floor we cannot
+    compute the nearest. But the FIXED assembly being penetrated (a wall,
+    floor, beam) sits AT the clash, while a mover (a riser, a long main) is
+    tagged to its own host level and can be storeys away. So: sides agree ->
+    cite it; disagree WITH a fixed side -> cite the fixed side (it is at the
+    clash); disagree with NO fixed side (two movers) -> cite nothing rather
+    than assert a wrong floor. (V4 deep dive: ref_a-first cited the wrong floor
+    on 63 cross-level pairs, some off by 2-3 storeys.)"""
+    a = c.get('ref_a') or {}
+    b = c.get('ref_b') or {}
+    la, lb = a.get('level'), b.get('level')
+    if la and lb and la != lb:
+        other = (ctx or {}).get('other')
+        if other is not None and other.get('fixed'):
+            return (other.get('ref') or {}).get('level') or la or lb
+        return None
+    return la or lb
+
+
+def _loc_phrase(c, ctx=None):
+    lvl = _level_for(c, ctx)
     if lvl:
         return ' on ' + _truncate(str(lvl), 24)
     return ''
@@ -1412,10 +1505,14 @@ def _compose(rule, band, ctx):
     c = ctx['c']
     mover = ctx['mover']
     other = ctx['other']
-    loc = _loc_phrase(c)
+    loc = _loc_phrase(c, ctx)
     md = _desc_phrase(mover) if mover is not None else 'this element'
     od = _desc_phrase(other) if other is not None else 'the other element'
     onoun = _CAT_NOUN.get((other or {}).get('cat')) or 'run' if other else 'run'
+    # Clearance rows: name the intruder (ref_a -> pa) and the equipment owner
+    # (ref_b -> pb) by the runner's fixed convention, not the mover heuristic.
+    intr = _desc_phrase(ctx['pa']) if ctx.get('pa') else 'a foreign run'
+    own = _desc_phrase(ctx['pb']) if ctx.get('pb') else 'the equipment'
     code_ref = None
     resolve_by = 'next_cycle'
     what = why = act = ''
@@ -1454,6 +1551,52 @@ def _compose(rule, band, ctx):
         why = ('Overlap this deep means the two routes were designed through the '
                'same space; a nudge will not clear it.')
         act = 'Re-plan the shared corridor before either run is fabricated.'
+    elif rule == 'C-NEC':
+        what = '{0} sits in the NEC dedicated electrical space above {1}{2}.'.format(
+            intr, own, loc)
+        why = ('The space directly above a panel or switchboard must stay clear '
+               'of foreign ducts and piping up to 6 ft (or the structural '
+               'ceiling); anything in it is a code violation, not a graze.')
+        act = 'Reroute the run out of the dedicated space before the gear is set.'
+        code_ref = _d.CLEARANCE_CODE_BY_RULE.get('C-NEC')
+        resolve_by = 'gear_setting'
+    elif rule == 'C-NEC-W':
+        if 'flag_design_team' in (ctx.get('flags') or []):
+            what = '{0} obstructs the NEC working space in front of {1}{2}.'.format(
+                intr, own, loc)
+            why = ('The working space in front of live electrical gear must stay '
+                   'clear for safe operation, but the obstruction here is an '
+                   'architectural element the MEP team cannot move.')
+            act = 'Flag it to the design team to clear the working space.'
+        else:
+            what = '{0} intrudes into the NEC working space in front of {1}{2}.'.format(
+                intr, own, loc)
+            why = ('The working-space depth in front of live gear must stay clear '
+                   'for safe operation and code-required maintenance access.')
+            act = ('Clear the working space before the gear is set and the feeder '
+                   'routing freezes.')
+        code_ref = _d.CLEARANCE_CODE_BY_RULE.get('C-NEC-W')
+        resolve_by = 'gear_setting'
+    elif rule == 'M-NEC-PROT':
+        what = '{0} runs above the dedicated space of {1}{2}.'.format(intr, own, loc)
+        why = ('Leak-capable piping above the dedicated space is allowed but needs '
+               'a protective drip or deflection provision so a leak cannot fall '
+               'onto the gear.')
+        act = 'Add the protection detail or reroute this cycle.'
+        code_ref = _d.CLEARANCE_CODE_BY_RULE.get('M-NEC-PROT')
+        resolve_by = 'gear_setting'
+    elif rule == 'M-SPR':
+        clr = c.get('spr_clearance_in')
+        clrtxt = ' ({0} in remain)'.format(_fmt_num(clr)) if clr is not None else ''
+        what = '{0} sits within the required clearance of a sprinkler head{1}.'.format(
+            intr, loc)
+        why = ('NFPA 13 requires clearance from the sprinkler deflector to '
+               'obstructions{0}; this obstruction is inside that radius and would '
+               'block the spray pattern.'.format(clrtxt))
+        act = ('Relocate the obstruction or the head before the sprinkler shop '
+               'drawings release.')
+        code_ref = _d.CLEARANCE_CODE_BY_RULE.get('M-SPR')
+        resolve_by = 'next_cycle'
     elif rule == 'M-CODE':
         what = '{0} intrudes into the required clearance of {1}{2}.'.format(md, od, loc)
         why = ('A consumed code clearance is an inspection failure even though '
@@ -1483,16 +1626,12 @@ def _compose(rule, band, ctx):
         code_ref = 'IMC 607.5.1'
         resolve_by = 'duct_fab'
     elif rule == 'M-PEN':
-        if ctx.get('pen_class') == 'partial':
-            what = '{0} stops part-way inside {1}{2}.'.format(md, od, loc)
-            why = ('A partial penetration cannot be closed with a sleeve: the '
-                   'routing or the assembly has to change, which makes this '
-                   'design work, not an opening-schedule item.')
-        else:
-            what = ('{0} passes fully through {1} but is too large for a '
-                    'standard sleeve{2}.'.format(md, od, loc))
-            why = ('An opening this size needs a framed or linteled opening '
-                   'coordinated with the design team, not a field sleeve.')
+        # M-PEN now fires only on oversized penetrations (too big for a
+        # standard sleeve), so the wording is always the framed-opening case.
+        what = ('{0} passes through {1} but is too large for a standard '
+                'sleeve{2}.'.format(md, od, loc))
+        why = ('An opening this size needs a framed or linteled opening '
+               'coordinated with the design team, not a field sleeve.')
         act = ('Resolve the routing or the opening this cycle, before the '
                'opening package for this level issues.')
         resolve_by = 'sleeve_pkg'
@@ -1640,10 +1779,13 @@ def _compose(rule, band, ctx):
         act = 'Reroute it at the model or in the field.'
         resolve_by = 'field'
 
-    # Slope class is a measured fact, so any rule whose mover is a code-slope
-    # system may cite it (keeps the code bar and the citation in lock-step).
-    if code_ref is None and mover is not None:
-        code_ref = _d.SLOPE_CODE_BY_KLASS.get(mover['klass'])
+    # NOTE: no blanket slope-code fallback here. A code_ref must be EARNED by
+    # the sentence the user reads (doctrine 2). The rules that argue slope --
+    # C1 and M1-SLOPE -- set their own SLOPE_CODE_BY_KLASS citation inside their
+    # own branch. A blanket "if the mover happens to be a gravity/vent system,
+    # cite its slope code" bled an unearned IPC/IMC citation (and a "Code:"
+    # facts row) onto ~450 N1/M4/M2/N4/M3/FB rows whose sentence never mentions
+    # slope -- 70% of all citations in the V4 run. Removed (V4 deep dive).
 
     q = _qualifier(ctx)
     reason = ' '.join([s for s in (what, why, act, q) if s])
@@ -1659,27 +1801,56 @@ def _build_facts(ctx, rule, code_ref):
     mover = ctx['mover']
     other = ctx['other']
     facts = [{'k': 'Rule', 'v': rule}]
-    if mover is not None:
-        facts.append({'k': 'Mover', 'v': _desc_phrase(mover)})
-    if other is not None:
-        facts.append({'k': 'Other side', 'v': _desc_phrase(other)})
-    sysw = _sysword(mover) if mover is not None else None
-    if sysw:
-        facts.append({'k': 'System', 'v': sysw})
-    pen = c.get('penetration_depth_in')
-    # Surface the engine's own read of the depth (the same 'partial'/'full'
-    # class that drives M-PEN) so the facts table shows WHAT the number means,
-    # not just the number. Only when both depth and thickness were captured.
-    pen_method = {'partial': 'partial - stops inside',
-                  'full': 'full - passes through'}.get(ctx.get('pen_class'))
-    pen_row = {'k': 'Penetration', 'v': (None if pen is None else _fmt_num(pen)),
-               'unit': 'in'}
-    if pen_method:
-        pen_row['method'] = pen_method
-    facts.append(pen_row)
-    vol = c.get('overlap_volume_cf')
-    facts.append({'k': 'Overlap', 'v': (None if vol is None else _fmt_num(vol)),
-                  'unit': 'cf'})
+    if ctx['kind'] == 'clearance':
+        # Clearance framing: ref_a is the intruder, ref_b the equipment owner
+        # (runner convention). Label them that way so the facts match the
+        # composed sentence -- 'Mover'/'Other side' read backwards here (they
+        # called the panel the Mover and the intruding wall the Other side).
+        pa, pb = ctx.get('pa'), ctx.get('pb')
+        if pa is not None:
+            facts.append({'k': 'Intruder', 'v': _desc_phrase(pa)})
+        if pb is not None:
+            facts.append({'k': 'Equipment', 'v': _desc_phrase(pb)})
+    else:
+        if mover is not None:
+            facts.append({'k': 'Mover', 'v': _desc_phrase(mover)})
+        if other is not None:
+            facts.append({'k': 'Other side', 'v': _desc_phrase(other)})
+        sysw = _sysword(mover) if mover is not None else None
+        if sysw:
+            facts.append({'k': 'System', 'v': sysw})
+    if ctx['kind'] == 'clearance':
+        # Clearance rows measure zone intrusion, not penetration/overlap;
+        # showing bare "(not captured)" pen/overlap rows would read as a
+        # capture failure. Each is guarded so only measured values appear.
+        intr_d = c.get('intrusion_depth_in')
+        if intr_d is not None:
+            facts.append({'k': 'Intrusion', 'v': _fmt_num(intr_d), 'unit': 'in'})
+        cap = c.get('zone_cap_ft')
+        if cap is not None:
+            facts.append({'k': 'Zone cap', 'v': _fmt_num(cap), 'unit': 'ft'})
+        spr = c.get('spr_clearance_in')
+        if spr is not None:
+            facts.append({'k': 'Head clearance', 'v': _fmt_num(spr), 'unit': 'in'})
+    else:
+        pen = c.get('penetration_depth_in')
+        # Annotate the depth ONLY with the reliable read. penetration_depth_in
+        # is the min extent of the overlap solid, so depth >= assembly
+        # thickness unambiguously means the run spans it ('passes through'). A
+        # 'partial' read is NOT reliable -- a run thinner than the wall shows a
+        # min-extent below the thickness even when it passes straight through --
+        # so we never assert "stops inside" (that was the V4 M-PEN false-Major
+        # trap). Omit the annotation in the ambiguous case.
+        pen_method = ('full - passes through'
+                      if ctx.get('pen_class') == 'full' else None)
+        pen_row = {'k': 'Penetration', 'v': (None if pen is None else _fmt_num(pen)),
+                   'unit': 'in'}
+        if pen_method:
+            pen_row['method'] = pen_method
+        facts.append(pen_row)
+        vol = c.get('overlap_volume_cf')
+        facts.append({'k': 'Overlap', 'v': (None if vol is None else _fmt_num(vol)),
+                      'unit': 'cf'})
     if ctx['kind'] == 'soft':
         g = c.get('gap_inches')
         facts.append({'k': 'Gap', 'v': (None if g is None else _fmt_num(g)),
@@ -1689,7 +1860,7 @@ def _build_facts(ctx, rule, code_ref):
             ctx['cluster_n'], _fmt_num(ctx['radius']))})
     if code_ref:
         facts.append({'k': 'Code', 'v': code_ref})
-    lvl = _level_of(c)
+    lvl = _level_for(c, ctx)
     if lvl:
         facts.append({'k': 'Level', 'v': _truncate(str(lvl), 30)})
     return facts
@@ -1719,6 +1890,11 @@ def _score_one(c, cluster_n, cfg, prev_rule):
     confidence, cause = _confidence(c, pa, pb, mover)
     ctx = {
         'c': c, 'mover': mover, 'other': other,
+        # pa/pb keep the ref_a/ref_b participants so the clearance composer can
+        # name the intruder (pa) and the equipment owner (pb) by the runner's
+        # convention, instead of the routing-clash mover/other heuristic (which
+        # does not map cleanly when the "owner" side is the fixed one).
+        'pa': pa, 'pb': pb,
         'kind': c.get('kind') or 'hard', 'cluster_n': cluster_n,
         'radius': cfg.get('cluster_radius_ft') or 5.0, 'flags': flags,
         'confidence': confidence, 'degrade_cause': cause,
@@ -1800,6 +1976,10 @@ def _fmt_num(v):
     try:
         f = float(v)
     except (TypeError, ValueError):
+        return str(v)
+    # NaN/inf survive float() but int(f) raises -- guard so a bad measurement
+    # degrades to a printable string instead of crashing the whole score.
+    if f != f or f in (float('inf'), float('-inf')):
         return str(v)
     if f == int(f):
         return str(int(f))
