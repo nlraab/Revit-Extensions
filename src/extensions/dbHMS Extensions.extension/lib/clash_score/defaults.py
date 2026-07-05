@@ -149,9 +149,28 @@ DEFAULTS = {
     # rule, N1-before-M4, structural-link fix).
     # rev 3 = stage 2: the M3 drain/penetration split (N4) and the C3
     # tightening (equipment never satisfies C3; known-small vents drop to
-    # rigidity 2). A band step-down between runs at these revs is a RULE
+    # rigidity 2).
+    # rev 4 = importance v2 Phase 1 (pure rescore, CLASH_IMPORTANCE_V2_PLAN.md
+    # section 5): M1 split into 8 named sub-rules, N-PT + N-DUP demotions,
+    # sys_class set-matching (gated), the composed 2-3 sentence reasons with
+    # headline/code_ref/resolve_by/facts, and the score-composition remap
+    # (continuous size/congestion, pair-stiffness constraint, proportional
+    # band mapping).
+    # rev 6 = Phase 2 pair geometry (R-GRAZE/C4 activated + guarded, real
+    # geometry term) AND Phase 3 arch/structure payload: rated-assembly facts
+    # drive M-RATED (fire/smoke damper) and firestop-graded N1; captured
+    # penetration depth + wall thickness drive pen_class and M-PEN (partial
+    # penetrations are not sleeve-resolvable); beam elevations drive
+    # M-STRUCT-ZONE; a wall's structural usage reroutes an arch-modeled bearing
+    # wall onto the structural path. Band movement across a rev bump is a RULE
     # change, not resolved work.
-    'rev': 3,
+    # rev 7 = V3 detection cleanup: the layered-penetration collapse (one
+    # physical penetration of a stacked floor/roof/ceiling assembly is now one
+    # row, not one-per-modeled-layer -- runs pre-merge in clash_core.dedupe)
+    # and the raw_realistic_max retune 30 -> 48 (once real boolean geometry
+    # filled the score terms, 30 re-piled the Major band into 60-69). Scores
+    # shift WITHIN bands only; no band cutoff moved.
+    'rev': 7,
 
     # Layer A rule toggles (all on).
     'rules': {
@@ -170,10 +189,15 @@ DEFAULTS = {
     'field_fix_dia_in': 1.0,
     'field_fix_cluster_escape': 10,   # >= this many neighbors: not field-fix
 
-    # R-GRAZE (dormant): sub-3/8 in penetrations are modeling noise
-    # (the sourced 10 mm practitioner floor). Never fires on rigidity-4+
-    # movers or against structure.
+    # R-GRAZE: sub-3/8 in penetrations are modeling noise (the sourced 10 mm
+    # practitioner floor). Never fires on rigidity-4+ movers or against
+    # structure. Phase 2: also requires a MEASURED boolean overlap (never a
+    # bbox proxy -- a diagonal graze has a small AABB extent while being a
+    # real hit) whose volume is under graze_max_vol_cf, so a wide shallow
+    # face-contact (two parallel ducts touching along their length: small
+    # depth, large volume) is NOT suppressed.
     'graze_floor_in': 0.375,
+    'graze_max_vol_cf': 0.02,
 
     # Tier thresholds.
     'deep_pen_in': 6.0,          # C4 (dormant): deep systemic overlap
@@ -183,6 +207,22 @@ DEFAULTS = {
     'gravity_main_in': 3.0,      # rigidity 5 gravity at/above this dia
     'small_conduit_in': 1.0,     # rigidity 0 conduit at/below this dia
     'fp_main_in': 4.0,           # FP wet main vs branch
+
+    # Phase 3: rated assemblies + penetration classification.
+    'rated_wall_min_hr': 1.0,    # >= this fire rating -> rated (damper/firestop)
+    'sleeve_rect_max_in': 10.0,  # ~250 mm: a full pen wider needs a framed opening
+    'sleeve_round_max_in': 16.0, # ~400 mm dia
+    'pen_full_frac': 0.85,       # depth >= thickness*this -> full (through) pen
+    'beam_edge_frac': 0.30,      # clash within this fraction of a beam's top or
+                                 # bottom -> flexural/edge zone (escalate)
+    'min_assembly_in': 1.5,      # a penetrable assembly is "significant" only at
+                                 # or above this thickness -- excludes finish
+                                 # floors / membranes / toppings that everything
+                                 # "penetrates" as a modeling artifact
+    'beam_pen_min_in': 2.0,      # M-STRUCT-ZONE needs a real penetration this
+                                 # deep INTO the beam; a duct merely meeting the
+                                 # beam's underside is M2 "route around", not a
+                                 # flexural-zone escalation
 
     # Congestion (ClashMEP insight): many clashes in one spot = rack-level
     # rework, not N field fixes. Hysteresis so neighbor resolution between
@@ -197,6 +237,29 @@ DEFAULTS = {
     # Near-size-threshold honesty margin (fraction of the boundary).
     'near_threshold_frac': 0.15,
 
+    # --- rev 4 (importance v2 P1) score-composition constants ---------------
+    # The sub-score raw total maps proportionally across a band's width
+    # (base..top) via min(1, raw / raw_realistic_max). Recalibrated to 48 on
+    # the V3 run (5,451 clashes AFTER the layered-penetration collapse, with
+    # real boolean geometry captured on ~1,630 rows). The prior value of 30
+    # was tuned before pairgeom filled the geometry/volume terms; once those
+    # raised the raws, ~80 percent of the Major band piled into 60-69 again.
+    # 48 drains that pile into a heavy 50-59 middle (~90 percent) and reserves
+    # 60-69 for a genuine top ~8 percent (the near-critical Majors), with a
+    # 40-49 tail beginning to fill. Tune ONLY this constant against the
+    # histogram in calibration_report -- never the 70/40 cutoffs.
+    'raw_realistic_max': 48.0,
+    'size_full_in': 30.0,      # size term saturates (8) at this max dimension
+    'vol_full_cf': 1.0,        # volume term saturates (6) near this overlap
+    'congest_full_n': 20.0,    # congestion term saturates (6) at this cluster n
+
+    # N-PT scope (Decision D1). 'wall_device' = strict EXIT/#N point fixtures
+    # PLUS wall-device receptacles/switches (option A, recommended). Set to
+    # True to also demote Electrical Fixtures literally named 'TYPICAL'
+    # (option B). Every demoted row is in the spot-check sheet regardless.
+    'n_pt_include_wall_devices': True,
+    'n_pt_include_typical': False,
+
     # Bands: base score and inclusive max. Band is DECIDED BY THE TIER RULE;
     # these numbers only map tiers onto the 0-100 scale the UI renders
     # (70/40 cutoffs are hardcoded in coord.html in four places).
@@ -205,4 +268,53 @@ DEFAULTS = {
         'Major':    (40, 69),
         'Minor':    (8, 39),
     },
+}
+
+
+# ---------------------------------------------------------------------------
+# rev 4 (importance v2 P1) name tables + deadline vocabulary.
+# Pure data, importable in CPython 3 and IronPython 2.7. All comparisons in
+# clash_score upper-case the model name first, so keep these UPPER-CASE.
+# ---------------------------------------------------------------------------
+
+# N-DUP: two equipment/mounted instances that share a family name, or carry a
+# placeholder type name, are usually a nested/double-placed/placeholder family
+# rather than two real units. Demoted (never suppressed: a name is not proof).
+PLACEHOLDER_TYPE_NAMES = frozenset(('TYPICAL', 'STANDARD'))
+
+# N-PT: point-mounted fixtures (exit signs, wall devices) relocate with a box
+# shift at rough-in, not a routing change -- they are not a Major coordination
+# item against a duct/pipe. Substring words + regex on the fixture NAME.
+POINT_FIXTURE_NAME_WORDS = ('EXIT',)
+POINT_FIXTURE_NAME_RES = (r'^#\d+',)               # e.g. '#21 (EXIT)', '#3'
+# Wall-device tokens (option A): matched as whole tokens on Electrical
+# Fixtures, so 'WP' never hits a name that merely contains those letters.
+WALL_DEVICE_NAME_WORDS = frozenset((
+    'GFI', 'CONVENIENCE', 'SWITCHED', 'WP', 'COUNTERTOP',
+))
+
+# resolve_by tokens -> event-anchored deadline phrases (Ashghal / Indiana
+# University stage-gate precedent; never date-anchored, the tool has no
+# schedule). The stamped `resolve_by_label` is DEADLINES[token] so the web UI
+# stays dumb.
+DEADLINES = {
+    'pre_pour':      'before the slab/deck pour',
+    'steel_fab':     'before steel fabrication release',
+    'duct_fab':      'before ductwork fabrication release',
+    'gear_setting':  'before gear pads and feeder routing are frozen',
+    'sleeve_pkg':    'with the sleeve/opening package for this level',
+    'ceiling_close': 'before ceiling grid/close-in in this area',
+    'next_cycle':    'this coordination cycle',
+    'field':         'in the field at install',
+}
+
+# Slope/gravity code citations by mover class. The class IS a measured fact
+# (from system classification), so citing here honors "cite only when
+# measured" (doctrine 2 of the v2 plan).
+SLOPE_CODE_BY_KLASS = {
+    'gravity':      'IPC 704.1',
+    'grease':       'IMC 506.3.7',
+    'gravity_vent': 'IPC 905.2',
+    'condensate':   'IMC 307.2.1',
+    'medgas':       'NFPA 99',
 }

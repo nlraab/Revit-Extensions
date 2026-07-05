@@ -1493,7 +1493,7 @@ class CoordinationForm(forms.WPFWindow):
         import json
         from clash_core import binding, persistence, users, dedupe, merge
         from clash_core.models import _now_iso
-        from clash_detect import runner
+        from clash_detect import runner, pairgeom
 
         def done(ok, message, summary=None):
             payload = {"ok": ok, "message": message}
@@ -1566,20 +1566,35 @@ class CoordinationForm(forms.WPFWindow):
                                    if r.get('role') and r.get('role') != 'ignore')
                 missing = sorted(needed - mapped_roles)
                 loaded_titles = [r.get('title') for r in view]
-                if missing and loaded_titles:
-                    link_warning = (
-                        "Warning: linked model(s) {0} are loaded but not mapped to a role, "
-                        "so the {1} side(s) of these tests found nothing. Open Settings on "
-                        "the panel and set the link role mapping, then re-run."
-                        .format(", ".join("'{0}'".format(t) for t in loaded_titles if t),
-                                " / ".join(missing)))
+                # Warn whenever a needed role is unmapped -- REGARDLESS of
+                # whether any links are loaded. The old `and loaded_titles`
+                # guard swallowed the warning on a fresh folder with unloaded
+                # links, which is exactly the silent failure that produced the
+                # NIUHTC "arch/structure never ran" dataset (v2 plan 5.7).
+                if missing:
+                    if loaded_titles:
+                        link_warning = (
+                            "Warning: linked model(s) {0} are loaded but not mapped to a role, "
+                            "so the {1} side(s) of these tests found nothing. Open Settings on "
+                            "the panel and set the link role mapping, then re-run."
+                            .format(", ".join("'{0}'".format(t) for t in loaded_titles if t),
+                                    " / ".join(missing)))
+                    else:
+                        link_warning = (
+                            "Warning: these tests need linked model role(s) {0}, but no linked "
+                            "models are mapped to them -- architecture/structure clashes were "
+                            "NOT checked. Open Settings on the panel, set the link role "
+                            "mapping, then re-run.".format(" / ".join(missing)))
         except Exception:
             link_warning = None
 
         raw = []
         errors = []
+        diags = []        # per-test zero-row-alarm diagnostics (v2 plan 5.7)
         tess_cache = {}   # one cache for the whole run: shared elements tessellate once
         ins_cache = {}    # one insulation map per document per run
+        geom_cache = pairgeom.new_cache()   # Phase 2 pair geometry: run-wide
+                                            # boolean time budget + solid cache
         # Detection blocks the UI thread. Set the busy gate and pump the loop
         # through the status callback so the modal's Abort button stays live;
         # the abort is acted on between tests (a single test can't be stopped
@@ -1601,10 +1616,13 @@ class CoordinationForm(forms.WPFWindow):
                 prefix = "Running {0}/{1}: {2} - ".format(i + 1, n, name)
                 status = self._detect_status(prefix, i, n)
                 try:
-                    raw.extend(runner.run_test(doc, t, role_map, log=_log,
-                                               tess_cache=tess_cache,
-                                               ins_cache=ins_cache,
-                                               status=status))
+                    _rows, _diag = runner.run_test(doc, t, role_map, log=_log,
+                                                   tess_cache=tess_cache,
+                                                   ins_cache=ins_cache,
+                                                   status=status,
+                                                   geom_cache=geom_cache)
+                    raw.extend(_rows)
+                    diags.append(_diag)
                 except Exception:
                     errors.append(name)
                     _log("run_tests: test '{0}' FAILED\n{1}".format(name, traceback.format_exc()))
@@ -1619,6 +1637,10 @@ class CoordinationForm(forms.WPFWindow):
         try:
             if raw:
                 raw, _dropped = dedupe.drop_soft_overlapping_hard(raw)
+                raw, _layered = dedupe.collapse_layered_penetrations(raw)
+                if _layered:
+                    self._post("status:Collapsed {0} stacked-layer "
+                               "penetrations...".format(_layered))
             self._post("status:Merging with previous results...")
             existing = persistence.read_clashes_at(ph)
             run_iso = _now_iso()
@@ -1647,6 +1669,21 @@ class CoordinationForm(forms.WPFWindow):
             except Exception:
                 _log("run_tests: grouping FAILED (non-fatal)\n{0}".format(
                     traceback.format_exc()))
+            # Zero-row alarm: flag suspect tests (rows==0 with an empty side
+            # or an unresolved link role) and ride the diagnostics into
+            # last_run_summary. clearance-stub tests are expected-empty and
+            # never suspect (v2 plan 5.7).
+            for d in diags:
+                rr = d.get('roles_resolved') or {}
+                d['suspect'] = bool(
+                    d.get('rows', 0) == 0
+                    and d.get('skipped_reason') != 'clearance_stub'
+                    and (d.get('skipped_reason') in ('side_a_empty', 'side_b_empty')
+                         or any(v == 0 for v in rr.values())))
+            try:
+                summary['test_diagnostics'] = diags
+            except Exception:
+                pass
             new_data = {
                 'schema_version': existing.get('schema_version', 1),
                 'last_run_at':    run_iso,
@@ -1675,6 +1712,11 @@ class CoordinationForm(forms.WPFWindow):
             msg += " ({0} test(s) failed: {1})".format(len(errors), ", ".join(errors))
         if link_warning:
             msg += " " + link_warning
+        n_suspect = len([d for d in diags if d.get('suspect')])
+        if n_suspect:
+            msg += (" {0} test(s) stored zero rows and look wrong (a linked role "
+                    "resolved nothing, or a side collected nothing) -- see the "
+                    "per-test breakdown in the run summary.".format(n_suspect))
         _log("run_tests: " + msg)
         # Safe point: clash data is on disk. Everything after this is the
         # optional image tail -- fully abortable, and its failure never risks
@@ -2011,8 +2053,14 @@ class CoordinationForm(forms.WPFWindow):
             "score":  imp.get("score") if imp.get("score") is not None
                       else self._placeholder_score(c),
             "reason":     imp.get("reason"),
+            "headline":   imp.get("headline"),
             "brk":        imp.get("brk"),
             "rule":       imp.get("rule"),
+            "codeRef":    imp.get("code_ref"),
+            "resolveBy":  imp.get("resolve_by"),
+            "resolveByLabel": imp.get("resolve_by_label"),
+            "facts":      imp.get("facts"),
+            "relClass":   imp.get("relevance_class"),
             "suppressed": bool(imp.get("suppressed")),
             "supReason":  imp.get("suppress_reason"),
             "conf":       imp.get("confidence"),

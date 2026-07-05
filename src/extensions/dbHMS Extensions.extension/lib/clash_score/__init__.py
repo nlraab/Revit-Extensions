@@ -28,7 +28,27 @@ projects -- Nathan, 2026-07-01). `score_all(clashes, config)` accepts an
 override dict for tests; production callers pass nothing.
 """
 
+import math
+import re
+
 from clash_score import defaults as _d
+
+# Precompiled once at import (both interpreters). Point-fixture name regexes.
+_POINT_FIXTURE_RES = tuple(re.compile(p) for p in _d.POINT_FIXTURE_NAME_RES)
+
+
+def _round_half_away(x):
+    """Round half away from zero, identical in IronPython 2.7 and CPython 3.
+    (Py2 round() rounds half away; Py3 round() rounds half to even -- using
+    either directly would make the offline harness disagree with production
+    by 1 at boundaries.)"""
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return 0
+    if f >= 0.0:
+        return int(math.floor(f + 0.5))
+    return int(math.ceil(f - 0.5))
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +325,13 @@ def _fixed_kind(ref):
     disc = _discipline(ref)
     if disc == 'Structural':
         return 'structural'
+    # Phase 3: an arch-modeled wall/floor flagged structural (a shear or
+    # bearing wall drawn in the architect's model) is STRUCTURE, not
+    # architecture -- it takes the C1/C2/M2 structural path, never the N1
+    # sleeve demotion. Tri-state: only a positive is_structural reroutes.
+    if (ref.get('is_structural') is True
+            and ref.get('category') in ('Walls', 'Floors')):
+        return 'structural'
     src = ref.get('source') or 'host'
     if src.startswith('link:'):
         role = src[5:]
@@ -324,15 +351,27 @@ def _fixed_kind(ref):
 
 def _max_dim_in(ref):
     dims = ref.get('dims_in')
-    if not dims:
-        return None
-    try:
-        vals = [float(v) for v in dims if v is not None]
-    except (TypeError, ValueError):
-        return None
-    if not vals:
-        return None
-    return max(vals)
+    if dims:
+        try:
+            vals = [float(v) for v in dims if v is not None]
+            if vals:
+                return max(vals)
+        except (TypeError, ValueError):
+            pass
+    # Non-curve size fallback (Phase 2): equipment/fixtures carry no native
+    # dims, so use the captured world-AABB. NEVER for routed curves -- a
+    # diagonal duct's AABB is fiction and would inflate its rigidity rung, so
+    # this is gated to placed-object categories (which classify rigidity by
+    # class, not size, so only the size sub-score is affected).
+    cat = ref.get('category')
+    if cat in _d.EQUIPMENT_CATS or cat in _d.MOUNTED_CATS:
+        try:
+            vals = [float(v) for v in (ref.get('bbox_in') or []) if v is not None]
+            if vals:
+                return max(vals)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def _name_blob(ref):
@@ -351,10 +390,38 @@ def _matches(blob, words):
     return False
 
 
+def _sys_class_set(ref):
+    """The system-classification string is comma-joined on multi-connector
+    equipment ("Supply Air,Hydronic Supply,Hydronic Return"), so exact
+    membership tests silently fail. Split into a set for intersection tests."""
+    raw = ref.get('sys_class') or ''
+    return set(s.strip() for s in raw.split(',') if s.strip())
+
+
+def _class_signal(ref, classes):
+    """True when the ref's system classification indicates membership in
+    `classes`, with the multi-system guard that keeps a pump carrying
+    'Sanitary' among several connectors from reading as a gravity main:
+      - a Pipes CURVE: any matching class (a real single-service main);
+      - a pipe fitting/accessory, flex, or sprinkler: ALL classes must be in
+        `classes` (a genuine gravity elbow is {'Sanitary'}; a multi-service
+        fitting is not a subset, so it is excluded);
+      - anything else (equipment, duct, fixture): never a pipe-system signal.
+    """
+    scs = _sys_class_set(ref)
+    if not scs:
+        return False
+    cat = ref.get('category')
+    if cat == 'Pipes':
+        return bool(scs & classes)
+    if cat in _d.PIPE_CATS or cat in _d.FLEX_CATS or cat in _d.SPRINKLER_CATS:
+        return scs <= classes
+    return False
+
+
 def _is_gravity(ref, cfg):
     """Classification-primary, name-regex backstop, slope as third signal."""
-    sys_class = ref.get('sys_class')
-    if sys_class in _d.GRAVITY_CLASSES:
+    if _class_signal(ref, _d.GRAVITY_CLASSES):
         return True
     blob = _name_blob(ref)
     if _matches(blob, _d.STORM_NAME_WORDS):
@@ -403,7 +470,7 @@ def _rigidity(ref, cfg):
 
     # Gravity drainage (IPC 704.1 slope is irreplaceable elevation).
     if _is_gravity(ref, cfg):
-        if ref.get('sys_class') == 'Vent':
+        if _sys_class_set(ref) == set(['Vent']):
             # Stage 2: a 2-in vent branch regrades cheaply; only vents at
             # or above the gravity-main size keep rigidity 4. Unknown
             # diameter stays 4, conservative.
@@ -431,12 +498,11 @@ def _rigidity(ref, cfg):
     # data; 'class' = the category IS the primary classifier for this class
     # (tray, flex, sprinkler, equipment, tech) so it is NOT degraded data;
     # 'category' = a true data-missing fallback (drives confidence).
-    sys_class = ref.get('sys_class')
-    if sys_class in _d.FP_DRY_CLASSES:
+    if _class_signal(ref, _d.FP_DRY_CLASSES):
         return 4, 'system', 'fp_dry', False
     if cat in _d.SPRINKLER_CATS:
         return 1, 'class', 'sprinkler', False
-    if sys_class in _d.FP_WET_CLASSES:
+    if _class_signal(ref, _d.FP_WET_CLASSES):
         main = float(cfg.get('fp_main_in') or 4.0)
         if dim is not None and dim >= main:
             return 3, 'size', 'fp_wet', _near(dim, main)
@@ -498,6 +564,14 @@ def _participant(ref, cfg):
         'sys': ref.get('sys_name') or ref.get('sys_class'),
         'cat': ref.get('category'),
         'desc': ref.get('name') or ref.get('category') or 'element',
+        # Phase 3 arch/structure facts (nullable).
+        'is_rated': ref.get('is_rated'),
+        'thickness_in': ref.get('thickness_in'),
+        'is_structural': ref.get('is_structural'),
+        'wall_function': ref.get('wall_function'),
+        'fire_rating_hr': ref.get('fire_rating_hr'),
+        'top_ft': ref.get('top_ft'),
+        'bot_ft': ref.get('bot_ft'),
         'ref': ref,
     }
     if fixed is None:
@@ -566,8 +640,15 @@ def _layer_a(c, pa, pb, cluster_n, cfg):
 
     if rules.get('R-GRAZE'):
         pen = c.get('penetration_depth_in')
-        if (c.get('kind') == 'hard' and pen is not None
-                and float(pen) < float(cfg.get('graze_floor_in') or 0.375)):
+        vol = c.get('overlap_volume_cf')
+        # Suppress only on a MEASURED boolean overlap (never a bbox proxy) that
+        # is BOTH shallow and small: a wide shallow face-contact keeps its
+        # volume above the cap and stays visible (v2 plan 6.4, feasibility fix).
+        if (c.get('kind') == 'hard' and c.get('geom_method') == 'boolean'
+                and pen is not None
+                and float(pen) < float(cfg.get('graze_floor_in') or 0.375)
+                and vol is not None
+                and float(vol) < float(cfg.get('graze_max_vol_cf') or 0.02)):
             mover = _mover(pa, pb)
             structural = ('structural' in (pa.get('fixed_kind'), pb.get('fixed_kind')))
             if (mover is not None and mover.get('rigidity') is not None
@@ -661,7 +742,16 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
                     flags)
 
     pen = c.get('penetration_depth_in')
-    if pen is not None and float(pen) >= float(cfg.get('deep_pen_in') or 6.0):
+    if (pen is not None and float(pen) >= float(cfg.get('deep_pen_in') or 6.0)
+            and vs_struct
+            and not (mover['klass'] in ('equipment', 'fixture')
+                     and other['fixed'])):
+        # C4 is deep-INTO-STRUCTURE only (V3 finding). For two MEP elements the
+        # measured "depth" (the thinnest extent of the intersection solid) is
+        # really the SMALLER element's cross-section as it crosses the larger
+        # one, so ANY 6 in+ pipe crossing a big duct would false-trigger a
+        # Critical. Those are ordinary crossings (Major, M1), not systemic
+        # overlap; and an arch wall/floor penetration is N1 / M-PEN, not C4.
         return ('Critical', 'C4',
                 'Deep penetration ({0} in): systemic overlap, not a graze.'.format(
                     _fmt_num(pen)), flags)
@@ -694,6 +784,28 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
                     'mounting/bearing, not a routing clash.'.format(
                         mover['desc'], other['desc']), flags)
 
+    # M-STRUCT-ZONE (Phase 3): a routed run crossing a beam, classified by
+    # which third of the beam depth it hits (middle web = often engineerable;
+    # top/bottom flexural zone = escalate). Falls through to M2 when the beam
+    # elevations aren't captured.
+    if (kind == 'hard' and vs_struct
+            and other['cat'] == 'Structural Framing'
+            and mover['cat'] is not None and _is_routed(mover['cat'])):
+        zone = _beam_zone(c, other, cfg)
+        _bp = c.get('penetration_depth_in')
+        # Only classify the beam zone for a REAL penetration INTO the beam. A
+        # duct that merely meets the beam's underside (the common case -- MEP
+        # routes below the steel, so the clash Z sits at the beam's bottom) has
+        # no deep measured penetration and is a normal "route around structure"
+        # (M2), NOT a flexural-zone escalation (V3 finding: all 60 zone rows
+        # were bbox grazes reading "bottom third").
+        if (zone is not None and _bp is not None
+                and float(_bp) >= float(cfg.get('beam_pen_min_in') or 2.0)):
+            flags.append('zone_' + zone)
+            if zone in ('top', 'bottom'):
+                flags.append('escalate_candidate')
+            return ('Major', 'M-STRUCT-ZONE', '', flags)
+
     if kind == 'hard' and vs_struct and 2 <= rig <= 4:
         return ('Major', 'M2',
                 '{0} must drop or rise around structure; the fix window '
@@ -706,12 +818,29 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
     # BEFORE M4 (stage-1 retune): a wall crossing inside a congested zone
     # is still a sleeve-schedule item; the zone's congestion stays visible
     # through its MEP-vs-MEP members and the cluster group.
+    # M-RATED (Phase 3): a DUCT through a rated wall/floor/roof needs a
+    # fire/smoke damper -- IU Level One severity, not a Minor sleeve note.
+    if (kind == 'hard' and vs_arch
+            and other['cat'] in ('Walls', 'Floors', 'Roofs')
+            and other.get('is_rated') is True
+            and mover['cat'] is not None and mover['cat'] in _d.DUCT_CATS):
+        return ('Major', 'M-RATED', '', flags)
+
+    # M-PEN (Phase 3): a partial penetration can't be sleeved (the routing or
+    # the assembly must change), and an oversized full penetration needs a
+    # framed opening -- both are design work, not opening-schedule items.
     if (kind == 'hard' and vs_arch
             and other['cat'] in _d.PENETRABLE_ARCH_CATS
-            and mover['cat'] is not None and (
-                mover['cat'] in _d.DUCT_CATS or mover['cat'] in _d.PIPE_CATS or
-                mover['cat'] in _d.CONDUIT_CATS or mover['cat'] in _d.TRAY_CATS or
-                mover['cat'] in _d.FLEX_CATS)):
+            and mover['cat'] is not None and _is_routed(mover['cat'])
+            and _significant_assembly(other, cfg)):
+        _pc = _pen_class(c, other, cfg)
+        if _pc == 'partial' or (_pc == 'full' and _over_sleeve(mover, cfg)):
+            flags.append('penetration_candidate')
+            return ('Major', 'M-PEN', '', flags)
+
+    if (kind == 'hard' and vs_arch
+            and other['cat'] in _d.PENETRABLE_ARCH_CATS
+            and mover['cat'] is not None and _is_routed(mover['cat'])):
         flags.append('penetration_candidate')
         return ('Minor', 'N1',
                 'Likely intended penetration through {0}: confirm sleeve / '
@@ -771,6 +900,13 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
                 'Clearance nearly consumed: {0}% of the required gap '
                 'remains.'.format(int(round(gap_ratio * 100))), flags)
 
+    # N-DUP (hard): duplicate/placeholder family suspects. After M4 (a
+    # congested equipment pair is still rack rework) and before the M1
+    # dispatch (the artifact demotion beats M1-EQ-EQ) -- v2 plan 5.0 ladder.
+    if kind == 'hard' and _is_dup_suspect(c, pa, pb):
+        flags.append('family_artifact_suspect')
+        return ('Minor', 'N-DUP', '', flags)
+
     if kind == 'hard':
         rig_a = pa['rigidity'] if not pa['fixed'] and pa['rigidity'] is not None else 0
         rig_b = pb['rigidity'] if not pb['fixed'] and pb['rigidity'] is not None else 0
@@ -781,13 +917,190 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
         # the row stays Major instead of falling to the field-fix floor.
         if (max(rig_a, rig_b) >= 4 or rig == 3
                 or (mover['klass'] == 'fixture' and other_rig >= 3)):
-            return ('Major', 'M1',
-                    'Reroute around a large obstruction: needs a coordinated '
-                    'path, not a nudge.', flags)
+            return _m1_dispatch(mover, other, flags, cfg)
 
     if kind == 'hard' and mover['klass'] in ('fixture', 'tech'):
         flags.append('field_fix')
-    return 'Minor', 'FB', _fb_reason(kind, mover), flags
+    return 'Minor', 'FB', '', flags
+
+
+def _is_routed(cat):
+    return (cat in _d.DUCT_CATS or cat in _d.PIPE_CATS
+            or cat in _d.CONDUIT_CATS or cat in _d.TRAY_CATS
+            or cat in _d.FLEX_CATS)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 helpers (penetration classification, beam zone). All None-safe.
+# ---------------------------------------------------------------------------
+
+def _pen_class(c, other, cfg):
+    """'full' (through) / 'partial' (stops inside) / None, from the measured
+    penetration depth and the assembly thickness. Needs both captured."""
+    pen = c.get('penetration_depth_in')
+    thick = other.get('thickness_in')
+    if pen is None or thick is None:
+        return None
+    try:
+        thick = float(thick)
+        if thick <= 0:
+            return None
+        frac = float(cfg.get('pen_full_frac') or 0.85)
+        return 'full' if float(pen) >= thick * frac else 'partial'
+    except (TypeError, ValueError):
+        return None
+
+
+def _significant_assembly(other, cfg):
+    """True for a penetrable assembly worth a design-grade penetration rule
+    (M-PEN). Walls and anything structural always count; floors/roofs count
+    only at or above min_assembly_in. Excludes the thin finish floors,
+    membranes, and toppings that everything 'penetrates' as a modeling
+    artifact (V3: a 36 in duct 'through' a 1/8 in finish floor is not a
+    framed-opening event). Unknown thickness never suppresses (proof-only)."""
+    if other.get('is_structural') is True or other.get('cat') == 'Walls':
+        return True
+    thick = other.get('thickness_in')
+    if thick is None:
+        return True
+    try:
+        return float(thick) >= float(cfg.get('min_assembly_in') or 1.5)
+    except (TypeError, ValueError):
+        return True
+
+
+def _over_sleeve(mover, cfg):
+    """True when a full penetration is too wide for a standard sleeve and needs
+    a framed opening. dims_in is [dia] (round) or [w, h] (rect)."""
+    dims = (mover.get('ref') or {}).get('dims_in')
+    if not dims:
+        return False
+    try:
+        vals = [float(v) for v in dims if v is not None]
+    except (TypeError, ValueError):
+        return False
+    if not vals:
+        return False
+    if len(vals) == 1:
+        return vals[0] > float(cfg.get('sleeve_round_max_in') or 16.0)
+    return max(vals) > float(cfg.get('sleeve_rect_max_in') or 10.0)
+
+
+def _clash_z(c):
+    for key in ('overlap_centroid', 'midpoint'):
+        v = c.get(key)
+        if v and len(v) >= 3:
+            try:
+                return float(v[2])
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _beam_zone(c, other, cfg):
+    """Which third of a beam's depth the clash crosses: 'top' / 'middle' /
+    'bottom', or None when the beam elevations or the clash Z are unknown."""
+    top, bot = other.get('top_ft'), other.get('bot_ft')
+    z = _clash_z(c)
+    if top is None or bot is None or z is None:
+        return None
+    try:
+        depth = float(top) - float(bot)
+        if depth <= 0:
+            return None
+        frac = (float(z) - float(bot)) / depth
+    except (TypeError, ValueError):
+        return None
+    edge = float(cfg.get('beam_edge_frac') or 0.30)
+    if frac <= edge:
+        return 'bottom'
+    if frac >= 1.0 - edge:
+        return 'top'
+    return 'middle'
+
+
+def _m1_dispatch(mover, other, flags, cfg):
+    """The v1 catch-all M1, split into 8 named Major sub-rules with the N-PT
+    point-fixture demotion at the head (v2 plan 5.1). Mover-class first, which
+    is how the NIUHTC populations were measured; first match wins. Reason
+    text is '' here -- the composer owns wording, keyed by the rule id."""
+    mk = mover['klass']
+    ocat = other['cat']
+    other_eq = (other['klass'] == 'equipment') or (ocat in _d.EQUIPMENT_CATS)
+
+    # N-PT: a point-mounted fixture is a field relocate, not a reroute.
+    if mk == 'fixture' and _is_point_fixture(mover, cfg):
+        flags.append('field_fix')
+        return ('Minor', 'N-PT', '', flags)
+
+    if mk == 'equipment' and other_eq:
+        return ('Major', 'M1-EQ-EQ', '', flags)
+    if mk == 'fixture' and other_eq:
+        return ('Major', 'M1-FIX-EQ', '', flags)
+    if mk == 'fixture':
+        return ('Major', 'M1-FIX-CURVE', '', flags)
+    if mk in ('fp_wet', 'fp_dry'):
+        return ('Major', 'M1-FP', '', flags)
+    if mk in ('gravity', 'gravity_vent', 'condensate', 'medgas'):
+        return ('Major', 'M1-SLOPE', '', flags)
+    if mk == 'equipment' or other_eq:
+        return ('Major', 'M1-EQ-SYS', '', flags)
+    rig_m = mover['rigidity'] if mover['rigidity'] is not None else 2
+    rig_o = other['rigidity'] if (not other['fixed']
+                                  and other['rigidity'] is not None) else 0
+    if min(rig_m, rig_o) >= 4:
+        return ('Major', 'M1-RIGID', '', flags)
+    return ('Major', 'M1-XING', '', flags)
+
+
+def _is_point_fixture(mover, cfg):
+    """A Lighting/Electrical Fixture whose NAME reads as a point device (exit
+    sign, wall receptacle/switch): relocated with a box shift, not a routing
+    change. Phase 2 replaces this name heuristic with a captured `mount`
+    fact; scope is Decision D1 (defaults.n_pt_*)."""
+    cat = mover.get('cat')
+    if cat not in ('Lighting Fixtures', 'Electrical Fixtures'):
+        return False
+    name = mover.get('desc') or ''
+    up = name.upper()
+    for w in _d.POINT_FIXTURE_NAME_WORDS:
+        if w in up:
+            return True
+    for rx in _POINT_FIXTURE_RES:
+        if rx.search(name):
+            return True
+    if cfg.get('n_pt_include_wall_devices') and cat == 'Electrical Fixtures':
+        toks = set(t for t in re.split(r'[^A-Z0-9]+', up) if t)
+        if toks & _d.WALL_DEVICE_NAME_WORDS:
+            return True
+    if cfg.get('n_pt_include_typical') and cat == 'Electrical Fixtures':
+        if up.strip() == 'TYPICAL':
+            return True
+    return False
+
+
+def _is_dup_suspect(c, pa, pb):
+    """Two equipment/mounted instances that share a family name, or carry a
+    placeholder type name, in the SAME source model: usually one nested /
+    double-placed / placeholder family, not two real units. A demotion (a
+    name is not proof); R-SELF already suppresses literal self-intersections."""
+    ra = c.get('ref_a') or {}
+    rb = c.get('ref_b') or {}
+    if (ra.get('source') or 'host') != (rb.get('source') or 'host'):
+        return False
+    ca, cb = pa['cat'], pb['cat']
+    if ca is None or ca != cb:
+        return False
+    if not (ca in _d.EQUIPMENT_CATS or ca in _d.MOUNTED_CATS):
+        return False
+    na = ra.get('name') or ''
+    nb = rb.get('name') or ''
+    if na and nb and na == nb:
+        return True
+    ph = _d.PLACEHOLDER_TYPE_NAMES
+    if na.strip().upper() in ph or nb.strip().upper() in ph:
+        return True
+    return False
 
 
 def _is_switchgear(mover):
@@ -863,31 +1176,60 @@ def _bulk_in(pa, pb):
 # band boundary -- the property the whole design hangs on)
 # ---------------------------------------------------------------------------
 
-def _sub_score(c, pa, pb, mover, cluster_n, cfg):
-    """Returns (list of {'k','v'} bars, clamped_total, raw_total)."""
+def _min_extent(box):
+    """Smallest of a [dx, dy, dz] overlap bounding box, or None."""
+    if not box:
+        return None
+    try:
+        vals = [float(v) for v in box if v is not None]
+    except (TypeError, ValueError):
+        return None
+    if not vals:
+        return None
+    return min(vals)
+
+
+def _sub_score(c, pa, pb, mover, other, cluster_n, cfg, code_ref):
+    """(bars, raw) for ordering WITHIN the band. The raw maps proportionally
+    across the band width in _score_one and can never cross a band boundary
+    (the property the whole design hangs on). v2 plan 5.4. All divisions use
+    float literals (Py2 integer-division trap); rounding via _round_half_away.
+
+    On rev-4 rescore of records with no captured geometry, pen/overlap/volume
+    are null: geometry falls back to a flat 4 and volume to 0 -- the terms
+    that spread the score are constraint, size, congestion, code. Real
+    geometry (Phase 2) fills the low end of each band."""
     kind = c.get('kind') or 'hard'
 
-    rig = None if mover is None else mover['rigidity']
-    constraint = 3 * rig if rig is not None else 4
+    # constraint: pair stiffness. A fixed wall/structure side weighs a full 5,
+    # so pipe-vs-wall outranks pipe-vs-mid-duct.
+    if mover is None:
+        constraint = 4
+    else:
+        rig_m = mover['rigidity'] if mover['rigidity'] is not None else 2
+        if other is not None and other.get('fixed'):
+            rig_o = 5
+        else:
+            rig_o = (other or {}).get('rigidity')
+            rig_o = rig_o if rig_o is not None else 0
+        constraint = 2 * rig_m + rig_o
 
     bulk = _bulk_in(pa, pb)
-    if bulk is None:
-        size = 2
-    elif bulk >= 24.0:
-        size = 8
-    elif bulk >= 12.0:
-        size = 5
-    elif bulk >= 6.0:
-        size = 3
-    else:
-        size = 1
+    full_in = float(cfg.get('size_full_in') or 30.0)
+    size_f = 2.0 if bulk is None else min(8.0, 8.0 * float(bulk) / full_in)
 
+    # Geometry / volume are None when uncaptured (every hard row on a rev-4
+    # rescore) -- an honest "not measured", NOT a fake constant. They then
+    # contribute 0 to raw and render "(not captured)" in the UI, so the score
+    # is spread by the terms that ARE known (constraint, size, congestion,
+    # code). Real geometry (Phase 2) fills each band's low end.
     pen = c.get('penetration_depth_in')
     if kind == 'hard':
-        if pen is None:
-            geometry = 4
+        if pen is not None:
+            geometry = min(8, _round_half_away(2.0 * float(pen)))
         else:
-            geometry = min(8, int(round(2 * float(pen))))
+            mn = _min_extent(c.get('overlap_bbox_in'))
+            geometry = min(6, _round_half_away(mn)) if mn is not None else None
     else:
         if c.get('is_contact'):
             geometry = 6
@@ -896,34 +1238,461 @@ def _sub_score(c, pa, pb, mover, cluster_n, cfg):
             if ratio is None:
                 geometry = 3
             else:
-                geometry = max(0, min(6, int(round(6 * (1.0 - ratio)))))
+                geometry = max(0, min(6, _round_half_away(6.0 * (1.0 - ratio))))
 
-    if cluster_n >= 20:
-        congestion = 6
-    elif cluster_n >= 10:
-        congestion = 4
-    elif cluster_n >= 5:
-        congestion = 2
+    vol = c.get('overlap_volume_cf')
+    if vol is None:
+        volume = None
     else:
-        congestion = 0
+        vfull = float(cfg.get('vol_full_cf') or 1.0)
+        try:
+            volume = min(6, _round_half_away(6.0 * (float(vol) / vfull) ** 0.5))
+        except (TypeError, ValueError):
+            volume = None
 
-    code = 0
-    if kind == 'clearance':
-        code = 6
-    elif mover is not None and mover['klass'] in ('gravity', 'grease',
-                                                  'gravity_vent', 'condensate',
-                                                  'medgas'):
-        code = 6
+    cfull = float(cfg.get('congest_full_n') or 20.0)
+    congestion_f = min(6.0, cluster_n * 6.0 / cfull)
 
+    code = 6 if (code_ref or kind == 'clearance') else 0
+
+    # RAW uses the FLOAT size/congestion terms so the score has real
+    # granularity (23 distinct integer raws collapse the score to ~40 values;
+    # the underlying dimensions are near-continuous). The BARS show the
+    # rounded integer for the UI. Uncaptured geometry/volume contribute 0 and
+    # render "(not captured)".
+    raw = (constraint + size_f + (geometry or 0) + (volume or 0)
+           + congestion_f + code)
     bars = [
         {'k': 'Mover constraint', 'v': constraint},
-        {'k': 'Size', 'v': size},
+        {'k': 'Size', 'v': int(_round_half_away(size_f))},
         {'k': 'Geometry', 'v': geometry},
-        {'k': 'Congestion', 'v': congestion},
+        {'k': 'Volume', 'v': volume},
+        {'k': 'Congestion', 'v': int(_round_half_away(congestion_f))},
         {'k': 'Code', 'v': code},
     ]
-    raw = constraint + size + geometry + congestion + code
+    # Drop uncaptured components (None) so the bars show only measured score
+    # terms; the uncaptured geometry/volume surface in the facts table as
+    # "(not captured)". Keeps both the current and the v2 UI clean.
+    bars = [b for b in bars if b['v'] is not None]
     return bars, raw
+
+
+# ---------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Composer: the 2-3 sentence "why it ranks" reason, headline, code_ref,
+# resolve_by, and the facts table -- all keyed off the tier rule id. The
+# reason is COMPOSED (WHAT / WHY / ACT + optional qualifier), never the v1
+# suffix concatenation. v2 plan 5.5.
+# ---------------------------------------------------------------------------
+
+_CAT_NOUN = {
+    'Ducts': 'duct', 'Duct Fittings': 'duct fitting',
+    'Duct Accessories': 'duct accessory', 'Flex Ducts': 'flex duct',
+    'Pipes': 'pipe', 'Pipe Fittings': 'pipe fitting',
+    'Pipe Accessories': 'pipe accessory', 'Flex Pipes': 'flex pipe',
+    'Conduits': 'conduit', 'Conduit Fittings': 'conduit fitting',
+    'Cable Trays': 'cable tray', 'Cable Tray Fittings': 'cable tray fitting',
+    'Sprinklers': 'sprinkler', 'Air Terminals': 'air terminal',
+    'Mechanical Equipment': 'mechanical unit',
+    'Electrical Equipment': 'electrical unit',
+    'Plumbing Fixtures': 'plumbing fixture',
+    'Lighting Fixtures': 'light fixture',
+    'Electrical Fixtures': 'electrical device',
+    'Walls': 'wall', 'Floors': 'floor', 'Ceilings': 'ceiling',
+    'Roofs': 'roof', 'Structural Framing': 'beam',
+    'Structural Columns': 'column', 'Structural Foundations': 'foundation',
+}
+
+
+def _truncate(s, n):
+    s = s or ''
+    if len(s) <= n:
+        return s
+    return s[:max(0, n - 3)].rstrip() + '...'
+
+
+def _sysword(p):
+    if not p:
+        return None
+    s = p.get('sys')
+    if not s:
+        return None
+    s = s.split(',')[0].strip()
+    return s or None
+
+
+def _desc_phrase(p):
+    """Short human phrase for one participant: '24 in supply duct',
+    'mechanical unit (4' x 2')', 'duct'. Degrades gracefully on missing
+    data and is length-capped so headlines fit."""
+    if not p:
+        return 'element'
+    cat = p.get('cat')
+    noun = _CAT_NOUN.get(cat) or (cat or 'element')
+    if cat in _d.EQUIPMENT_CATS or cat in _d.MOUNTED_CATS:
+        sysw = _sysword(p)
+        base = (sysw + ' ' + noun) if sysw else noun
+        nm = p.get('desc')
+        if nm and nm.strip().lower() not in ('none', '') and nm != cat:
+            base = base + ' (' + _truncate(nm, 22) + ')'
+        return _truncate(base, 46)
+    parts = []
+    dim = p.get('dim_in')
+    if dim is not None:
+        parts.append(_fmt_num(dim) + ' in')
+    sysw = _sysword(p)
+    if sysw:
+        parts.append(sysw)
+    parts.append(noun)
+    return _truncate(' '.join(parts), 46)
+
+
+def _level_of(c):
+    for r in (c.get('ref_a'), c.get('ref_b')):
+        if r and r.get('level'):
+            return r.get('level')
+    return None
+
+
+def _loc_phrase(c):
+    lvl = _level_of(c)
+    if lvl:
+        return ' on ' + _truncate(str(lvl), 24)
+    return ''
+
+
+def _confidence(c, pa, pb, mover):
+    if mover is None:
+        return 'degraded', 'no_mover'
+    if mover['rig_src'] == 'category':
+        return 'degraded', 'category'
+    if c.get('kind') == 'soft' and c.get('gap_inches') is None:
+        return 'degraded', 'soft_no_gap'
+    if pa['fixed_kind'] == 'unknown' or pb['fixed_kind'] == 'unknown':
+        return 'degraded', 'unknown_link'
+    return 'full', None
+
+
+def _relevance_class(rule, flags):
+    """The research taxonomy (error / deliberate / pseudo), plus two dbHMS
+    buckets (artifact, field), derived from the rule id + flags. Feeds the
+    noise benchmark in the calibration report."""
+    if rule in ('R-SELF', 'R-NEST', 'N-DUP'):
+        return 'artifact'
+    if rule == 'N1' or (rule == 'N4' and 'penetration_candidate' in flags):
+        return 'deliberate'
+    if rule == 'N2':
+        return 'pseudo'
+    if rule in ('R-FIELD', 'N-PT') or 'field_fix' in flags:
+        return 'field'
+    return 'error'
+
+
+def _qualifier(ctx):
+    mover = ctx['mover']
+    if ctx.get('confidence') == 'degraded':
+        cause = ctx.get('degrade_cause')
+        if cause == 'unknown_link':
+            return ('One side is an unmapped linked model; map its role in '
+                    'Settings to rank this properly.')
+        if cause == 'no_mover':
+            return None
+        return 'Sized from category alone here, so verify before acting on the order.'
+    if mover is not None and mover.get('near'):
+        return 'Note: a dimension sits within 15% of a rule boundary; verify it.'
+    return None
+
+
+def _compose(rule, band, ctx):
+    """Return (headline, reason, code_ref, resolve_by). Headline is the WHAT
+    sentence, length-capped for the meeting agenda."""
+    c = ctx['c']
+    mover = ctx['mover']
+    other = ctx['other']
+    loc = _loc_phrase(c)
+    md = _desc_phrase(mover) if mover is not None else 'this element'
+    od = _desc_phrase(other) if other is not None else 'the other element'
+    onoun = _CAT_NOUN.get((other or {}).get('cat')) or 'run' if other else 'run'
+    code_ref = None
+    resolve_by = 'next_cycle'
+    what = why = act = ''
+
+    if rule == 'C1':
+        what = '{0} runs through structure{1}.'.format(md, loc)
+        if mover is not None and mover['klass'] == 'grease':
+            why = ('A grease exhaust duct holds a code-fixed slope to the hood '
+                   '(IMC 506.3.7) and is welded liquid-tight, so it cannot bend '
+                   'around the member.')
+            code_ref = 'IMC 506.3.7'
+        else:
+            why = ('A gravity main holds a code-fixed slope (IPC 704.1) with no '
+                   'vertical reroute freedom around the member.')
+            code_ref = 'IPC 704.1'
+        act = ('Submit a structural penetration request or agree the reroute '
+               'before steel fabrication; this closes design options fastest '
+               'of anything on the list.')
+        resolve_by = 'steel_fab'
+    elif rule == 'C2':
+        what = '{0} conflicts with structure{1}.'.format(md, loc)
+        why = ('A reroute at this size consumes structural depth that is not '
+               'there; a change after the pour or steel-fabrication cutoff '
+               'means re-sleeved concrete or refabricated steel.')
+        act = ('Resolve it in section with the structural engineer before that '
+               'cutoff.')
+        resolve_by = 'steel_fab'
+    elif rule == 'C3':
+        what = '{0} and {1} collide{2}; both are size- or slope-locked.'.format(md, od, loc)
+        why = 'Neither system is a cheap mover, so there is no obvious side to give.'
+        act = ('Needs a section cut and an agreed elevation stack at the next '
+               'coordination meeting, not a modeler nudge.')
+    elif rule == 'C4':
+        what = '{0} penetrates {1} in into {2}{3}.'.format(
+            md, _fmt_num(c.get('penetration_depth_in')), od, loc)
+        why = ('Overlap this deep means the two routes were designed through the '
+               'same space; a nudge will not clear it.')
+        act = 'Re-plan the shared corridor before either run is fabricated.'
+    elif rule == 'M-CODE':
+        what = '{0} intrudes into the required clearance of {1}{2}.'.format(md, od, loc)
+        why = ('A consumed code clearance is an inspection failure even though '
+               'nothing physically touches.')
+        act = 'Recover the clearance before this area is signed off.'
+    elif rule == 'N3':
+        what = '{0} sits in or on {1}{2}.'.format(md, od, loc)
+        why = 'This reads as by-design mounting or bearing contact, not a routing clash.'
+        act = 'Verify the mounting or bearing detail; no reroute is needed.'
+        resolve_by = 'field'
+    elif rule == 'M2':
+        what = '{0} must route around structure{1}.'.format(md, loc)
+        why = ('It has to drop or rise to clear the member, and that fix window '
+               'closes at the pour or steel fabrication.')
+        act = 'Coordinate the offset with the structural engineer before that cutoff.'
+        resolve_by = 'steel_fab'
+    elif rule == 'M-RATED':
+        hr = (other or {}).get('fire_rating_hr')
+        rating = '{0}-hr '.format(_fmt_num(hr)) if hr else ''
+        onoun2 = _CAT_NOUN.get((other or {}).get('cat')) or 'assembly'
+        what = '{0} penetrates a {1}rated {2}{3}.'.format(md, rating, onoun2, loc)
+        why = ('A rated assembly requires a fire (or combination fire/smoke) '
+               'damper and an access door at the duct penetration, and the '
+               'damper changes both the opening size and the duct fabrication.')
+        act = ('Lock the damper and the opening with the architect before '
+               'ductwork fabrication release.')
+        code_ref = 'IMC 607.5.1'
+        resolve_by = 'duct_fab'
+    elif rule == 'M-PEN':
+        if ctx.get('pen_class') == 'partial':
+            what = '{0} stops part-way inside {1}{2}.'.format(md, od, loc)
+            why = ('A partial penetration cannot be closed with a sleeve: the '
+                   'routing or the assembly has to change, which makes this '
+                   'design work, not an opening-schedule item.')
+        else:
+            what = ('{0} passes fully through {1} but is too large for a '
+                    'standard sleeve{2}.'.format(md, od, loc))
+            why = ('An opening this size needs a framed or linteled opening '
+                   'coordinated with the design team, not a field sleeve.')
+        act = ('Resolve the routing or the opening this cycle, before the '
+               'opening package for this level issues.')
+        resolve_by = 'sleeve_pkg'
+    elif rule == 'M-STRUCT-ZONE':
+        fl = ctx.get('flags') or []
+        zone = ('top' if 'zone_top' in fl
+                else ('bottom' if 'zone_bottom' in fl else 'middle'))
+        what = '{0} crosses a beam in its {1} third{2}.'.format(md, zone, loc)
+        if zone == 'middle':
+            why = ('A penetration through the middle third of a beam web is '
+                   'often an engineerable opening, but only the structural '
+                   'engineer can approve it.')
+            act = 'Send the opening to structural for sign-off before steel fabrication.'
+        else:
+            why = ('The {0} third is a flexural zone; a penetration here is '
+                   'usually not permissible without a redesign.'.format(zone))
+            act = 'Reroute the run or raise an RFI to structural before steel fabrication.'
+        resolve_by = 'steel_fab'
+    elif rule == 'N1':
+        rated = bool(other and other.get('is_rated') is True)
+        thick = other.get('thickness_in') if other else None
+        thick_ph = ' the {0} in'.format(_fmt_num(thick)) if thick else ''
+        what = '{0} passes through{1} {2}{3}.'.format(md, thick_ph, od, loc)
+        if rated and mover is not None and mover.get('cat') not in _d.DUCT_CATS:
+            why = ('It crosses a rated assembly, so it needs a listed '
+                   'through-penetration firestop system at the opening, not '
+                   'just a sleeve.')
+            act = 'Schedule the firestop detail with the opening package for this level.'
+            code_ref = 'IBC 714.4.1'
+        else:
+            why = ('This reads as an intended penetration of an architectural '
+                   'assembly, not a routing error.')
+            act = 'Confirm a sleeve is on the penetration schedule for this level.'
+        resolve_by = 'sleeve_pkg'
+    elif rule == 'M4':
+        n = ctx['cluster_n']
+        r = _fmt_num(ctx['radius'])
+        what = 'This clash sits in a congested zone: {0} clashes within {1} ft{2}.'.format(n, r, loc)
+        why = ('Density like this means rack-level rework, not {0} separate field '
+               'fixes; it is the multi-trade decision the ASCE Medium band '
+               'describes.'.format(n))
+        act = 'Resolve the zone as one section study at the next coordination meeting.'
+    elif rule == 'N2':
+        what = '{0} and {1} pinch only at their insulation{2}.'.format(md, od, loc)
+        why = 'The metal clears; the jacket is tight. That is detailing, not routing.'
+        act = 'Adjust the insulation detail; no reroute is needed.'
+        resolve_by = 'field'
+    elif rule == 'N4':
+        flags = ctx.get('flags') or []
+        if 'penetration_candidate' in flags:
+            what = '{0} nearly touches {1}{2}.'.format(md, od, loc)
+            why = ('This is an imminent penetration of an architectural surface, '
+                   'not a consumed clearance.')
+            act = 'Add it to the sleeve schedule.'
+            resolve_by = 'sleeve_pkg'
+        elif mover is not None and mover['klass'] == 'gravity':
+            what = '{0} seats at {1}{2}.'.format(md, od, loc)
+            why = ('A gravity fitting sits at near-zero gap to the surface it '
+                   'drains, by design.')
+            act = 'Verify the rim elevation, not the clearance.'
+            resolve_by = 'field'
+        else:
+            what = '{0} nearly touches {1}{2}.'.format(md, od, loc)
+            why = 'This reads as by-design seating against the surface, not a consumed clearance.'
+            act = 'Verify the mounting; no reroute is needed.'
+            resolve_by = 'field'
+    elif rule == 'M3':
+        pct = int(_round_half_away((ctx.get('gap_ratio') or 0.0) * 100.0))
+        what = '{0} intrudes into the clearance around {1}{2}.'.format(md, od, loc)
+        why = ('Only {0}% of the required gap remains; a clearance this tight '
+               'predicts a field or inspection problem.'.format(pct))
+        act = 'Recover the gap at the next coordination meeting.'
+    elif rule == 'N-DUP':
+        what = '{0} and {1} overlap and share a name or placeholder type{2}.'.format(md, od, loc)
+        why = ('This pattern is usually a nested, double-placed, or placeholder '
+               'family rather than two real units.')
+        act = ('Verify it once in the model this cycle; if they are two genuine '
+               'units, comment here and it becomes a placement conflict.')
+    elif rule == 'N-PT':
+        what = '{0} is a point device hitting {1}{2}.'.format(md, od, loc)
+        why = ('It relocates with a box shift at rough-in; the {0} is the '
+               'stationary side.'.format(onoun))
+        act = 'Move the device at install and note the RCP if the visible location changes.'
+        resolve_by = 'field'
+    elif rule == 'M1-EQ-EQ':
+        what = '{0} and {1} occupy the same space{2}.'.format(md, od, loc)
+        why = ('Equipment locations harden early around pads, hangers, and '
+               'connected services, so a late move re-does all of it.')
+        act = ('Relocate one unit and re-verify its service access before pad and '
+               'hanger layout is released.')
+        resolve_by = 'gear_setting'
+    elif rule == 'M1-FIX-EQ':
+        what = '{0} is locked to the ceiling grid over {1}{2}.'.format(md, od, loc)
+        why = ('Moving the fixture means an architect-approved RCP change; moving '
+               'the unit means new hangers and connections, so it is a two-party '
+               'decision either way.')
+        act = 'Settle it before the ceiling grid is installed in this area.'
+        resolve_by = 'ceiling_close'
+    elif rule == 'M1-FIX-CURVE':
+        what = '{0} conflicts with {1} in the plenum{2}.'.format(md, od, loc)
+        why = ('The fixture is fixed to the RCP grid, so the routed run is the '
+               'side that moves; plenum space above the grid is the scarce '
+               'resource.')
+        act = 'Reroute the run or relocate the fixture on the RCP before the grid closes.'
+        resolve_by = 'ceiling_close'
+    elif rule == 'M1-FP':
+        what = '{0} conflicts with {1}{2}.'.format(md, od, loc)
+        why = ('Sprinkler mains and branches re-trigger spacing and obstruction '
+               'checks when they move, so an FP relocation is never free.')
+        act = ('Coordinate the new routing with the sprinkler contractor before '
+               'their shop drawings release.')
+    elif rule == 'M1-SLOPE':
+        what = '{0} is slope-bound and cannot simply rise or dip around {1}{2}.'.format(md, od, loc)
+        code_ref = _d.SLOPE_CODE_BY_KLASS.get(mover['klass']) if mover is not None else None
+        why = ('Gravity, condensate, and vent lines hold a continuous pitch ({0}), '
+               'so the pressurized or ducted side is almost always the '
+               'mover.'.format(code_ref or 'IPC 704.1'))
+        act = ('Reroute {0} this cycle; if the slope line must move, re-check its '
+               'invert end to end.'.format(od))
+    elif rule == 'M1-EQ-SYS':
+        what = '{0} and {1} contend for the same space{2}.'.format(md, od, loc)
+        why = ('Placed equipment is involved, so its location is a coordination '
+               'decision shared between trades, not a field nudge.')
+        act = ('Agree the unit location (or the other side) this cycle, before '
+               'fabrication and gear setting.')
+        resolve_by = 'gear_setting'
+    elif rule == 'M1-RIGID':
+        what = '{0} and {1} cross and neither reroutes cheaply{2}.'.format(md, od, loc)
+        why = ('Two low-slack systems in one envelope is the riser-congestion '
+               'pattern that generates RFIs when left to the field.')
+        act = 'Pick who drops in section at the next coordination meeting.'
+    elif rule == 'M1-XING':
+        what = '{0} crosses {1} at the same elevation{2}.'.format(md, od, loc)
+        why = ('One of the two has to drop or rise; the cheaper mover is the '
+               'smaller or more flexible run, and it only costs money if it waits '
+               'for fabrication.')
+        act = 'Pick the mover this cycle and hold the elevation on both shop sets.'
+    elif rule == 'FB' and mover is None:
+        what = 'Neither side of this pair is a dbHMS element that can move{0}.'.format(loc)
+        why = 'There is nothing here for us to reroute.'
+        act = 'Flag it to the design team.'
+    else:  # FB residual
+        what = '{0} crosses {1}{2}.'.format(md, od, loc)
+        why = 'A minor conflict where {0} is the cheap mover.'.format(md)
+        act = 'Reroute it at the model or in the field.'
+        resolve_by = 'field'
+
+    # Slope class is a measured fact, so any rule whose mover is a code-slope
+    # system may cite it (keeps the code bar and the citation in lock-step).
+    if code_ref is None and mover is not None:
+        code_ref = _d.SLOPE_CODE_BY_KLASS.get(mover['klass'])
+
+    q = _qualifier(ctx)
+    reason = ' '.join([s for s in (what, why, act, q) if s])
+    headline = _truncate(what, 90)
+    return headline, reason, code_ref, resolve_by
+
+
+def _build_facts(ctx, rule, code_ref):
+    """Ordered {'k','v','unit','method'} rows for the UI facts table.
+    DERIVED-ONLY: nothing in the engine ever reads this back. A null `v`
+    renders as '(not captured)' in the UI."""
+    c = ctx['c']
+    mover = ctx['mover']
+    other = ctx['other']
+    facts = [{'k': 'Rule', 'v': rule}]
+    if mover is not None:
+        facts.append({'k': 'Mover', 'v': _desc_phrase(mover)})
+    if other is not None:
+        facts.append({'k': 'Other side', 'v': _desc_phrase(other)})
+    sysw = _sysword(mover) if mover is not None else None
+    if sysw:
+        facts.append({'k': 'System', 'v': sysw})
+    pen = c.get('penetration_depth_in')
+    # Surface the engine's own read of the depth (the same 'partial'/'full'
+    # class that drives M-PEN) so the facts table shows WHAT the number means,
+    # not just the number. Only when both depth and thickness were captured.
+    pen_method = {'partial': 'partial - stops inside',
+                  'full': 'full - passes through'}.get(ctx.get('pen_class'))
+    pen_row = {'k': 'Penetration', 'v': (None if pen is None else _fmt_num(pen)),
+               'unit': 'in'}
+    if pen_method:
+        pen_row['method'] = pen_method
+    facts.append(pen_row)
+    vol = c.get('overlap_volume_cf')
+    facts.append({'k': 'Overlap', 'v': (None if vol is None else _fmt_num(vol)),
+                  'unit': 'cf'})
+    if ctx['kind'] == 'soft':
+        g = c.get('gap_inches')
+        facts.append({'k': 'Gap', 'v': (None if g is None else _fmt_num(g)),
+                      'unit': 'in', 'method': c.get('gap_method')})
+    if ctx['cluster_n']:
+        facts.append({'k': 'Cluster', 'v': '{0} within {1} ft'.format(
+            ctx['cluster_n'], _fmt_num(ctx['radius']))})
+    if code_ref:
+        facts.append({'k': 'Code', 'v': code_ref})
+    lvl = _level_of(c)
+    if lvl:
+        facts.append({'k': 'Level', 'v': _truncate(str(lvl), 30)})
+    return facts
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +1703,7 @@ def _score_one(c, cluster_n, cfg, prev_rule):
     pa = _participant(c.get('ref_a'), cfg)
     pb = _participant(c.get('ref_b'), cfg)
     mover = _mover(pa, pb)
+    other = _other(pa, pb, mover) if mover is not None else None
 
     # Layer A (manual override beats every rule)
     override = c.get('suppress_override')
@@ -944,33 +1714,34 @@ def _score_one(c, cluster_n, cfg, prev_rule):
     else:
         sup_rule, sup_reason = _layer_a(c, pa, pb, cluster_n, cfg)
 
-    band, rule, reason, flags = _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule)
+    band, rule, _reason0, flags = _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule)
 
-    bars, raw = _sub_score(c, pa, pb, mover, cluster_n, cfg)
+    confidence, cause = _confidence(c, pa, pb, mover)
+    ctx = {
+        'c': c, 'mover': mover, 'other': other,
+        'kind': c.get('kind') or 'hard', 'cluster_n': cluster_n,
+        'radius': cfg.get('cluster_radius_ft') or 5.0, 'flags': flags,
+        'confidence': confidence, 'degrade_cause': cause,
+        'gap_ratio': _gap_ratio(c),
+        'pen_class': (_pen_class(c, other, cfg) if other is not None else None),
+    }
+    headline, reason, code_ref, resolve_by = _compose(rule, band, ctx)
+
+    bars, raw = _sub_score(c, pa, pb, mover, other, cluster_n, cfg, code_ref)
     bands = cfg.get('bands') or _d.DEFAULTS['bands']
     base, top = bands.get(band, (8, 39))
-    score = base + max(0, min(top - base, raw))
+    raw_max = float(cfg.get('raw_realistic_max') or 36.0)
+    frac = 0.0 if raw_max <= 0 else min(1.0, raw / raw_max)
+    score = base + _round_half_away((top - base) * frac)
+    if score < base:
+        score = base
+    elif score > top:
+        score = top
 
-    confidence = 'full'
-    if mover is None:
-        confidence = 'degraded'
-    elif mover['rig_src'] == 'category':
-        confidence = 'degraded'
-    elif (c.get('kind') == 'soft' and c.get('gap_inches') is None):
-        confidence = 'degraded'
-    elif pa['fixed_kind'] == 'unknown' or pb['fixed_kind'] == 'unknown':
-        confidence = 'degraded'
+    facts = _build_facts(ctx, rule, code_ref)
+    rb_label = _d.DEADLINES.get(resolve_by) if resolve_by else None
 
-    if confidence == 'degraded':
-        reason += ' (estimated from categories; re-run detection for system/size detail)'
-    if mover is not None and mover.get('near'):
-        reason += ' (near a size threshold: verify dimensions)'
-
-    mover_side = None
-    if mover is pa:
-        mover_side = 'a'
-    elif mover is pb:
-        mover_side = 'b'
+    mover_side = 'a' if mover is pa else ('b' if mover is pb else None)
 
     return {
         'v': 1,
@@ -979,7 +1750,13 @@ def _score_one(c, cluster_n, cfg, prev_rule):
         'tier': band.lower(),
         'rule': rule,
         'score': score,
+        'headline': headline,
         'reason': reason,
+        'code_ref': code_ref,
+        'resolve_by': resolve_by,
+        'resolve_by_label': rb_label,
+        'relevance_class': _relevance_class(rule, flags),
+        'facts': facts,
         'brk': bars,
         'suppressed': sup_rule is not None,
         'suppress_rule': sup_rule,
@@ -1009,7 +1786,10 @@ def _fallback_importance(cfg):
         'v': 1, 'config_rev': cfg.get('rev', 1),
         'band': 'Minor', 'tier': 'minor', 'rule': 'ERR',
         'score': base,
+        'headline': 'Scoring failed for this clash.',
         'reason': 'Scoring failed for this clash; showing at the Minor floor.',
+        'code_ref': None, 'resolve_by': None, 'resolve_by_label': None,
+        'relevance_class': 'error', 'facts': [{'k': 'Rule', 'v': 'ERR'}],
         'brk': [], 'suppressed': False, 'suppress_rule': None,
         'suppress_reason': None, 'flags': [], 'confidence': 'degraded',
         'features': {},

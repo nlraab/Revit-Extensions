@@ -159,7 +159,9 @@ class RigidityTests(unittest.TestCase):
         imp = score_one(c)
         self.assertEqual(imp['features']['rigidity_src'], 'category')
         self.assertEqual(imp['confidence'], 'degraded')
-        self.assertIn('estimated from categories', imp['reason'])
+        # rev 4: the degraded note is a composed qualifier sentence, not the
+        # old parenthetical suffix.
+        self.assertIn('Sized from category', imp['reason'])
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +274,16 @@ class LayerATests(unittest.TestCase):
         clash_score.score_all(rows)
         self.assertFalse(any(c['importance']['suppressed'] for c in rows))
 
-    def test_r_graze_dormant_until_depth_ships(self):
+    def test_r_graze_needs_a_measured_boolean_overlap(self):
         a = ref(element_id=1, category='Conduits', dims_in=[1.5])
         duct = ref(element_id=2, category='Ducts', dims_in=[16.0, 12.0])
-        c = clash(a, duct)                      # no penetration_depth_in key
+        c = clash(a, duct)                      # no geometry captured
         self.assertFalse(score_one(c)['suppressed'])
-        c2 = clash(a, duct, penetration_depth_in=0.2)
-        imp2 = score_one(c2)
-        self.assertEqual(imp2['suppress_rule'], 'R-GRAZE')
+        # Depth alone is not enough (could be a bbox proxy); R-GRAZE needs the
+        # measured boolean overlap to be both shallow AND small.
+        c2 = clash(a, duct, penetration_depth_in=0.2, overlap_volume_cf=0.005,
+                   geom_method='boolean')
+        self.assertEqual(score_one(c2)['suppress_rule'], 'R-GRAZE')
 
     def test_r_graze_never_fires_against_structure(self):
         pipe = ref(element_id=1, category='Pipes',
@@ -320,12 +324,15 @@ class TierScenarioTests(unittest.TestCase):
         self.assertIn('escalate_candidate', imp['flags'])
         self.assertIn('IPC 704.1', imp['reason'])
 
-    def test_s2_duct_main_vs_domestic_is_major_m1(self):
+    def test_s2_duct_main_vs_domestic_is_major_curve_crossing(self):
+        # rev 4: the v1 catch-all M1 split into named sub-rules. A pressure
+        # pipe crossing a big duct (neither equipment/fixture/slope) is the
+        # curve-vs-curve crossing sub-rule.
         duct = ref(element_id=1, category='Ducts', dims_in=[24.0, 20.0])
         pipe = ref(element_id=2, category='Pipes',
                    sys_class='Domestic Cold Water', dims_in=[4.0])
         imp = score_one(clash(duct, pipe))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-XING'))
 
     def test_s8_tray_vs_beam_is_major_m2(self):
         tray = ref(category='Cable Trays', dims_in=[24.0, 4.0])
@@ -383,7 +390,9 @@ class TierScenarioTests(unittest.TestCase):
         stair = ref(source='link:Architectural', element_id=8,
                     category='Stairs')
         imp = score_one(clash(duct, stair))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        # Still Major (not the N1 penetration demotion); the rev-4 M1 split
+        # lands it in the residual curve-crossing sub-rule.
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-XING'))
 
     def test_congested_arch_wall_zone_stays_on_the_sleeve_schedule(self):
         # REVERSED by the NIUHTC stage-1 retune (approved 2026-07-02): a
@@ -487,17 +496,19 @@ class TierScenarioTests(unittest.TestCase):
         self.assertEqual(imp2['band'], 'Major')
 
     def test_n3_switchgear_in_a_wall_is_not_mounting_adjacency(self):
+        # Gear stays Major (electrical-room layout, not mounting). rev 4:
+        # equipment reaching M1 lands in the equipment-placement sub-rule.
         gear = ref(category='Electrical Equipment', name='MSB-1 Switchboard')
         imp = score_one(clash(gear, ref(**ARCH_WALL)))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-SYS'))
 
     def test_switchgear_gate_matches_tokens_not_substrings(self):
-        # CT-1 / CT.1 / CT1 / TX 1 are gear (stay M1); ATX-1 and a
-        # manufacturer name containing 'mcc' are not (demote to N3).
+        # CT-1 / CT.1 / CT1 / TX 1 are gear (stay Major, M1-EQ-SYS); ATX-1
+        # and a manufacturer name containing 'mcc' are not (demote to N3).
         for name in ('CT-1', 'CT.1', 'CT1', 'TX 1', 'MSB-1'):
             gear = ref(category='Electrical Equipment', name=name)
             imp = score_one(clash(gear, ref(**ARCH_WALL)))
-            self.assertEqual(imp['rule'], 'M1', name)
+            self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-SYS'), name)
         for name in ('ATX-1 Air Terminal Box', 'McCarthy Panel 42'):
             not_gear = ref(category='Electrical Equipment', name=name)
             imp = score_one(clash(not_gear, ref(**ARCH_WALL)))
@@ -534,11 +545,12 @@ class TierScenarioTests(unittest.TestCase):
 
     def test_fixture_vs_rigid_curve_stays_major(self):
         # RCP-locked troffer vs a duct: the duct must move - real plenum
-        # coordination, not a field fix (judge patch).
+        # coordination, not a field fix (judge patch). rev 4: a grid fixture
+        # (not a point device) vs a curve is the fixture-vs-curve sub-rule.
         light = ref(element_id=1, category='Lighting Fixtures')
         duct = ref(element_id=2, category='Ducts', dims_in=[16.0, 12.0])
         imp = score_one(clash(light, duct))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-FIX-CURVE'))
 
     def test_fixture_vs_small_device_falls_to_flagged_field_fix(self):
         light = ref(element_id=1, category='Lighting Fixtures')
@@ -558,25 +570,27 @@ class TierScenarioTests(unittest.TestCase):
         self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C1'))
         self.assertEqual(imp['features']['fixed_b'], 'structural')
 
-    def test_config_rev_is_3(self):
+    def test_config_rev_is_current(self):
         imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
                               ref(**BEAM)))
-        self.assertEqual(imp['config_rev'], 3)
+        self.assertEqual(imp['config_rev'], 7)
 
     def test_c3_equipment_vs_gravity_is_major_not_critical(self):
         # Stage 2: equipment placement vs a gravity main is coordination
-        # work, not two code-fixed routings.
+        # work, not two code-fixed routings. rev 4: the equipment-placement
+        # sub-rule (exactly one side is equipment).
         ahu = ref(element_id=1, category='Mechanical Equipment', name='AHU')
         grav = ref(element_id=2, sys_class='Sanitary', dims_in=[4.0])
         imp = score_one(clash(ahu, grav))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-SYS'))
 
     def test_small_vent_vs_storm_leader_is_major_not_critical(self):
+        # rev 4: a slope-bound mover (the vent) lands in the M1 slope sub-rule.
         vent = ref(element_id=1, sys_class='Vent', dims_in=[2.0])
         storm = ref(element_id=2, sys_class='Other', sys_abbr='ST',
                     dims_in=[4.0])
         imp = score_one(clash(vent, storm))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-SLOPE'))
 
     def test_n4_floor_drain_seated_at_slab(self):
         drain = ref(category='Pipe Fittings', sys_class='Sanitary',
@@ -704,11 +718,15 @@ class InvariantTests(unittest.TestCase):
         clash_score.score_all([c])
         self.assertIn('importance', c)
 
-    def test_brk_values_sum_to_features_sub_raw(self):
+    def test_brk_values_approximate_features_sub_raw(self):
+        # rev 4: the bars show the INTEGER-rounded score components while
+        # sub_raw is the float total (continuous size/congestion give the
+        # score real granularity). Uncaptured geometry/volume render as None.
+        # The bars therefore approximate sub_raw within per-term rounding.
         imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
                               ref(**BEAM)))
-        self.assertEqual(sum(b['v'] for b in imp['brk']),
-                         imp['features']['sub_raw'])
+        bar_sum = sum(b['v'] for b in imp['brk'] if b['v'] is not None)
+        self.assertAlmostEqual(bar_sum, imp['features']['sub_raw'], delta=3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -799,6 +817,440 @@ class ReportTests(unittest.TestCase):
         second = dict(score_one(c))
         self.assertEqual(first['score'], second['score'])
         self.assertEqual(first['rule'], second['rule'])
+
+
+# ---------------------------------------------------------------------------
+# rev 4 (importance v2 Phase 1): M1 split, N-PT / N-DUP demotions, sys_class
+# set-matching, and the composed 2-3 sentence reasons.
+# ---------------------------------------------------------------------------
+
+class M1PartitionTests(unittest.TestCase):
+    def _duct(self, eid=2):
+        return ref(element_id=eid, category='Ducts', dims_in=[24.0, 20.0])
+
+    def test_eq_eq_two_equipment(self):
+        a = ref(element_id=1, category='Mechanical Equipment', name='AHU-1')
+        b = ref(element_id=2, category='Mechanical Equipment', name='AHU-2')
+        imp = score_one(clash(a, b))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-EQ'))
+        self.assertEqual(imp['resolve_by'], 'gear_setting')
+
+    def test_eq_sys_one_equipment(self):
+        equip = ref(element_id=1, category='Mechanical Equipment', name='FCU')
+        duct = self._duct()
+        imp = score_one(clash(equip, duct))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-SYS'))
+
+    def test_fix_eq_grid_fixture_vs_equipment(self):
+        light = ref(element_id=1, category='Lighting Fixtures', name='R8')
+        equip = ref(element_id=2, category='Mechanical Equipment', name='VAV-3')
+        imp = score_one(clash(light, equip))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-FIX-EQ'))
+
+    def test_fp_sprinkler_main_mover(self):
+        spr = ref(element_id=1, category='Pipes', sys_class='Fire Protection Wet',
+                  dims_in=[6.0])
+        duct = self._duct()
+        imp = score_one(clash(spr, duct))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-FP'))
+
+    def test_slope_gravity_mover_cites_code(self):
+        vent = ref(element_id=1, sys_class='Vent', dims_in=[2.0])
+        duct = self._duct()
+        imp = score_one(clash(vent, duct))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-SLOPE'))
+        self.assertEqual(imp['code_ref'], 'IPC 905.2')
+        # code bar and citation move in lock-step.
+        code_bar = [b['v'] for b in imp['brk'] if b['k'] == 'Code'][0]
+        self.assertEqual(code_bar, 6)
+
+    def test_rigid_two_big_ducts(self):
+        d1 = ref(element_id=1, category='Ducts', dims_in=[30.0, 20.0])
+        d2 = ref(element_id=2, category='Ducts', dims_in=[26.0, 20.0])
+        imp = score_one(clash(d1, d2))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-RIGID'))
+
+    def test_xing_curve_crossing_has_no_code_bar(self):
+        pipe = ref(element_id=1, category='Pipes',
+                   sys_class='Domestic Cold Water', dims_in=[3.0])
+        duct = self._duct()
+        imp = score_one(clash(pipe, duct))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-XING'))
+        self.assertIsNone(imp['code_ref'])
+        code_bar = [b['v'] for b in imp['brk'] if b['k'] == 'Code'][0]
+        self.assertEqual(code_bar, 0)
+
+
+class NPTDemotionTests(unittest.TestCase):
+    def _duct(self):
+        return ref(element_id=2, category='Ducts', dims_in=[24.0, 20.0])
+
+    def test_exit_sign_demotes_to_minor(self):
+        exit_sign = ref(element_id=1, category='Lighting Fixtures',
+                        name='#3 (EXIT)')
+        imp = score_one(clash(exit_sign, self._duct()))
+        self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N-PT'))
+        self.assertIn('field_fix', imp['flags'])
+        self.assertEqual(imp['relevance_class'], 'field')
+
+    def test_wall_device_demotes_option_a(self):
+        gfi = ref(element_id=1, category='Electrical Fixtures', name='GFI')
+        imp = score_one(clash(gfi, self._duct()))
+        self.assertEqual(imp['rule'], 'N-PT')
+
+    def test_grid_fixture_stays_major(self):
+        # R8 is a grid-locked troffer, NOT a point device: stays Major.
+        light = ref(element_id=1, category='Lighting Fixtures', name='R8')
+        imp = score_one(clash(light, self._duct()))
+        self.assertEqual(imp['band'], 'Major')
+        self.assertNotEqual(imp['rule'], 'N-PT')
+
+    def test_wall_device_off_when_configured(self):
+        gfi = ref(element_id=1, category='Electrical Fixtures', name='GFI')
+        imp = score_one(clash(gfi, self._duct()),
+                        config={'n_pt_include_wall_devices': False})
+        self.assertNotEqual(imp['rule'], 'N-PT')   # strict scope: stays Major
+
+
+class NDupDemotionTests(unittest.TestCase):
+    def test_same_name_equipment_is_artifact_suspect(self):
+        a = ref(element_id=1, category='Mechanical Equipment', name='FCU-1')
+        b = ref(element_id=2, category='Mechanical Equipment', name='FCU-1')
+        imp = score_one(clash(a, b))
+        self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N-DUP'))
+        self.assertIn('family_artifact_suspect', imp['flags'])
+        self.assertEqual(imp['relevance_class'], 'artifact')
+
+    def test_placeholder_name_is_artifact_suspect(self):
+        a = ref(element_id=1, category='Mechanical Equipment', name='FCU-9')
+        b = ref(element_id=2, category='Mechanical Equipment', name='TYPICAL')
+        imp = score_one(clash(a, b))
+        self.assertEqual(imp['rule'], 'N-DUP')
+
+    def test_distinct_real_equipment_is_placement_conflict(self):
+        a = ref(element_id=1, category='Mechanical Equipment', name='AHU-1')
+        b = ref(element_id=2, category='Mechanical Equipment', name='AHU-2')
+        imp = score_one(clash(a, b))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-EQ'))
+
+    def test_same_name_ducts_are_not_dup_suspects(self):
+        # Two same-size duct segments named alike are NOT a family artifact;
+        # N-DUP is deliberately limited to equipment/mounted categories.
+        a = ref(element_id=1, category='Ducts', name='SA-1', dims_in=[24.0, 20.0])
+        b = ref(element_id=2, category='Ducts', name='SA-1', dims_in=[24.0, 20.0])
+        imp = score_one(clash(a, b))
+        self.assertNotEqual(imp['rule'], 'N-DUP')
+        self.assertEqual(imp['band'], 'Major')
+
+
+class SysClassSetMatchingTests(unittest.TestCase):
+    def test_multi_system_equipment_never_becomes_gravity(self):
+        # A pump carrying 'Sanitary' among several connectors must stay
+        # equipment (rigidity 4), not a rigidity-5 gravity main.
+        pump = ref(category='Mechanical Equipment', name='SP-1',
+                   sys_class='Supply Air,Hydronic Supply,Sanitary')
+        imp = score_one(clash(ref(**{'source': 'link:Structural',
+                                     'element_id': 900,
+                                     'category': 'Structural Framing'}), pump))
+        self.assertEqual(imp['features']['rigidity_b'], 4)
+        self.assertEqual(imp['features']['mover'], 'b')
+
+    def test_single_sanitary_pipe_is_still_gravity(self):
+        pipe = ref(category='Pipes', sys_class='Sanitary', dims_in=[4.0])
+        imp = score_one(clash(pipe, ref(**BEAM)))
+        self.assertEqual(imp['features']['rigidity_a'], 5)
+
+    def test_combined_waste_vent_pipe_is_gravity(self):
+        pipe = ref(category='Pipes', sys_class='Sanitary,Vent', dims_in=[4.0])
+        imp = score_one(clash(pipe, ref(**BEAM)))
+        self.assertEqual(imp['features']['rigidity_a'], 5)
+
+
+class ComposedReasonTests(unittest.TestCase):
+    """Every composed reason must be well-formed: a non-empty headline under
+    90 chars, 2-4 sentences, no unfilled {slots}, and a deadline label when a
+    resolve_by is set. Covers a representative clash per rule id."""
+
+    CASES = [
+        ('C1', clash(ref(sys_class='Sanitary', dims_in=[4.0]), ref(**BEAM))),
+        ('C2', clash(ref(category='Ducts', dims_in=[30.0, 20.0]), ref(**BEAM))),
+        ('C3', clash(ref(element_id=1, sys_class='Sanitary', dims_in=[4.0]),
+                     ref(element_id=2, category='Ducts', dims_in=[30.0, 20.0]))),
+        ('N1', clash(ref(category='Ducts', dims_in=[16.0, 12.0]), ref(**ARCH_WALL))),
+        ('M2', clash(ref(category='Cable Trays', dims_in=[24.0, 4.0]), ref(**BEAM))),
+        ('M1-EQ-EQ', clash(ref(element_id=1, category='Mechanical Equipment', name='A'),
+                           ref(element_id=2, category='Mechanical Equipment', name='B'))),
+        ('M1-XING', clash(ref(element_id=1, category='Pipes',
+                              sys_class='Domestic Cold Water', dims_in=[3.0]),
+                          ref(element_id=2, category='Ducts', dims_in=[24.0, 20.0]))),
+        ('N-PT', clash(ref(element_id=1, category='Lighting Fixtures', name='#1 (EXIT)'),
+                       ref(element_id=2, category='Ducts', dims_in=[24.0, 20.0]))),
+    ]
+
+    def test_reasons_are_well_formed(self):
+        for label, c in self.CASES:
+            imp = score_one(copy.deepcopy(c))
+            head = imp.get('headline')
+            reason = imp.get('reason')
+            self.assertTrue(head, label)
+            self.assertLessEqual(len(head), 90, label)
+            self.assertNotIn('{', head, label)
+            self.assertNotIn('{', reason, label)
+            self.assertNotIn('  ', reason, label)   # no double spaces
+            n = len([s for s in reason.replace('...', '').split('. ') if s.strip()])
+            self.assertTrue(2 <= n <= 4, '{0}: {1} sentences'.format(label, n))
+
+    def test_resolve_by_has_a_label(self):
+        for label, c in self.CASES:
+            imp = score_one(copy.deepcopy(c))
+            if imp.get('resolve_by'):
+                self.assertTrue(imp.get('resolve_by_label'), label)
+                self.assertIn(imp['resolve_by'], score_defaults.DEADLINES, label)
+
+    def test_facts_table_is_present_and_labels_uncaptured_geometry(self):
+        imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
+                              ref(**BEAM)))
+        keys = [f['k'] for f in imp['facts']]
+        self.assertIn('Rule', keys)
+        self.assertIn('Penetration', keys)
+        pen = [f for f in imp['facts'] if f['k'] == 'Penetration'][0]
+        self.assertIsNone(pen['v'])              # uncaptured -> null -> "(not captured)"
+
+
+class Phase2CaptureConsumptionTests(unittest.TestCase):
+    """The engine side of Phase 2: equipment/fixtures with no native dims
+    fall back to the captured bounding box for the SIZE term; routed curves
+    never do (a diagonal duct's AABB is fiction)."""
+
+    def test_equipment_bbox_feeds_size(self):
+        eq = ref(category='Mechanical Equipment', name='FCU',
+                 bbox_in=[48.0, 24.0, 12.0])
+        imp = score_one(clash(eq, ref(**BEAM)))
+        size = [b['v'] for b in imp['brk'] if b['k'] == 'Size'][0]
+        self.assertEqual(size, 8)          # 8 * 48/30 -> capped at 8
+
+    def test_max_dim_prefers_native_dims_over_bbox(self):
+        self.assertEqual(clash_score._max_dim_in(
+            {'category': 'Mechanical Equipment', 'dims_in': [10.0],
+             'bbox_in': [99.0, 99.0, 99.0]}), 10.0)
+
+    def test_routed_curve_never_uses_bbox(self):
+        self.assertIsNone(clash_score._max_dim_in(
+            {'category': 'Ducts', 'bbox_in': [99.0, 99.0, 99.0]}))
+
+    def test_equipment_bbox_fallback_value(self):
+        self.assertEqual(clash_score._max_dim_in(
+            {'category': 'Mechanical Equipment', 'bbox_in': [48.0, 24.0, 12.0]}),
+            48.0)
+
+    def test_no_bbox_no_dims_is_none(self):
+        self.assertIsNone(clash_score._max_dim_in(
+            {'category': 'Mechanical Equipment'}))
+
+
+class GeometryActivationTests(unittest.TestCase):
+    """Phase 2: the score consumes captured pair geometry, and the dormant
+    R-GRAZE / C4 rules wake -- guarded so they never misfire."""
+
+    def _ducts(self):
+        return (ref(element_id=1, category='Ducts', dims_in=[24.0, 20.0]),
+                ref(element_id=2, category='Ducts', dims_in=[24.0, 20.0]))
+
+    def test_geometry_term_uses_overlap_bbox_proxy(self):
+        a, b = self._ducts()
+        c = clash(a, b, overlap_bbox_in=[2.0, 10.0, 10.0])   # min extent 2 in
+        g = [x['v'] for x in score_one(c)['brk'] if x['k'] == 'Geometry']
+        self.assertEqual(g, [2])
+
+    def test_geometry_term_uses_boolean_depth(self):
+        a, b = self._ducts()
+        c = clash(a, b, penetration_depth_in=4.0, geom_method='boolean')
+        g = [x['v'] for x in score_one(c)['brk'] if x['k'] == 'Geometry']
+        self.assertEqual(g, [8])                              # min(8, 2*4)
+
+    def test_c4_no_longer_fires_on_mep_vs_mep(self):
+        # V3 fix: the intersection min-extent is the crossing element's size,
+        # not a penetration depth, so two crossing MEP runs are Major (M1),
+        # never Critical C4.
+        a, b = self._ducts()
+        imp = score_one(clash(a, b, penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual(imp['band'], 'Major')
+        self.assertNotEqual(imp['rule'], 'C4')
+
+    def test_c4_fires_deep_into_structure(self):
+        pipe = ref(element_id=1, category='Pipes',
+                   sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**BEAM),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C4'))
+
+    def test_c4_guard_duct_through_arch_wall_stays_n1(self):
+        # A deep-but-normal penetration of an arch wall must NOT flip Critical.
+        duct = ref(category='Ducts', dims_in=[16.0, 12.0])
+        imp = score_one(clash(duct, ref(**ARCH_WALL),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N1'))
+
+    def test_c4_guard_recessed_equipment_is_not_critical(self):
+        equip = ref(category='Mechanical Equipment', name='RTU')
+        imp = score_one(clash(equip, ref(**ARCH_WALL),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertNotEqual(imp['band'], 'Critical')
+
+    def test_r_graze_suppresses_measured_sliver(self):
+        a = ref(element_id=1, category='Conduits', dims_in=[1.5])
+        duct = ref(element_id=2, category='Ducts', dims_in=[16.0, 12.0])
+        c = clash(a, duct, penetration_depth_in=0.2, overlap_volume_cf=0.005,
+                  geom_method='boolean')
+        self.assertEqual(score_one(c)['suppress_rule'], 'R-GRAZE')
+
+    def test_r_graze_skips_wide_shallow_contact(self):
+        # Small depth but large volume (two parallel ducts touching along their
+        # length) is a real conflict, not modeling noise.
+        a = ref(element_id=1, category='Conduits', dims_in=[1.5])
+        duct = ref(element_id=2, category='Ducts', dims_in=[16.0, 12.0])
+        c = clash(a, duct, penetration_depth_in=0.2, overlap_volume_cf=0.5,
+                  geom_method='boolean')
+        self.assertFalse(score_one(c)['suppressed'])
+
+    def test_r_graze_never_on_bbox_proxy(self):
+        a = ref(element_id=1, category='Conduits', dims_in=[1.5])
+        duct = ref(element_id=2, category='Ducts', dims_in=[16.0, 12.0])
+        c = clash(a, duct, penetration_depth_in=0.2, overlap_volume_cf=0.005,
+                  geom_method='bbox')
+        self.assertFalse(score_one(c)['suppressed'])
+
+
+RATED_WALL = dict(source='link:Architectural', element_id=902, category='Walls',
+                  name='2HR Shaft wall', is_rated=True, thickness_in=8.0)
+BEAM_GEOM = dict(source='link:Structural', element_id=904,
+                 category='Structural Framing', name='W21 beam',
+                 top_ft=10.0, bot_ft=8.25)     # ~21 in deep
+
+
+class Phase3ArchRulesTests(unittest.TestCase):
+    """Phase 3: rated-assembly, penetration-class, and beam-zone rules keyed
+    off the captured wall/structure facts + Phase 2 penetration depth."""
+
+    def _wall(self, **extra):
+        w = dict(source='link:Architectural', element_id=910, category='Walls',
+                 name='Corridor wall', thickness_in=8.0)
+        w.update(extra)
+        return w
+
+    def test_m_rated_duct_through_rated_wall(self):
+        duct = ref(category='Ducts', dims_in=[16.0, 12.0])
+        imp = score_one(clash(duct, ref(**RATED_WALL)))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-RATED'))
+        self.assertEqual(imp['code_ref'], 'IMC 607.5.1')
+        self.assertEqual(imp['resolve_by'], 'duct_fab')
+
+    def test_pipe_through_rated_wall_gets_firestop_n1(self):
+        pipe = ref(category='Pipes', sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**RATED_WALL),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual(imp['rule'], 'N1')
+        self.assertEqual(imp['code_ref'], 'IBC 714.4.1')
+
+    def test_m_pen_partial_penetration(self):
+        duct = ref(category='Ducts', dims_in=[8.0, 6.0])
+        imp = score_one(clash(duct, ref(**self._wall()),
+                              penetration_depth_in=2.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-PEN'))
+
+    def test_m_pen_oversized_full_penetration(self):
+        big = ref(category='Ducts', dims_in=[30.0, 20.0])
+        imp = score_one(clash(big, ref(**self._wall()),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-PEN'))
+
+    def test_full_sleeve_within_range_stays_n1(self):
+        duct = ref(category='Ducts', dims_in=[8.0, 6.0])
+        imp = score_one(clash(duct, ref(**self._wall()),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N1'))
+
+    def test_structural_wall_reroutes_off_the_sleeve_path(self):
+        duct = ref(category='Ducts', dims_in=[16.0, 12.0])
+        shear = self._wall(name='Shear wall', is_structural=True)
+        imp = score_one(clash(duct, ref(**shear)))
+        self.assertEqual(imp['features']['fixed_b'], 'structural')
+        self.assertNotEqual(imp['rule'], 'N1')
+
+    def test_m_struct_zone_needs_real_penetration(self):
+        # V3 fix: a duct merely meeting the beam's underside (no deep measured
+        # penetration) is M2 "route around structure", not a zone escalation.
+        pipe = ref(category='Pipes', sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**BEAM_GEOM),
+                              overlap_centroid=[0.0, 0.0, 8.4]))   # no pen depth
+        self.assertNotEqual(imp['rule'], 'M-STRUCT-ZONE')
+        self.assertEqual(imp['band'], 'Major')
+
+    def test_m_struct_zone_middle_third_with_penetration(self):
+        pipe = ref(category='Pipes', sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**BEAM_GEOM), overlap_centroid=[0.0, 0.0, 9.1],
+                              penetration_depth_in=3.0, geom_method='boolean'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M-STRUCT-ZONE'))
+        self.assertIn('zone_middle', imp['flags'])
+
+    def test_m_struct_zone_bottom_third_escalates(self):
+        pipe = ref(category='Pipes', sys_class='Domestic Cold Water', dims_in=[3.0])
+        imp = score_one(clash(pipe, ref(**BEAM_GEOM), overlap_centroid=[0.0, 0.0, 8.4],
+                              penetration_depth_in=3.0, geom_method='boolean'))
+        self.assertEqual(imp['rule'], 'M-STRUCT-ZONE')
+        self.assertIn('zone_bottom', imp['flags'])
+        self.assertIn('escalate_candidate', imp['flags'])
+
+    def test_m_pen_skips_thin_finish_floor(self):
+        # A 36 in duct 'through' a 1/8 in finish floor is a modeling artifact,
+        # not a framed-opening event -- M-PEN must not fire; it falls to N1.
+        duct = ref(category='Ducts', dims_in=[36.0, 20.0])
+        finish = dict(source='link:Architectural', element_id=920, category='Floors',
+                      name='F9 Finish Floor', thickness_in=0.125)
+        imp = score_one(clash(duct, ref(**finish),
+                              penetration_depth_in=0.125, geom_method='boolean'))
+        self.assertNotEqual(imp['rule'], 'M-PEN')
+
+    def _pen_fact(self, imp):
+        return [f for f in imp['facts'] if f['k'] == 'Penetration'][0]
+
+    def test_facts_annotate_partial_penetration(self):
+        # The facts table surfaces the engine's own read of the depth so the
+        # number is legible: 2 in into an 8 in wall = "partial".
+        duct = ref(category='Ducts', dims_in=[8.0, 6.0])
+        imp = score_one(clash(duct, ref(**self._wall()),
+                              penetration_depth_in=2.0, geom_method='boolean'))
+        self.assertEqual(self._pen_fact(imp).get('method'),
+                         'partial - stops inside')
+
+    def test_facts_annotate_full_penetration(self):
+        duct = ref(category='Ducts', dims_in=[8.0, 6.0])
+        imp = score_one(clash(duct, ref(**self._wall()),
+                              penetration_depth_in=8.0, geom_method='boolean'))
+        self.assertEqual(self._pen_fact(imp).get('method'),
+                         'full - passes through')
+
+    def test_facts_no_pen_method_when_depth_uncaptured(self):
+        # No boolean pass -> no depth -> no class annotation (renders
+        # "(not captured)" with no misleading method text).
+        duct = ref(category='Ducts', dims_in=[16.0, 12.0])
+        imp = score_one(clash(duct, ref(**self._wall())))
+        self.assertIsNone(self._pen_fact(imp).get('method'))
+        self.assertIsNone(self._pen_fact(imp)['v'])
+
+    def test_pen_class_helper(self):
+        cfg = score_defaults.DEFAULTS
+        self.assertEqual(clash_score._pen_class(
+            {'penetration_depth_in': 7.0}, {'thickness_in': 8.0}, cfg), 'full')
+        self.assertEqual(clash_score._pen_class(
+            {'penetration_depth_in': 2.0}, {'thickness_in': 8.0}, cfg), 'partial')
+        self.assertIsNone(clash_score._pen_class(
+            {'penetration_depth_in': 2.0}, {}, cfg))
+
+    def test_config_rev_is_current(self):
+        imp = score_one(clash(ref(sys_class='Sanitary', dims_in=[4.0]),
+                              ref(**BEAM)))
+        self.assertEqual(imp['config_rev'], 7)
 
 
 if __name__ == '__main__':

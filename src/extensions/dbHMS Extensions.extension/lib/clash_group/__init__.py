@@ -291,11 +291,21 @@ def rollup(group, clashes_by_id, run_iso=None, config=None):
             congested = True
             break
 
+    level = _modal([_level_of(c) for c in members])
     return {
         'band': best_imp.get('band'),
         'score': best_imp.get('score'),
-        'reason': best_imp.get('reason'),
-        'level': _modal([_level_of(c) for c in members]),
+        # rev 4: the group gets its OWN composed 2-3 sentence narrative
+        # (composition / governing constraint / action + governing deadline),
+        # not a copy of one member's reason. The controlling member's code and
+        # deadline surface so the group card can show the governing item.
+        'reason': _group_reason(group, members, open_members, best_imp,
+                                congested, level),
+        'code_ref': best_imp.get('code_ref'),
+        'resolve_by': best_imp.get('resolve_by'),
+        'resolve_by_label': best_imp.get('resolve_by_label'),
+        'trades': _trades(members),
+        'level': level,
         'n_open': len(open_members),
         'n_resolved': len([c for c in members
                            if c.get('status') == 'Resolved']),
@@ -309,6 +319,55 @@ def rollup(group, clashes_by_id, run_iso=None, config=None):
         'congested': congested,
         'diameter_ft': _diameter_ft(mids),
     }
+
+
+def _trades(members):
+    out = []
+    for c in members:
+        t = c.get('assignee')
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _group_reason(group, members, open_members, best_imp, congested, level):
+    """The group's 2-3 sentence narrative. Mirrors clash_score's grammar:
+    S1 composition, S2 governing constraint, S3 action + governing deadline."""
+    n = len(members)
+    n_open = len(open_members)
+    trades = _trades(members)
+    if len(trades) >= 2:
+        trade_ph = ', {0} trades ({1})'.format(
+            len(trades), ', '.join(trades[:3]))
+    else:
+        trade_ph = ''
+    if group.get('axis') == 'cluster':
+        where = ' in one congested zone'
+    else:
+        anchor = group.get('anchor') or {}
+        a = anchor.get('name') or anchor.get('category')
+        where = ' anchored on {0}'.format(a) if a else ''
+    lvl = ' on {0}'.format(level) if level else ''
+    score = best_imp.get('score')
+    band = best_imp.get('band') or 'Minor'
+    s1 = '{0} clash{1}{2}{3}{4}; worst member scores {5} ({6}).'.format(
+        n, '' if n == 1 else 'es', trade_ph, where, lvl, score, band)
+
+    code = best_imp.get('code_ref')
+    if code:
+        s2 = ('The governing member carries a code constraint ({0}), so it '
+              'sets the priority for the set.'.format(code))
+    elif congested:
+        s2 = ('The zone is dense enough that fixes interact, so treat it as one '
+              'design decision rather than many separate ones.')
+    else:
+        s2 = ('The worst member sets the priority; clearing it usually clears '
+              'much of the set.')
+
+    rb = best_imp.get('resolve_by_label')
+    s3 = 'Resolve the set as one study{0}; {1} of {2} still open.'.format(
+        (' ' + rb) if rb else '', n_open, n)
+    return ' '.join([s1, s2, s3])
 
 
 def auto_title(group, members):

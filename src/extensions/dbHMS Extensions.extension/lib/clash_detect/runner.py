@@ -19,16 +19,49 @@ from clash_detect import linked
 
 
 # ---------------------------------------------------------------------------
+# Zero-row alarm diagnostics (v2 plan 5.7): a test that stored nothing must
+# never be silent. run_test returns (rows, diag); the diag records what each
+# side collected and whether every requested link role actually resolved.
+# ---------------------------------------------------------------------------
+
+def _requested_roles(test_dict):
+    """Link roles named in either side's source (e.g. 'Architectural')."""
+    roles = []
+    for side in ('set_a', 'set_b'):
+        src = (test_dict.get(side) or {}).get('source')
+        srcs = src if isinstance(src, list) else [src]
+        for s in srcs:
+            if s and str(s).startswith('link:'):
+                r = str(s).split(':', 1)[1]
+                if r not in roles:
+                    roles.append(r)
+    return roles
+
+
+def _role_instance_counts(doc, roles, role_map):
+    """{role: number of link instances mapped+loaded}, or None on error.
+    A requested role at 0 is the silent-failure signature."""
+    counts = {}
+    for r in roles:
+        try:
+            counts[r] = len(list(linked.links_for_role(doc, role_map, r)))
+        except Exception:
+            counts[r] = None
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
 def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
-             tess_cache=None, ins_cache=None, status=None):
-    """Run a single clash test and return a list of raw clash dicts.
+             tess_cache=None, ins_cache=None, status=None, geom_cache=None):
+    """Run a single clash test and return (rows, diag).
 
-    Each raw clash has:
+    `rows` is the list of raw clash dicts, each with:
         test_id, kind, ref_a, ref_b, midpoint, default_assignee
         (plus 'gap_inches' for soft clashes)
+    `diag` is the per-test diagnostics dict for the zero-row alarm.
 
     `log` is an optional callable that receives one-line diagnostic strings
     (e.g. pyrevit's `output.print_md`). Used to surface per-test counts so
@@ -59,6 +92,18 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
     tolerance_in = float(test_dict.get('tolerance_inches') or 0.0)
     default_assignee = test_dict.get('default_assignee')
 
+    diag = {
+        'test_id': test_id, 'test_name': test_name, 'kind': kind,
+        'roles_requested': _requested_roles(test_dict),
+        'roles_resolved': {}, 'side_a_elements': 0, 'side_b_elements': 0,
+        'rows': 0, 'skipped_reason': None,
+    }
+    try:
+        diag['roles_resolved'] = _role_instance_counts(
+            doc, diag['roles_requested'], role_map)
+    except Exception:
+        pass
+
     if log:
         log("**Test:** {}  ({}, tol={} in)".format(test_name, kind, tolerance_in))
         if trade_filter:
@@ -67,7 +112,8 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
     if kind == 'clearance':
         if log:
             log("  - skipped (clearance detection isn't implemented yet)")
-        return []
+        diag['skipped_reason'] = 'clearance_stub'
+        return [], diag
 
     if log:
         log("  - resolving set_a (source `{}`):".format(set_a.get('source', 'host')))
@@ -88,9 +134,11 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
     if trade_filter:
         a_buckets = _filter_buckets_by_trade(a_buckets, trade_filter, log)
 
+    a_total = sum(len(ab['elements']) for ab in a_buckets)
+    b_total = sum(len(bb['elements']) for bb in b_buckets)
+    diag['side_a_elements'] = a_total
+    diag['side_b_elements'] = b_total
     if log:
-        a_total = sum(len(ab['elements']) for ab in a_buckets)
-        b_total = sum(len(bb['elements']) for bb in b_buckets)
         log("  - set_a total: **{}** element(s) across {} bucket(s)".format(
             a_total, len(a_buckets)))
         log("  - set_b total: **{}** element(s) across {} bucket(s)".format(
@@ -100,13 +148,15 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
         if log:
             log("  - **no set_a elements** (every category came back empty, "
                 "or every element was filtered out by the trade filter)")
-        return []
+        diag['skipped_reason'] = 'side_a_empty'
+        return [], diag
     if not b_buckets:
         if log:
             log("  - **no set_b elements** (every category came back empty; "
                 "if this is a host-vs-link test, double-check the role "
                 "mapping in Settings)")
-        return []
+        diag['skipped_reason'] = 'side_b_empty'
+        return [], diag
 
     out = []
     for a_bucket in a_buckets:
@@ -117,6 +167,7 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
                     a_bucket['elements'], b_bucket['elements'],
                     a_bucket['link_instance'], b_bucket['link_instance'],
                     tess_cache=tess_cache, log=log, status=status,
+                    geom_cache=geom_cache,
                 )
             except Exception as ex:
                 if log:
@@ -148,11 +199,18 @@ def run_test(doc, test_dict, role_map, log=None, trade_filter=None,
                 for k in ('closest_point_a', 'closest_point_b'):
                     if pair.get(k) is not None:
                         clash[k] = _xyz_to_list(pair[k])
+                # Phase 2 pair geometry (already plain lists/floats/strings).
+                for k in ('overlap_bbox_in', 'overlap_volume_cf',
+                          'penetration_depth_in', 'overlap_centroid',
+                          'pen_class', 'geom_method'):
+                    if pair.get(k) is not None:
+                        clash[k] = pair[k]
                 out.append(clash)
 
+    diag['rows'] = len(out)
     if log:
         log("  - **total: {} clash(es)** for this test".format(len(out)))
-    return out
+    return out, diag
 
 
 # ---------------------------------------------------------------------------
@@ -244,11 +302,12 @@ def _resolve_one_source(doc, source, categories, role_map, log=None):
 
 def _run_detection(doc, kind, tolerance_in,
                    set_a_elems, set_b_elems,
-                   a_link, b_link, tess_cache=None, log=None, status=None):
+                   a_link, b_link, tess_cache=None, log=None, status=None,
+                   geom_cache=None):
     if kind == 'hard':
         return hard_mod.find_hard_clashes(
             doc, set_a_elems, set_b_elems, a_link, b_link,
-            log=log, progress=status,
+            log=log, progress=status, geom_cache=geom_cache,
         )
     if kind == 'soft':
         return soft_mod.find_soft_clashes(

@@ -23,7 +23,7 @@ real intersection always survives it.
 
 import time
 
-from clash_detect import broadphase, linked
+from clash_detect import broadphase, linked, pairgeom
 
 # Broad-phase safety pad (feet) for hard tests: bboxes from Revit are
 # already conservative; this covers float fuzz on touching pairs.
@@ -34,7 +34,7 @@ _PROGRESS_EVERY_S = 10.0
 
 def find_hard_clashes(doc, set_a_elements, set_b_elements,
                       a_link_instance=None, b_link_instance=None,
-                      log=None, progress=None):
+                      log=None, progress=None, geom_cache=None):
     """Find pairs in (set_a x set_b) whose geometries intersect.
 
     Args:
@@ -66,25 +66,32 @@ def find_hard_clashes(doc, set_a_elements, set_b_elements,
     # which natively handles geometry extraction.
     if a_link_instance is None and b_link_instance is None:
         return _hard_host_vs_host(doc, set_a_elements, set_b_elements,
-                                  log=log, progress=progress)
+                                  log=log, progress=progress, geom_cache=geom_cache)
 
     # Host vs link (or link vs host): use solid-based filter against the
     # right doc, transforming as needed.
     if a_link_instance is None and b_link_instance is not None:
         return _hard_host_vs_link(doc, set_a_elements, set_b_elements,
-                                  b_link_instance, log=log, progress=progress)
+                                  b_link_instance, log=log, progress=progress,
+                                  geom_cache=geom_cache)
     if a_link_instance is not None and b_link_instance is None:
-        # Symmetric: just swap the roles, then swap back in the result
+        # Symmetric: just swap the roles, then swap back in the result. The
+        # geometry fields are order-independent, so they survive the flip.
         flipped = _hard_host_vs_link(doc, set_b_elements, set_a_elements,
-                                     a_link_instance, log=log, progress=progress)
-        return [{'elem_a': p['elem_b'], 'elem_b': p['elem_a'], 'midpoint': p['midpoint']}
-                for p in flipped]
+                                     a_link_instance, log=log, progress=progress,
+                                     geom_cache=geom_cache)
+        out = []
+        for p in flipped:
+            q = dict(p)
+            q['elem_a'], q['elem_b'] = p['elem_b'], p['elem_a']
+            out.append(q)
+        return out
 
     # Link vs link: both linked. Iterate set_a, transform each solid
     # link_a -> host -> link_b, filter against link_b doc.
     return _hard_link_vs_link(set_a_elements, a_link_instance,
                               set_b_elements, b_link_instance,
-                              log=log, progress=progress)
+                              log=log, progress=progress, geom_cache=geom_cache)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +201,7 @@ class _Heartbeat(object):
                 pass
 
 
-def _hard_host_vs_host(doc, set_a, set_b, log=None, progress=None):
+def _hard_host_vs_host(doc, set_a, set_b, log=None, progress=None, geom_cache=None):
     from Autodesk.Revit.DB import (
         ElementIntersectsElementFilter, FilteredElementCollector, ElementId,
     )
@@ -243,12 +250,14 @@ def _hard_host_vs_host(doc, set_a, set_b, log=None, progress=None):
                 continue
             seen_pairs.add(pair_key)
             mp = _bbox_overlap_center(elem_a, elem_b)
-            out.append({'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp})
+            pair = {'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp}
+            pair.update(pairgeom.pair_geometry(elem_a, None, elem_b, None, geom_cache))
+            out.append(pair)
     return out
 
 
 def _hard_host_vs_link(doc, host_elems, link_elems, link_instance,
-                       log=None, progress=None):
+                       log=None, progress=None, geom_cache=None):
     from Autodesk.Revit.DB import (
         ElementIntersectsSolidFilter, FilteredElementCollector, ElementId,
     )
@@ -299,11 +308,15 @@ def _hard_host_vs_link(doc, host_elems, link_elems, link_instance,
                     continue
                 seen_pairs.add(pair_key)
                 mp = _bbox_overlap_center_xdoc(elem_a, None, elem_b, link_instance)
-                out.append({'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp})
+                pair = {'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp}
+                pair.update(pairgeom.pair_geometry(
+                    elem_a, None, elem_b, link_instance, geom_cache))
+                out.append(pair)
     return out
 
 
-def _hard_link_vs_link(set_a, link_a, set_b, link_b, log=None, progress=None):
+def _hard_link_vs_link(set_a, link_a, set_b, link_b, log=None, progress=None,
+                       geom_cache=None):
     from Autodesk.Revit.DB import (
         ElementIntersectsSolidFilter, FilteredElementCollector, ElementId,
     )
@@ -353,7 +366,10 @@ def _hard_link_vs_link(set_a, link_a, set_b, link_b, log=None, progress=None):
                     continue
                 seen_pairs.add(pair_key)
                 mp = _bbox_overlap_center_xdoc(elem_a, link_a, elem_b, link_b)
-                out.append({'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp})
+                pair = {'elem_a': elem_a, 'elem_b': elem_b, 'midpoint': mp}
+                pair.update(pairgeom.pair_geometry(
+                    elem_a, link_a, elem_b, link_b, geom_cache))
+                out.append(pair)
     return out
 
 

@@ -2536,31 +2536,61 @@ async function standaloneLoad() {
 }
 
 const SAMPLE = [
-  { id: "s209", seq: 209, score: 98, status: "Open", pair: "Plumbing × Structure", a: "Sanitary 4\"", b: "Concrete beam", level: "L2", owner: "Plumbing", rule: "C1", flags: ["escalate_candidate"],
-    reason: "Gravity SAN 1 vs structure: slope is code-fixed (IPC 704.1), no vertical reroute freedom. May require a structural penetration request.",
-    brk: [{ k: "Mover constraint", v: 15 }, { k: "Size", v: 3 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 6 }] },
-  { seq: 214, score: 94, status: "Open", pair: "HVAC × Structure", a: "Supply duct 30x20", b: "W21 beam", level: "L3", owner: "Mechanical", rule: "C2", id: "s214", gid: "sg-1",
-    reason: "Supply duct 30x20 vs structure: a reroute this large consumes space that is not there; pre-pour / steel-fabrication deadline.",
-    brk: [{ k: "Mover constraint", v: 12 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
-  { seq: 231, score: 61, status: "Reviewed", pair: "HVAC × Plumbing", a: "Supply duct 24x20", b: "DCW 4\"", level: "L3", owner: "Plumbing", rule: "M1", id: "s231", gid: "sg-1",
-    reason: "Reroute around a large obstruction: needs a coordinated path, not a nudge.",
-    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
-  { id: "s198", seq: 198, score: 61, status: "Open", pair: "Electrical × Structure", a: "Cable tray 24\"", b: "W16 beam", level: "L4", owner: "Electrical", rule: "M2",
-    reason: "Cable tray 24\" must drop or rise around structure; the fix window closes at pour / steel fabrication.",
-    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 8 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
-  { id: "s244", seq: 244, score: 26, status: "Approved", pair: "HVAC × Architecture", a: "Return duct 16x12", b: "Corridor wall", level: "L2", owner: "Mechanical", rule: "N1", flags: ["penetration_candidate"],
-    reason: "Likely intended penetration through Corridor wall: confirm sleeve / fire damper (IMC 607.4).",
-    brk: [{ k: "Mover constraint", v: 9 }, { k: "Size", v: 5 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
-  { id: "s187", seq: 187, score: 53, status: "Open", pair: "Electrical × Fire", a: "Conduit 3/4\"", b: "Sprinkler main", level: "L1", owner: "Electrical", rule: "M4",
-    reason: "Congested zone: 27 clashes within 5 ft. Rack-level rework, not a field fix.",
-    brk: [{ k: "Mover constraint", v: 0 }, { k: "Size", v: 3 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 6 }, { k: "Code", v: 0 }] },
-  { id: "s260", seq: 260, score: 13, status: "Open", pair: "Electrical × Electrical", a: "Conduit 3/4\"", b: "Conduit 1\"", level: "L3", owner: "Electrical", rule: "FB", suppressed: true,
+  { id: "s209", seq: 209, score: 92, status: "Open", pair: "Plumbing × Structure", a: "Sanitary 4\"", b: "Concrete beam", level: "L2", owner: "Plumbing", rule: "C1", flags: ["escalate_candidate"], relClass: "error",
+    headline: "4 in Sanitary pipe runs through structure on L2.",
+    reason: "4 in Sanitary pipe runs through structure on L2. A gravity main holds a code-fixed slope (IPC 704.1) with no vertical reroute freedom around the member. Submit a structural penetration request or agree the reroute before steel fabrication; this closes design options fastest of anything on the list.",
+    codeRef: "IPC 704.1", resolveBy: "steel_fab", resolveByLabel: "before steel fabrication release",
+    facts: [{ k: "Rule", v: "C1" }, { k: "Mover", v: "4 in Sanitary pipe" }, { k: "Other side", v: "beam" }, { k: "System", v: "Sanitary" }, { k: "Penetration", v: null, unit: "in" }, { k: "Code", v: "IPC 704.1" }, { k: "Level", v: "L2" }],
+    brk: [{ k: "Mover constraint", v: 15 }, { k: "Size", v: 1 }, { k: "Code", v: 6 }] },
+  { seq: 214, score: 66, status: "Open", pair: "HVAC × Structure", a: "Supply duct 30x20", b: "W21 beam", level: "L3", owner: "Mechanical", rule: "C2", id: "s214", gid: "sg-1", relClass: "error",
+    headline: "30 in supply duct conflicts with structure on L3.",
+    reason: "30 in supply duct conflicts with structure on L3. A reroute at this size consumes structural depth that is not there; a change after the pour or steel-fabrication cutoff means re-sleeved concrete or refabricated steel. Resolve it in section with the structural engineer before that cutoff.",
+    resolveBy: "steel_fab", resolveByLabel: "before steel fabrication release",
+    facts: [{ k: "Rule", v: "C2" }, { k: "Mover", v: "30 in supply duct" }, { k: "Other side", v: "beam" }, { k: "Penetration", v: null, unit: "in" }, { k: "Level", v: "L3" }],
+    brk: [{ k: "Mover constraint", v: 13 }, { k: "Size", v: 8 }] },
+  { seq: 231, score: 58, status: "Reviewed", pair: "HVAC × Plumbing", a: "Supply duct 24x20", b: "DCW 4\"", level: "L3", owner: "Plumbing", rule: "M1-XING", id: "s231", gid: "sg-1", relClass: "error",
+    headline: "4 in DCW pipe crosses 24 in supply duct at the same elevation on L3.",
+    reason: "4 in DCW pipe crosses 24 in supply duct at the same elevation on L3. One of the two has to drop or rise; the cheaper mover is the smaller or more flexible run, and it only costs money if it waits for fabrication. Pick the mover this cycle and hold the elevation on both shop sets.",
+    resolveBy: "next_cycle", resolveByLabel: "this coordination cycle",
+    facts: [{ k: "Rule", v: "M1-XING" }, { k: "Mover", v: "4 in DCW pipe" }, { k: "Other side", v: "24 in supply duct" }, { k: "Penetration", v: null, unit: "in" }, { k: "Level", v: "L3" }],
+    brk: [{ k: "Mover constraint", v: 8 }, { k: "Size", v: 6 }] },
+  { id: "s317", seq: 317, score: 20, status: "Open", pair: "Electrical × HVAC", a: "#21 (EXIT)", b: "Supply duct 24x20", level: "L2", owner: "Electrical", rule: "N-PT", flags: ["field_fix"], relClass: "field",
+    headline: "light fixture (#21 (EXIT)) is a point device hitting 24 in supply duct.",
+    reason: "light fixture (#21 (EXIT)) is a point device hitting 24 in supply duct on L2. It relocates with a box shift at rough-in; the duct is the stationary side. Move the device at install and note the RCP if the visible location changes.",
+    resolveBy: "field", resolveByLabel: "in the field at install",
+    facts: [{ k: "Rule", v: "N-PT" }, { k: "Mover", v: "light fixture (#21 (EXIT))" }, { k: "Other side", v: "24 in supply duct" }, { k: "Level", v: "L2" }],
+    brk: [{ k: "Mover constraint", v: 8 }, { k: "Size", v: 6 }] },
+  { id: "s244", seq: 244, score: 26, status: "Approved", pair: "HVAC × Architecture", a: "Return duct 16x12", b: "Corridor wall", level: "L2", owner: "Mechanical", rule: "N1", flags: ["penetration_candidate"], relClass: "deliberate",
+    headline: "16 in return duct passes through Corridor wall on L2.",
+    reason: "16 in return duct passes through Corridor wall on L2. This reads as an intended penetration of an architectural assembly, not a routing error. Confirm a sleeve (plus a fire damper or firestop if the assembly is rated) is on the penetration schedule.",
+    resolveBy: "sleeve_pkg", resolveByLabel: "with the sleeve/opening package for this level",
+    facts: [{ k: "Rule", v: "N1" }, { k: "Mover", v: "16 in return duct" }, { k: "Other side", v: "Corridor wall" }, { k: "Penetration", v: null, unit: "in" }, { k: "Level", v: "L2" }],
+    brk: [{ k: "Mover constraint", v: 13 }, { k: "Size", v: 4 }] },
+  { id: "s187", seq: 187, score: 62, status: "Open", pair: "Electrical × Fire", a: "Conduit 3/4\"", b: "Sprinkler main", level: "L1", owner: "Electrical", rule: "M4", relClass: "error",
+    headline: "This clash sits in a congested zone: 27 clashes within 5 ft on L1.",
+    reason: "This clash sits in a congested zone: 27 clashes within 5 ft on L1. Density like this means rack-level rework, not 27 separate field fixes; it is the multi-trade decision the ASCE Medium band describes. Resolve the zone as one section study at the next coordination meeting.",
+    resolveBy: "next_cycle", resolveByLabel: "this coordination cycle",
+    facts: [{ k: "Rule", v: "M4" }, { k: "Mover", v: "0.75 in conduit" }, { k: "Other side", v: "4 in FPW pipe" }, { k: "Cluster", v: "27 within 5 ft" }, { k: "Level", v: "L1" }],
+    brk: [{ k: "Mover constraint", v: 3 }, { k: "Size", v: 3 }, { k: "Congestion", v: 6 }] },
+  { id: "s412", seq: 412, score: 18, status: "Open", pair: "HVAC × HVAC", a: "4' x 2'", b: "4' x 2'", level: "L1", owner: "Mechanical", rule: "N-DUP", flags: ["family_artifact_suspect"], relClass: "artifact",
+    headline: "mechanical unit (4' x 2') and mechanical unit (4' x 2') overlap and share a name.",
+    reason: "mechanical unit (4' x 2') and mechanical unit (4' x 2') overlap and share a name or placeholder type on L1. This pattern is usually a nested, double-placed, or placeholder family rather than two real units. Verify it once in the model this cycle; if they are two genuine units, comment here and it becomes a placement conflict.",
+    resolveBy: "next_cycle", resolveByLabel: "this coordination cycle",
+    facts: [{ k: "Rule", v: "N-DUP" }, { k: "Mover", v: "mechanical unit (4' x 2')" }, { k: "Other side", v: "mechanical unit (4' x 2')" }, { k: "Level", v: "L1" }],
+    brk: [{ k: "Mover constraint", v: 12 }, { k: "Size", v: 2 }] },
+  { id: "s260", seq: 260, score: 13, status: "Open", pair: "Electrical × Electrical", a: "Conduit 3/4\"", b: "Conduit 1\"", level: "L3", owner: "Electrical", rule: "FB", suppressed: true, relClass: "field",
     supReason: "Single small-bore conduits (<= 1 in): field-routed by the installing trade (NBIMS-US V3 5.5.4.8 + Annex A 1.5.1).",
-    reason: "Minor conflict; Conduit 3/4\" reroutes cheaply.",
-    brk: [{ k: "Mover constraint", v: 0 }, { k: "Size", v: 1 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
-  { id: "s141", seq: 141, score: 19, status: "Open", pair: "Plumbing × Plumbing", a: "Vent 2\"", b: "Waste 3\"", level: "L1", owner: "Plumbing", rule: "FB", conf: "degraded",
-    reason: "Minor conflict; Vent 2\" reroutes cheaply. (estimated from categories; re-run detection for system/size detail)",
-    brk: [{ k: "Mover constraint", v: 6 }, { k: "Size", v: 1 }, { k: "Geometry", v: 4 }, { k: "Congestion", v: 0 }, { k: "Code", v: 0 }] },
+    headline: "0.75 in conduit crosses 1 in conduit on L3.",
+    reason: "0.75 in conduit crosses 1 in conduit on L3. A minor conflict where 0.75 in conduit is the cheap mover. Reroute it at the model or in the field.",
+    resolveBy: "field", resolveByLabel: "in the field at install",
+    facts: [{ k: "Rule", v: "FB" }, { k: "Mover", v: "0.75 in conduit" }, { k: "Other side", v: "1 in conduit" }, { k: "Level", v: "L3" }],
+    brk: [{ k: "Mover constraint", v: 2 }, { k: "Size", v: 1 }] },
+  { id: "s141", seq: 141, score: 15, status: "Open", pair: "Plumbing × Plumbing", a: "Vent 2\"", b: "Waste 3\"", level: "L1", owner: "Plumbing", rule: "M1-SLOPE", conf: "degraded", relClass: "error",
+    headline: "2 in Vent pipe is slope-bound and cannot simply rise or dip around 3 in Waste pipe.",
+    reason: "2 in Vent pipe is slope-bound and cannot simply rise or dip around 3 in Waste pipe on L1. Gravity, condensate, and vent lines hold a continuous pitch (IPC 905.2), so the pressurized or ducted side is almost always the mover. Reroute 3 in Waste pipe this cycle; if the slope line must move, re-check its invert end to end. Sized from category alone here, so verify before acting on the order.",
+    codeRef: "IPC 905.2", resolveBy: "next_cycle", resolveByLabel: "this coordination cycle",
+    facts: [{ k: "Rule", v: "M1-SLOPE" }, { k: "Mover", v: "2 in Vent pipe" }, { k: "Other side", v: "3 in Waste pipe" }, { k: "System", v: "Vent" }, { k: "Code", v: "IPC 905.2" }, { k: "Level", v: "L1" }],
+    brk: [{ k: "Mover constraint", v: 6 }, { k: "Size", v: 1 }, { k: "Code", v: 6 }] },
 ];
 let clashes = [], realData = false, selectedClash = null;
 // Layer C sample: one element-star issue so the standalone page demos the
@@ -2570,7 +2600,9 @@ const SAMPLE_GROUPS = [
     title: "Supply duct 30x20 vs L3 obstructions", titleLocked: false,
     status: "Open", assignee: "Mechanical", members: ["s214", "s231"], suggested: ["s187"],
     needsReview: false, created: "2026-06-30T10:00:00Z", comments: [], rep: "s214",
-    rollup: { band: "Critical", score: 94, reason: "Supply duct 30x20 vs structure: a reroute this large consumes space that is not there; pre-pour / steel-fabrication deadline.",
+    rollup: { band: "Major", score: 66,
+              reason: "2 clashes, 2 trades (Mechanical, Plumbing) anchored on Supply duct 30x20 on L3; worst member scores 66 (Major). The worst member sets the priority; clearing it usually clears much of the set. Resolve the set as one study before steel fabrication release; 2 of 2 still open.",
+              code_ref: null, resolve_by: "steel_fab", resolve_by_label: "before steel fabrication release", trades: ["Mechanical", "Plumbing"],
               level: "L3", n_open: 2, n_resolved: 0, n_suppressed: 0, n_new_run: 1, n_resolved_run: 0, n_reopened_run: 0,
               drifted: false, congested: false, diameter_ft: 12.0 } },
 ];
@@ -2585,7 +2617,9 @@ const esc = (s) => String(s == null ? "" : s)
 function normalizeRow(r) {
   return Object.assign({ id: null, thumb: null, mid: null, kind: "hard", catA: "", catB: "", srcA: "host", srcB: "host",
                          gap: null, contact: null, gapMethod: null, tol: null,
-                         reason: null, brk: null, rule: null, suppressed: false,
+                         reason: null, headline: null, brk: null, rule: null,
+                         codeRef: null, resolveBy: null, resolveByLabel: null,
+                         facts: null, relClass: null, suppressed: false,
                          supReason: null, conf: null, flags: [], scored: false, gid: null,
                          first_seen: null, comments: [], fedA: null, fedB: null,
                          deadline: null, vp: null }, r);
@@ -3216,16 +3250,32 @@ function renderClashCard(c, mount) {
   // bars only explain ordering WITHIN the band. brk is [{k, v}] from the
   // scoring engine; sub-terms cap at 15, so width scales at v*6.
   const kvBars = (c.brk && c.brk.length && typeof c.brk[0] === "object" && c.brk[0] !== null)
-    ? c.brk.map((f) => `<div class="brk"><span class="t">${esc(f.k)}</span><span class="track"><span class="fill" style="width:${Math.min(100, (f.v || 0) * 6)}%"></span></span><span class="muted" style="width:16px;text-align:right">${f.v || 0}</span></div>`).join("")
+    ? c.brk.map((f) => `<div class="brk"><span class="t">${esc(f.k)}</span><span class="track"><span class="fill" style="width:${Math.min(100, (f.v || 0) * 6)}%"></span></span><span class="muted" style="width:16px;text-align:right">${f.v == null ? "" : f.v}</span></div>`).join("")
     : "";
+  // The composed 2-3 sentence reason reads first (that is what gets read
+  // aloud). Below it: a chip row (rule + code citation + deadline), the
+  // measured-facts table (null = "(not captured)"), then the score bars that
+  // explain ordering WITHIN the band.
   const reasonLine = c.reason
-    ? `<div class="kv" style="margin-bottom:6px">${esc(c.reason)}${c.rule ? ` <span class="muted">(rule ${esc(c.rule)})</span>` : ""}</div>`
+    ? `<div class="kv" style="margin-bottom:4px">${esc(c.reason)}</div>`
     : "";
+  const whyChips = (c.rule || c.codeRef || c.resolveByLabel || c.conf === "degraded")
+    ? `<div style="margin:0 0 8px">${c.rule ? `<span class="chip" style="background:#EDF2F7;color:#2D3748">${esc(c.rule)}</span>` : ""}${c.codeRef ? ` <span class="fk">${esc(c.codeRef)}</span>` : ""}${c.resolveByLabel ? ` <span class="chip" style="background:#E6F1FB;color:#0C447C" title="When this should be resolved">${esc(c.resolveByLabel)}</span>` : ""}${c.conf === "degraded" ? ` <span class="chip" style="background:#F1EFE8;color:#444441" title="Scored from category fallback - re-run detection to capture system and size detail.">estimated</span>` : ""}</div>`
+    : "";
+  const factRows = (c.facts && c.facts.length)
+    ? `<div class="micro" style="margin:6px 0 2px;color:#718096">Measured facts</div>` + c.facts.map((f) => {
+        const val = (f.v == null)
+          ? '<span style="color:#A0AEC0">(not captured)</span>'
+          : `<span class="fk">${esc(f.v)}${f.unit ? " " + esc(f.unit) : ""}${f.method ? " (" + esc(f.method) + ")" : ""}</span>`;
+        return `<div class="kv"><b>${esc(f.k)}</b> ${val}</div>`;
+      }).join("")
+    : "";
+  const barsCap = kvBars ? `<div class="micro" style="margin:8px 0 2px;color:#718096">Score components (ordering within band)</div>` : "";
   const suppressedNote = c.suppressed
     ? `<div class="kv" style="background:#FFFBEA;border:1px solid #D69E2E;border-radius:3px;padding:6px;color:#744210;margin-bottom:6px"><b>Suppressed as noise.</b> ${esc(c.supReason)} The record is kept, scored, and re-enters the grid if the rule is ever turned off.</div>`
     : "";
-  const bars = (reasonLine || kvBars)
-    ? suppressedNote + reasonLine + kvBars
+  const bars = (reasonLine || kvBars || whyChips)
+    ? suppressedNote + reasonLine + whyChips + factRows + barsCap + kvBars
     : suppressedNote + '<div class="kv muted">Provisional score - re-run detection to compute the real importance.</div>';
   const canShow = !!(c.fedA && model);
   const comments = (c.comments || []).map((m) =>
@@ -3528,7 +3578,8 @@ function renderGroupCard(g, mount) {
     ${repImg}
     <div class="icard">
       <h3>Composition - why these travel together</h3>
-      <div class="kv">${whyTogether(g, memberRows)}</div>
+      <div class="kv">${r.reason ? esc(r.reason) : whyTogether(g, memberRows)}</div>
+      ${(r.resolve_by_label || r.code_ref) ? `<div style="margin:4px 0 2px">${r.code_ref ? `<span class="fk">${esc(r.code_ref)}</span> ` : ""}${r.resolve_by_label ? `<span class="chip" style="background:#E6F1FB;color:#0C447C" title="Governing deadline for the set">${esc(r.resolve_by_label)}</span>` : ""}</div>` : ""}
       <div class="mixbar">
         ${mix.Critical ? `<span style="flex:${mix.Critical / mixTotal};background:#C53030"></span>` : ""}
         ${mix.Major ? `<span style="flex:${mix.Major / mixTotal};background:#D69E2E"></span>` : ""}
@@ -4410,7 +4461,9 @@ function renderHome() {
   active.forEach((c) => {
     if (!c.gid || !groupsById[c.gid])
       items.push({ title: (c.a || "?") + " × " + (c.b || "?"), score: c.score || 0,
-                   reason: c.reason || "",
+                   // The crisp one-line headline for the agenda; the full
+                   // 2-3 sentence reason stays on the clash card.
+                   reason: c.headline || c.reason || "",
                    sub: "#" + c.seq + (c.owner ? " · " + c.owner : ""),
                    tie: 1e9 + (c.seq || 0) });
   });

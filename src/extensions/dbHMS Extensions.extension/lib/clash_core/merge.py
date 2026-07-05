@@ -103,15 +103,20 @@ def _next_seq(old_clashes):
 # (None on hard rows).
 # tolerance_inches: the owning test's tolerance, stamped per clash so the
 # pure scoring layer can compute gap/tolerance with no test-library lookup.
-# penetration_depth_in / overlap_volume_cf: RESERVED. Nothing computes them
-# yet; listing them here materializes explicit None on every record so the
-# day hard.py starts emitting them, values backfill re-appearing clashes with
-# no migration and the dormant scoring rules (R-GRAZE, C4) activate on the
-# next run. Readers must use .get() (auto-resolved rows never gain keys).
+# Pair geometry (Phase 2, emitted by clash_detect/pairgeom via hard.py):
+# overlap_bbox_in (free AABB-overlap extents [dx,dy,dz] in), the boolean tier
+# penetration_depth_in / overlap_volume_cf / overlap_centroid, pen_class
+# (Phase 3), and geom_method ('boolean'|'bbox'). Listed here so they refresh
+# unconditionally each run and backfill re-appearing clashes with no
+# migration; the dormant scoring rules (R-GRAZE, C4) activate on the run that
+# first emits them. Readers must use .get() (auto-resolved rows never gain
+# keys).
 _PER_RUN_FIELDS = ('midpoint', 'gap_inches', 'closest_point_a',
                    'closest_point_b', 'is_contact', 'gap_method',
                    'tolerance_inches',
-                   'penetration_depth_in', 'overlap_volume_cf')
+                   'penetration_depth_in', 'overlap_volume_cf',
+                   'overlap_bbox_in', 'overlap_centroid', 'pen_class',
+                   'geom_method')
 
 
 def merge_runs(old_clashes, raw_new_clashes, run_iso=None, author='system'):
