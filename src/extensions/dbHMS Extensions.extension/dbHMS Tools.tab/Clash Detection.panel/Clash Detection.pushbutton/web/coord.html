@@ -32,17 +32,21 @@
   h3 { margin: 0 0 8px; font-size: 13px; color: #1A202C; }
   #view-home { flex-direction: column; overflow: auto; padding: 16px 18px; }
   .banner { background: #EAF3DE; border: 1px solid #C0DD97; color: #27500A; font-size: 12px; border-radius: 8px; padding: 9px 12px; margin-bottom: 14px; }
-  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  /* minmax(0,1fr) NOT 1fr: a plain fr column has a min-content floor, so the
+     nowrap agenda text below forces the grid wider than the window and spawns a
+     horizontal scrollbar. minmax(0,..) lets the columns shrink so the text
+     truncates and the home always fits the window at any width. */
+  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
   .metric { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px 12px; }
   .metric .l { font-size: 11px; color: #718096; }
   .metric .v { font-size: 24px; font-weight: 700; }
   .metric .d2 { font-size: 10px; color: #A0AEC0; margin-top: 2px; }
-  .home2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .home2 { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; margin-bottom: 14px; }
   .bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #4A5568; margin: 6px 0; }
   .bar .t { width: 118px; flex-shrink: 0; }
   .bar .track { flex: 1; height: 9px; background: #F1EFE8; border-radius: 3px; overflow: hidden; }
   .bar .fill { display: block; height: 9px; background: #2B6CB0; }
-  .launch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .launch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
   .lbtn { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid #CBD5E0; border-radius: 10px; padding: 12px; cursor: pointer; }
   .lbtn:hover { border-color: #2B6CB0; }
   .lic { width: 34px; height: 34px; border-radius: 8px; background: #EBF3FB; color: #185FA5; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -728,20 +732,6 @@ function switchView(v) {
   const view = $("view-" + v);
   if (view) view.classList.add("on");
   if (v === "3d") setTimeout(() => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} }, 30);
-  // Force the newly-shown view to REPAINT. WebView2's compositor can leave a
-  // view that was hidden while the window was resized painted at its old
-  // (stale) width -- the layout is already correct but the pixels aren't, so
-  // Home looks squished into a narrow column until something forces a
-  // composite. A one-frame transform nudge forces a fresh composite. It is
-  // removed on the next frame so it never affects layout or containing blocks.
-  // (The host also nudges WebView2 on window resize; belt and suspenders.)
-  else if (view) {
-    requestAnimationFrame(() => {
-      view.style.transform = "translateZ(0)";
-      requestAnimationFrame(() => { view.style.transform = ""; });
-    });
-    toHost("viewshown");   // let the host re-nudge the WebView2 HWND too
-  }
   // The inspector card follows the active tab (one selection, one card,
   // two mounts), and entering the 3D tab re-focuses whatever is selected.
   try {

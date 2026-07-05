@@ -202,19 +202,28 @@ def _load_webview2_type():
 class CoordinationForm(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, FORM_XAML, handle_esc=False)
-        # Parent the window to Revit's main HWND. Without an owner, a modal WPF
-        # dialog falls BEHIND the Revit window whenever a Revit API call
-        # activates Revit (during detection or a glTF export) -- the tool would
-        # vanish behind Revit mid-run. Owning it to Revit keeps it reliably in
-        # front and off the taskbar as a separate entry. (Same pattern as Sheet
-        # Manager / Revisions Manager.)
+        # Parent the window to Revit's main HWND. Without an owner, the window
+        # falls BEHIND the Revit window whenever a Revit API call activates
+        # Revit (during detection or a glTF export, and while WebView2 spins up
+        # on open) -- the tool vanishes behind Revit. Owning it to Revit keeps
+        # it reliably in front and off the taskbar as a separate entry. Prefer
+        # the authoritative UIApplication.MainWindowHandle (Revit 2019+); a raw
+        # Process.MainWindowHandle can resolve to the wrong top-level window.
         try:
             from System.Windows.Interop import WindowInteropHelper
-            import System.Diagnostics
-            hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
+            hwnd = None
+            try:
+                hwnd = __revit__.MainWindowHandle   # noqa: F821
+            except Exception:
+                hwnd = None
+            if hwnd is None or int(hwnd) == 0:
+                import System.Diagnostics
+                hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
             WindowInteropHelper(self).Owner = hwnd
+            _log("owner: parented to Revit hwnd {0}".format(int(hwnd)))
         except Exception:
-            pass
+            _log("owner: failed to parent to Revit\n{0}".format(
+                traceback.format_exc()))
         self._webview = None
         self._vhost_ok = False
         self._model_version = 0
@@ -238,15 +247,6 @@ class CoordinationForm(forms.WPFWindow):
         self.Closed += self._on_closed
         # Attach the web panel after layout so the host Border has a real size.
         self.Loaded += self._on_loaded
-        # WebView2's compositor can leave stale paint after the window is
-        # resized (a view hidden during the resize shows at its old width when
-        # you switch back). Re-run the proven bounds nudge when the size
-        # settles, debounced so a drag-resize doesn't thrash it.
-        self._resize_timer = None
-        try:
-            self.SizeChanged += self._on_size_changed
-        except Exception:
-            pass
 
     # --- Web panel ----------------------------------------------------
 
@@ -382,27 +382,6 @@ class CoordinationForm(forms.WPFWindow):
             wv.UpdateLayout()
             wv.Margin = Thickness(0)
             wv.UpdateLayout()
-        except Exception:
-            pass
-
-    def _on_size_changed(self, sender, args):
-        """Debounced WebView2 repaint on window resize. SizeChanged fires many
-        times during a drag; we (re)start a short timer and only nudge once the
-        size stops changing, so the browser recomposites at the final size."""
-        try:
-            from System.Windows.Threading import DispatcherTimer
-            t = self._resize_timer
-            if t is None:
-                t = DispatcherTimer()
-                t.Interval = System.TimeSpan.FromMilliseconds(160)
-
-                def _tick(s, e):
-                    t.Stop()
-                    self._nudge_webview_bounds()
-                t.Tick += _tick
-                self._resize_timer = t
-            t.Stop()
-            t.Start()
         except Exception:
             pass
 
@@ -725,6 +704,14 @@ class CoordinationForm(forms.WPFWindow):
             except Exception:
                 _log("push_initial({0}): {1} feed failed\n{2}".format(
                     why, name, traceback.format_exc()))
+        # Pull the window back to the front once the data has loaded: WebView2
+        # spinning up can let Revit's window activate over ours during open, so
+        # a belt-and-suspenders Activate() (on top of the Revit owner) ensures
+        # the tool is in front when the user first sees it.
+        try:
+            self.Activate()
+        except Exception:
+            pass
 
     # --- host <-> page ------------------------------------------------
 
@@ -824,10 +811,6 @@ class CoordinationForm(forms.WPFWindow):
             elif msg == "ready":
                 _log("ready: received from page")
                 self._push_initial("page-ready")
-            elif msg == "viewshown":
-                # The page switched tabs; nudge WebView2 so a view that went
-                # stale while hidden during a resize repaints at the right size.
-                self._nudge_webview_bounds()
             elif msg == "loadlast":
                 self._load_last_export()
             elif msg.startswith("snapshot:"):
@@ -876,6 +859,13 @@ class CoordinationForm(forms.WPFWindow):
             code = self._do_export(is_canceled=self._cancel_check)
         finally:
             self._op_busy = False
+            # The export drives the Revit API and pumps the message loop, which
+            # can let Revit's window activate over ours; pull the tool back to
+            # the front when it finishes (the Revit owner keeps it there after).
+            try:
+                self.Activate()
+            except Exception:
+                pass
         if code == "canceled":
             self._post("runstage:canceled")
         elif code == "fail":
