@@ -279,6 +279,29 @@ class CollapseLayeredPenetrationsTests(unittest.TestCase):
         self.assertEqual(out1[0]["ref_b"]["element_id"], 202,
                          "lowest element id wins the tie")
 
+    def test_protected_band_dropped_when_dedicated_space_also_hit(self):
+        # A pipe in the dedicated space (C-NEC Critical) that also grazes the
+        # abutting protected band (M-NEC-PROT) is one problem -> drop the
+        # M-NEC-PROT row.
+        def clr(rule, mep_id, owner_id):
+            r = _pen(mep_id, owner_id, layer_cat='Electrical Equipment',
+                     mep_cat='Pipes')
+            r['clearance_rule'] = rule
+            return r
+        rows = [clr('C-NEC', 100, 900), clr('M-NEC-PROT', 100, 900),
+                clr('M-NEC-PROT', 101, 900)]  # different pipe: kept
+        out, dropped = dedupe.drop_redundant_protected_band(rows)
+        self.assertEqual(dropped, 1)
+        rules = sorted((c.get('clearance_rule'), (c.get('ref_a') or {}).get('element_id')) for c in out)
+        self.assertEqual(rules, [('C-NEC', 100), ('M-NEC-PROT', 101)])
+
+    def test_protected_band_kept_without_dedicated_hit(self):
+        r = _pen(100, 900, layer_cat='Electrical Equipment', mep_cat='Pipes')
+        r['clearance_rule'] = 'M-NEC-PROT'
+        out, dropped = dedupe.drop_redundant_protected_band([r])
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(out), 1)
+
     def test_hard_hit_wins_over_soft_near_miss_in_cluster(self):
         # A mixed cluster: the thick concrete slab is only a soft near-miss but
         # a thinner layer is a hard hit. Never hide the hard intersection --

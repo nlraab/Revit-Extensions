@@ -350,10 +350,22 @@ class TierScenarioTests(unittest.TestCase):
         self.assertEqual((imp['band'], imp['rule']), ('Major', 'M2'))
 
     def test_c3_two_no_slack_systems_is_critical(self):
+        # Two gravity mains colliding: both slope-locked, neither is the cheap
+        # mover -> Critical.
+        grav = ref(element_id=1, sys_class='Sanitary', dims_in=[4.0])
+        grav2 = ref(element_id=2, sys_class='Sanitary', dims_in=[6.0])
+        imp = score_one(clash(grav, grav2))
+        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C3'))
+
+    def test_c3_gravity_vs_big_duct_is_not_critical(self):
+        # V4 fix: a gravity main vs a big AIR duct is NOT two no-slack systems
+        # -- the duct is rigidity-4 but reroutable, so this is Major (M1), not
+        # Critical. C3 is reserved for two genuinely irreducible systems.
         grav = ref(element_id=1, sys_class='Sanitary', dims_in=[4.0])
         duct = ref(element_id=2, category='Ducts', dims_in=[30.0, 20.0])
         imp = score_one(clash(grav, duct))
-        self.assertEqual((imp['band'], imp['rule']), ('Critical', 'C3'))
+        self.assertEqual(imp['band'], 'Major')
+        self.assertNotEqual(imp['rule'], 'C3')
 
     def test_two_rigidity4_without_a_5_is_not_critical(self):
         duct1 = ref(element_id=1, category='Ducts', dims_in=[30.0, 20.0])
@@ -605,6 +617,16 @@ class TierScenarioTests(unittest.TestCase):
         imp = score_one(c)
         self.assertEqual((imp['band'], imp['rule']), ('Minor', 'N4'))
         self.assertIn('mounting_check', imp['flags'])
+
+    def test_soft_gravity_near_beam_is_m2_not_fb(self):
+        # V4 fix: a soft near-miss of a slope-locked gravity main to a beam is a
+        # route-around (M2 Major), not FB Minor -- the hard structural rules
+        # don't cover soft clashes, so this branch fills the gap.
+        grav = ref(sys_class='Sanitary', dims_in=[4.0])
+        c = clash(grav, ref(**BEAM), kind='soft', gap_inches=0.3,
+                  tolerance_inches=1.0)
+        imp = score_one(c)
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M2'))
 
     def test_n4_drain_at_foundation_slab(self):
         drain = ref(category='Pipe Accessories', sys_class='Sanitary',
@@ -1362,6 +1384,12 @@ class Phase4ClearanceRulesTests(unittest.TestCase):
                                                 dims_in=[30.0, 20.0]),
                                    owner=ref(**BEAM)))
         self.assertEqual(imp['rule'], 'C-NEC')
+
+    def test_clearance_reason_starts_capitalized(self):
+        # V4 fix: composed sentences start with a capital even when they lead
+        # with a lowercase element noun ('duct sits...' -> 'Duct sits...').
+        imp = score_one(_clearance('C-NEC', intruder=ref(category='Ducts')))
+        self.assertTrue(imp['reason'][:1].isupper(), imp['reason'][:40])
 
     def test_clearance_relevance_class_is_error_not_field(self):
         for rule in ('C-NEC', 'C-NEC-W', 'M-NEC-PROT', 'M-SPR'):

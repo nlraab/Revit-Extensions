@@ -765,7 +765,12 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
             and pa['klass'] != 'equipment' and pb['klass'] != 'equipment'):
         rig_a = pa['rigidity'] if pa['rigidity'] is not None else 2
         rig_b = pb['rigidity'] if pb['rigidity'] is not None else 2
-        if min(rig_a, rig_b) >= 4 and max(rig_a, rig_b) == 5:
+        # BOTH sides must be genuinely no-slack (code slope/pressure), not just
+        # high-rigidity: a big air duct is rig 4 but reroutable, so
+        # duct-vs-gravity-pipe is Major (M1), not Critical (V4 deep dive).
+        if (min(rig_a, rig_b) >= 4 and max(rig_a, rig_b) == 5
+                and pa['klass'] in _d.NO_SLACK_KLASSES
+                and pb['klass'] in _d.NO_SLACK_KLASSES):
             return ('Critical', 'C3',
                     'Two no-slack systems collide: neither is a cheap mover.',
                     flags)
@@ -837,6 +842,19 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
                 '{0} must drop or rise around structure; the fix window '
                 'closes at pour / steel fabrication.'.format(mover['desc']),
                 flags)
+
+    # Soft near-miss to a beam/column: a low-freedom run (rig 4+, e.g. a slope-
+    # locked gravity main) that only just CLEARS structural FRAMING still has to
+    # route around it -- the structural rules above are all hard-only, so
+    # without this a soft gravity-vs-beam fell to FB Minor 'cheap mover' (V4
+    # deep dive). Scoped to framing/columns (route-around members); a run
+    # seating at a foundation/slab is by-design bearing and stays N4 below.
+    if (kind == 'soft' and vs_struct and rig >= 4
+            and other['cat'] in ('Structural Framing', 'Structural Columns')):
+        return ('Major', 'M2',
+                '{0} barely clears structure; treat it as a route-around now, '
+                'before the pour / steel-fabrication window closes.'.format(
+                    mover['desc']), flags)
 
     # N1 requires an actual intersection (hard) with a sleevable assembly:
     # a near miss to a wall is not a penetration, and a duct through a
@@ -1271,7 +1289,12 @@ def _sub_score(c, pa, pb, mover, other, cluster_n, cfg, code_ref):
     # is spread by the terms that ARE known (constraint, size, congestion,
     # code). Real geometry (Phase 2) fills each band's low end.
     pen = c.get('penetration_depth_in')
-    if kind == 'hard':
+    if kind == 'clearance':
+        # A code-zone intrusion has no penetration/gap geometry (and the facts
+        # table drops those rows), so it has no Geometry bar either -- don't
+        # apply the soft-clash is_contact/gap fallback to it (V4 deep dive).
+        geometry = None
+    elif kind == 'hard':
         if pen is not None:
             geometry = min(8, _round_half_away(2.0 * float(pen)))
         else:
@@ -1369,6 +1392,14 @@ def _sysword(p):
         return None
     s = s.split(',')[0].strip()
     return s or None
+
+
+def _cap_first(s):
+    """Capitalize the first character when it is a lowercase letter; leave
+    numbers, symbols, and already-capitalized starts untouched."""
+    if s and s[0:1].islower():
+        return s[0].upper() + s[1:]
+    return s
 
 
 def _clean_ident(x, cat):
@@ -1473,7 +1504,9 @@ def _relevance_class(rule, flags):
     """The research taxonomy (error / deliberate / pseudo), plus two dbHMS
     buckets (artifact, field), derived from the rule id + flags. Feeds the
     noise benchmark in the calibration report."""
-    if rule in ('R-SELF', 'R-NEST', 'N-DUP'):
+    # (A nested-family 'R-NEST' rule was once planned off super_root_id but
+    # never built, so it is not listed here -- the ladder never produces it.)
+    if rule in ('R-SELF', 'N-DUP'):
         return 'artifact'
     if rule == 'N1' or (rule == 'N4' and 'penetration_candidate' in flags):
         return 'deliberate'
@@ -1775,8 +1808,17 @@ def _compose(rule, band, ctx):
         act = 'Flag it to the design team.'
     else:  # FB residual
         what = '{0} crosses {1}{2}.'.format(md, od, loc)
-        why = 'A minor conflict where {0} is the cheap mover.'.format(md)
-        act = 'Reroute it at the model or in the field.'
+        if mover is not None and mover['klass'] in _d.NO_SLACK_KLASSES:
+            # A small slope/pressure line (a 2 in vent) is nominally the cheap
+            # mover, but it still holds a code-fixed pitch -- keep it slope-aware
+            # rather than calling it a free reroute (V4 deep dive).
+            why = ('A minor conflict, but {0} holds a code-fixed pitch, so the '
+                   'other side should give.'.format(md))
+            act = ('Reroute the other run; if the slope line moves, re-check its '
+                   'invert.')
+        else:
+            why = 'A minor conflict where {0} is the cheap mover.'.format(md)
+            act = 'Reroute it at the model or in the field.'
         resolve_by = 'field'
 
     # NOTE: no blanket slope-code fallback here. A code_ref must be EARNED by
@@ -1787,6 +1829,10 @@ def _compose(rule, band, ctx):
     # facts row) onto ~450 N1/M4/M2/N4/M3/FB rows whose sentence never mentions
     # slope -- 70% of all citations in the V4 run. Removed (V4 deep dive).
 
+    # Sentences start with a capital. Many 'what' clauses lead with a
+    # _desc_phrase noun ('wall obstructs...', 'duct runs...') that renders
+    # lowercase; capitalize the first letter uniformly (V4 deep dive).
+    what = _cap_first(what)
     q = _qualifier(ctx)
     reason = ' '.join([s for s in (what, why, act, q) if s])
     headline = _truncate(what, 90)
@@ -1801,7 +1847,20 @@ def _build_facts(ctx, rule, code_ref):
     mover = ctx['mover']
     other = ctx['other']
     facts = [{'k': 'Rule', 'v': rule}]
-    if ctx['kind'] == 'clearance':
+    if rule == 'M1-SLOPE':
+        # The slope-bound run is the internal 'mover', but the reason reroutes
+        # the OTHER (ducted/pressurized) side because the slope line can't rise
+        # or dip. Label the rows by the action so the table agrees with the
+        # sentence instead of showing 'Mover: <the line you must NOT move>'
+        # (V4 deep dive).
+        if mover is not None:
+            facts.append({'k': 'Slope-bound', 'v': _desc_phrase(mover)})
+        if other is not None:
+            facts.append({'k': 'Reroute', 'v': _desc_phrase(other)})
+        sysw = _sysword(mover) if mover is not None else None
+        if sysw:
+            facts.append({'k': 'System', 'v': sysw})
+    elif ctx['kind'] == 'clearance':
         # Clearance framing: ref_a is the intruder, ref_b the equipment owner
         # (runner convention). Label them that way so the facts match the
         # composed sentence -- 'Mover'/'Other side' read backwards here (they

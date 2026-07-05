@@ -1685,6 +1685,7 @@ class CoordinationForm(forms.WPFWindow):
             if raw:
                 raw, _dropped = dedupe.drop_soft_overlapping_hard(raw)
                 raw, _layered = dedupe.collapse_layered_penetrations(raw)
+                raw, _protband = dedupe.drop_redundant_protected_band(raw)
                 if _layered:
                     self._post("status:Collapsed {0} stacked-layer "
                                "penetrations...".format(_layered))

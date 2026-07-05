@@ -320,6 +320,14 @@ DEADLINES = {
     'field':         'in the field at install',
 }
 
+# No-slack mover classes: systems that are genuinely irreducible (code-fixed
+# slope or pressure / welded), NOT merely big. C3 (two no-slack systems collide
+# -> Critical) requires BOTH sides here; a big air DUCT is rigidity-4 but can be
+# rerouted with effort, so duct-vs-gravity-pipe is Major (M1), not Critical
+# (V4 deep dive: C3 was over-ranking air-vs-gravity crossings).
+NO_SLACK_KLASSES = frozenset((
+    'grease', 'gravity', 'gravity_vent', 'condensate', 'medgas', 'fp_dry'))
+
 # Slope/gravity code citations by mover class. The class IS a measured fact
 # (from system classification), so citing here honors "cite only when
 # measured" (doctrine 2 of the v2 plan).

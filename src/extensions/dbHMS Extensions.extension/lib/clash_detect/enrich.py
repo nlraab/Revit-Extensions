@@ -161,6 +161,12 @@ def _instance_facts(elem):
         elif host is not None:
             out['mount'] = 'hosted'
         else:
+            # 'free' means only "no resolvable host in THIS document". A
+            # face-based fixture hosted to a wall in a LINKED model reads as
+            # free (a host-model element cannot host across documents), so
+            # 'free' understates real wall-mounting -- treat it as UNKNOWN, not
+            # proof of free-standing, if a future rule keys on it. No rule does
+            # today (N3's fixture demotion keys on the OTHER side's category).
             out['mount'] = 'free'
         try:
             sc = getattr(elem, 'SuperComponent', None)
@@ -266,7 +272,31 @@ def _thickness_in(elem, cat_name):
                 return w * 12.0
         except Exception:
             pass
+    if cat_name == 'Roofs':
+        # Roofs expose no simple thickness param (they can be sloped/variable),
+        # so read the type's compound-structure total width as the nominal
+        # thickness. Ceilings legitimately have NO single thickness (a grid or
+        # bare plane) -> they stay None, which is correct, not a capture gap.
+        t = _compound_width_in(elem)
+        if t is not None:
+            return t
     return _bip_len_in(elem, 'FLOOR_ATTR_THICKNESS_PARAM')
+
+
+def _compound_width_in(elem):
+    """Nominal assembly thickness (in) from the element type's compound
+    structure total width, or None. Runtime-only; guarded end to end."""
+    try:
+        doc = elem.Document
+        tid = elem.GetTypeId()
+        etype = doc.GetElement(tid) if tid is not None else None
+        cs = etype.GetCompoundStructure() if etype is not None else None
+        if cs is None:
+            return None
+        w = float(cs.GetWidth())
+        return w * 12.0 if w > 0 else None
+    except Exception:
+        return None
 
 
 def _is_structural(elem, cat_name):

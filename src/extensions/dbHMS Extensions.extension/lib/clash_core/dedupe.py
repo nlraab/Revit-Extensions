@@ -196,3 +196,35 @@ def _primary_layer(cluster):
         eid = r.get('element_id') or 0
         return (hard, struct, thick, -eid)
     return max(cluster, key=rank)
+
+
+# ---------------------------------------------------------------------------
+# Clearance overlap: a foreign run inside a panel's NEC dedicated space (C-NEC,
+# Critical) can also graze the protected band that abuts it just above
+# (M-NEC-PROT, Major). That is ONE problem -- the dedicated-space violation
+# governs, the run must reroute out either way -- so the abutting M-NEC-PROT
+# note is redundant. Runs pre-merge alongside the layered-penetration collapse.
+# ---------------------------------------------------------------------------
+
+def drop_redundant_protected_band(raw_clashes):
+    """Drop the M-NEC-PROT row for any (intruder, owner) pair that already has
+    a C-NEC row this run. Returns (filtered_list, dropped_count). Pure Python."""
+    if not raw_clashes:
+        return [], 0
+
+    def _pair(c):
+        return (_mep_key(c.get('ref_a') or {}), _mep_key(c.get('ref_b') or {}))
+
+    c_nec = set()
+    for c in raw_clashes:
+        if c.get('clearance_rule') == 'C-NEC':
+            c_nec.add(_pair(c))
+    if not c_nec:
+        return list(raw_clashes), 0
+    out, dropped = [], 0
+    for c in raw_clashes:
+        if c.get('clearance_rule') == 'M-NEC-PROT' and _pair(c) in c_nec:
+            dropped += 1
+            continue
+        out.append(c)
+    return out, dropped
