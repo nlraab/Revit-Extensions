@@ -885,7 +885,15 @@ def _tier(c, pa, pb, mover, cluster_n, cfg, prev_rule):
             and other['cat'] in _d.PENETRABLE_ARCH_CATS
             and mover['cat'] is not None and _is_routed(mover['cat'])
             and _significant_assembly(other, cfg)
-            and _over_sleeve(mover, cfg)):
+            and _over_sleeve(mover, cfg)
+            # Require a PROVEN full penetration, not just an oversized run that
+            # merely grazes a wall face (V5 finding: 26 oversized ducts clipping
+            # a face were Major 'framed opening' when they never pass through).
+            # _pen_class is reliable HERE because _over_sleeve means the run is
+            # wider than the wall in both axes, so its min-extent IS the
+            # through-depth. A graze -> 'partial'/None -> falls to the N1 sleeve
+            # path below, which is the correct, safer destination.
+            and _pen_class(c, other, cfg) == 'full'):
         flags.append('penetration_candidate')
         return ('Major', 'M-PEN', '', flags)
 
@@ -1106,8 +1114,26 @@ def _m1_dispatch(mover, other, flags, cfg):
         return ('Major', 'M1-FIX-CURVE', '', flags)
     if mk in ('fp_wet', 'fp_dry'):
         return ('Major', 'M1-FP', '', flags)
-    if mk in ('gravity', 'gravity_vent', 'condensate', 'medgas'):
+    if mk in ('gravity', 'condensate', 'medgas'):
         return ('Major', 'M1-SLOPE', '', flags)
+    if mk == 'gravity_vent':
+        # A vent is only slope-bound like a gravity main when it is a real
+        # sloped/main-sized run. A small flat branch (rigidity <= 2 and no
+        # measured slope) is the CHEAP mover and reroutes freely, so labeling it
+        # 'slope-bound, cannot rise or dip' + a pitch citation and telling the
+        # user to move the OTHER (more-rigid) side is backwards (V5 finding: 13
+        # flat 2 in vents, slope=0.0). Keep M1-SLOPE only when the model
+        # actually pitches it or sizes it as a main; otherwise fall through to
+        # the ordinary crossing dispatch, which names the vent as the mover and
+        # emits no code_ref.
+        rig_v = mover['rigidity'] if mover['rigidity'] is not None else 2
+        slope = (mover.get('ref') or {}).get('slope')
+        try:
+            sloped = slope is not None and abs(float(slope)) > 1e-6
+        except (TypeError, ValueError):
+            sloped = False
+        if rig_v >= 4 or sloped:
+            return ('Major', 'M1-SLOPE', '', flags)
     if mk == 'equipment' or other_eq:
         return ('Major', 'M1-EQ-SYS', '', flags)
     rig_m = mover['rigidity'] if mover['rigidity'] is not None else 2
@@ -1179,16 +1205,32 @@ def _is_switchgear(mover):
         return False
     import re
     name = (mover.get('desc') or '').lower()
-    for w in ('switchboard', 'switchgear', 'panelboard', 'transformer'):
+    for w in ('switchboard', 'switchgear', 'panelboard', 'transformer',
+              'distribution'):
         if w in name:
             return True
+    # Main/distribution-board naming like 'SBY-DP-H-2' (a '-dp-' segment) that
+    # would not survive as a single prefix token (V5 finding: these slipped to
+    # N3 Minor). Branch panels (RP-*/LP-*) carry no 'dp' segment, so stay out.
+    if '-dp-' in name or re.search(r'(^|[^a-z])dp[-\s]', name):
+        return True
     for tok in re.split(r'[^a-z0-9]+', name):
         if not tok:
             continue
         if tok in ('msb', 'mcc', 'ct', 'tx'):
             return True
-        m = re.match(r'^(msb|mcc|ct|tx)\d+$', tok)
-        if m:
+        # Main/distribution-board prefixes: MSB-1, MDP-H-1, MDPL-1, LDP-2 all
+        # tokenize to a leading msb/mdp/mdpl/ldp. PREFIX (not equality) so
+        # 'mdpl' is caught by 'mdp'. Branch RP-*/LP-* have none of these.
+        if any(tok.startswith(p) for p in ('msb', 'mdp', 'ldp')):
+            return True
+        if re.match(r'^(msb|mcc|ct|tx)\d+$', tok):
+            return True
+        # A large ampacity in the name (e.g. '2500a', '1200a') is serious
+        # distribution gear, not a mounting adjacency. >=400 A only, so branch
+        # panels ('100a') stay in N3.
+        m = re.match(r'^(\d{3,4})a$', tok)
+        if m and int(m.group(1)) >= 400:
             return True
     return False
 
@@ -1685,15 +1727,37 @@ def _compose(rule, band, ctx):
         resolve_by = 'steel_fab'
     elif rule == 'N1':
         rated = bool(other and other.get('is_rated') is True)
+        ocat = (other or {}).get('cat')
         thick = other.get('thickness_in') if other else None
-        thick_ph = ' the {0} in'.format(_fmt_num(thick)) if thick else ''
-        what = '{0} passes through{1} {2}{3}.'.format(md, thick_ph, od, loc)
+        try:
+            thin = (thick is not None
+                    and float(thick) < float(_d.DEFAULTS.get('min_assembly_in') or 1.5))
+        except (TypeError, ValueError):
+            thin = False
+        # Depth-agnostic: N1 fires on both clean through-penetrations and runs
+        # that graze/parallel a wall, and the min-extent geometry cannot tell
+        # them apart, so we say "routes through" (the run crosses the assembly
+        # line) rather than asserting a clean bore (V5 finding).
+        what = '{0} routes through {1}{2}.'.format(md, od, loc)
         if rated and mover is not None and mover.get('cat') not in _d.DUCT_CATS:
             why = ('It crosses a rated assembly, so it needs a listed '
                    'through-penetration firestop system at the opening, not '
                    'just a sleeve.')
             act = 'Schedule the firestop detail with the opening package for this level.'
             code_ref = 'IBC 714.4.1'
+        elif ocat == 'Ceilings':
+            # A ceiling "penetration" is usually a diffuser boot / takeoff /
+            # riser at the ceiling plane, not a sleeved opening (V5 finding).
+            why = ('This reads as a by-design termination or pass-through at the '
+                   'ceiling plane (a diffuser boot, takeoff, or riser), not a '
+                   'sleeved wall or floor opening.')
+            act = 'Coordinate the location on the RCP; no penetration-schedule sleeve is implied.'
+        elif thin:
+            # A run "through" a sub-1.5 in finish/lining (tile, wood slat) needs
+            # no penetration-schedule sleeve (V5 finding).
+            why = ('The assembly here is a thin finish or lining, so this is a '
+                   'finish penetration, not a sleeved structural opening.')
+            act = 'Coordinate the finish penetration; no penetration-schedule sleeve is implied.'
         else:
             why = ('This reads as an intended penetration of an architectural '
                    'assembly, not a routing error.')
@@ -1882,26 +1946,48 @@ def _build_facts(ctx, rule, code_ref):
         # Clearance rows measure zone intrusion, not penetration/overlap;
         # showing bare "(not captured)" pen/overlap rows would read as a
         # capture failure. Each is guarded so only measured values appear.
+        # intrusion_depth_in is a DEFERRED field: no writer yet (the engine uses
+        # a boolean intersect filter, not a depth measure, for performance), so
+        # it stays None -- like spr_clearance_in / M-SPR. The guard keeps it off
+        # the card until a writer lands.
         intr_d = c.get('intrusion_depth_in')
         if intr_d is not None:
             facts.append({'k': 'Intrusion', 'v': _fmt_num(intr_d), 'unit': 'in'})
         cap = c.get('zone_cap_ft')
         if cap is not None:
-            facts.append({'k': 'Zone cap', 'v': _fmt_num(cap), 'unit': 'ft'})
+            # zone_cap_ft means the dedicated-space top for C-NEC but the
+            # structural ceiling above the protection band for M-NEC-PROT --
+            # label them distinctly so the number is not ambiguous.
+            cap_k = ('Struct ceiling'
+                     if c.get('clearance_rule') == 'M-NEC-PROT' else 'Zone cap')
+            facts.append({'k': cap_k, 'v': _fmt_num(cap), 'unit': 'ft'})
         spr = c.get('spr_clearance_in')
         if spr is not None:
             facts.append({'k': 'Head clearance', 'v': _fmt_num(spr), 'unit': 'in'})
     else:
         pen = c.get('penetration_depth_in')
-        # Annotate the depth ONLY with the reliable read. penetration_depth_in
-        # is the min extent of the overlap solid, so depth >= assembly
-        # thickness unambiguously means the run spans it ('passes through'). A
-        # 'partial' read is NOT reliable -- a run thinner than the wall shows a
-        # min-extent below the thickness even when it passes straight through --
-        # so we never assert "stops inside" (that was the V4 M-PEN false-Major
-        # trap). Omit the annotation in the ambiguous case.
-        pen_method = ('full - passes through'
-                      if ctx.get('pen_class') == 'full' else None)
+        # Annotate 'passes through' ONLY when it is PROVABLE. penetration_depth_in
+        # is the MIN extent of the overlap solid, so pen >= thickness is trusted
+        # as a through-span ONLY when the run is wider than the assembly is thick
+        # in both cross-axes (then the min extent IS the wall-normal depth, not
+        # the run's own section). A narrower run cannot be proven through from
+        # the min extent (the V4/V5 min-extent trap), and MOUNTING/seating rows
+        # (N3/N4) are not penetrations at all -- a pump standing on a 1/8 in
+        # finish floor was wrongly reading 'passes through' (V5 finding, 386
+        # rows). In every unprovable case show the bare number, no claim.
+        pen_method = None
+        if rule not in ('N3', 'N4') and ctx.get('pen_class') == 'full':
+            _mv = ctx.get('mover') or {}
+            _dims = [float(x) for x in ((_mv.get('ref') or {}).get('dims_in')
+                                        or []) if x is not None]
+            _trans = _dims if len(_dims) >= 2 else (_dims * 2 if _dims else [])
+            _th = (other or {}).get('thickness_in')
+            try:
+                _th = float(_th) if _th is not None else None
+            except (TypeError, ValueError):
+                _th = None
+            if _th is not None and _trans and min(_trans) >= _th:
+                pen_method = 'full - passes through'
         pen_row = {'k': 'Penetration', 'v': (None if pen is None else _fmt_num(pen)),
                    'unit': 'in'}
         if pen_method:

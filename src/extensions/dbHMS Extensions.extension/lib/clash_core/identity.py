@@ -31,6 +31,7 @@ realistic project.
 """
 
 import hashlib
+import math
 
 
 # Round midpoint coordinates to this resolution (in feet) for fingerprinting.
@@ -40,6 +41,20 @@ SPATIAL_BUCKET_FT = 1.0
 
 # How many hex chars from the SHA-1 digest to keep
 FINGERPRINT_LENGTH = 16
+
+
+def _round_half_away(x):
+    """Round half away from zero, the SAME rule on IronPython 2.7 and CPython 3.
+    Python's built-in round() is half-AWAY on IronPython 2.7 but half-EVEN on
+    CPython 3, so a midpoint coordinate landing exactly on a bucket boundary
+    (an integer + .5 ft) would bucket to different ints on the two runtimes and
+    produce a DIFFERENT fingerprint -- and the fingerprint is the identity that
+    carries a clash's comments/status/history across runs. Production runs on
+    IronPython (already half-away), so this keeps existing stored fingerprints
+    byte-for-byte and makes CPython (tests, offline reconciliation tools) agree
+    instead of detaching ~1% of clashes at .5-ft coordinates."""
+    f = float(x)
+    return int(math.floor(f + 0.5)) if f >= 0.0 else int(math.ceil(f - 0.5))
 
 
 def _ref_key(ref):
@@ -57,7 +72,7 @@ def _bucket_xyz(xyz, bucket_ft=SPATIAL_BUCKET_FT):
     if xyz is None:
         return (0, 0, 0)
     try:
-        return tuple(int(round(float(c) / bucket_ft)) for c in xyz)
+        return tuple(_round_half_away(float(c) / bucket_ft) for c in xyz)
     except (TypeError, ValueError):
         return (0, 0, 0)
 

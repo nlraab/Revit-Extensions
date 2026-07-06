@@ -334,7 +334,7 @@ NO_SLACK_KLASSES = frozenset((
 SLOPE_CODE_BY_KLASS = {
     'gravity':      'IPC 704.1',
     'grease':       'IMC 506.3.7',
-    'gravity_vent': 'IPC 905.2',
+    'gravity_vent': 'IPC 906.1',
     'condensate':   'IMC 307.2.1',
     'medgas':       'NFPA 99',
 }

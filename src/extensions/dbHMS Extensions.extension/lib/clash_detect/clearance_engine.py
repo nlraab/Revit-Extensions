@@ -42,6 +42,11 @@ import math
 DEDICATED_HEIGHT_FT = 6.0        # NEC 110.26(E)(1)(a) dedicated space height
 WORKING_HEIGHT_FT = 6.5          # NEC working-space height (78 in)
 WORKING_MIN_WIDTH_IN = 30.0      # NEC minimum working-space width
+WORKING_MAX_WIDTH_IN = 48.0      # cap the footprint-derived width: a bloated
+                                 # equipment family AABB (V5: a 10 ft-square
+                                 # heater box) must not stretch the working
+                                 # space sideways into adjacent walls. A single
+                                 # panel face is realistically <= 48 in.
 WORKING_DEPTH_BY_COND_IN = {1: 36.0, 2: 42.0, 3: 48.0}  # Table 110.26(A)(1)
 PROT_BAND_MIN_FT = 0.5           # min headroom above dedicated space to bother
 STRUCT_PROBE_FT = 20.0           # how far above the gear to look for a ceiling
@@ -327,11 +332,12 @@ def _working_zone(owner, bb, fam):
         return None
     depth_ft = working_depth_in(voltage_condition(_type_or_name(owner))) / 12.0
     min_w_ft = WORKING_MIN_WIDTH_IN / 12.0
+    max_w_ft = WORKING_MAX_WIDTH_IN / 12.0
     z0 = bb.Min.Z
     z1 = z0 + WORKING_HEIGHT_FT
     which, sign = axis
     if which == 'x':
-        wy = max(min_w_ft, bb.Max.Y - bb.Min.Y)
+        wy = min(max(min_w_ft, bb.Max.Y - bb.Min.Y), max_w_ft)
         cy = 0.5 * (bb.Min.Y + bb.Max.Y)
         y0, y1 = cy - wy / 2.0, cy + wy / 2.0
         if sign > 0:
@@ -339,7 +345,7 @@ def _working_zone(owner, bb, fam):
         else:
             x0, x1 = bb.Min.X - depth_ft, bb.Min.X
     else:
-        wx = max(min_w_ft, bb.Max.X - bb.Min.X)
+        wx = min(max(min_w_ft, bb.Max.X - bb.Min.X), max_w_ft)
         cx = 0.5 * (bb.Min.X + bb.Max.X)
         x0, x1 = cx - wx / 2.0, cx + wx / 2.0
         if sign > 0:
@@ -438,10 +444,32 @@ def _intrusions(zone_host, prepped, rule):
         for elem in hits:
             key = eid_int(elem.Id)
             _, bbt = by_id.get(key, (None, None))
-            mid = _bbox_center_list(bbt) if bbt is not None else _solid_center(
-                zone_host)
+            # Place the marker at the intruder-vs-zone OVERLAP center, not the
+            # intruder's full-AABB center: a tall run (e.g. a floor-to-ceiling
+            # unit heater) centers below the slab, far outside the working space
+            # (V5 finding). Clamp into the zone in all three axes; fall back to
+            # the intruder center, then the zone center.
+            mid = None
+            if bbt is not None and zbb is not None:
+                mid = _bbox_intersect_center(bbt, zbb)
+            if mid is None:
+                mid = (_bbox_center_list(bbt) if bbt is not None
+                       else _solid_center(zone_host))
             out.append((elem, bucket, mid))
     return out
+
+
+def _bbox_intersect_center(a, b):
+    """Center [x,y,z] of the overlap of two (minx,miny,minz,maxx,maxy,maxz)
+    boxes, or None if they do not overlap on every axis."""
+    try:
+        lo = [max(a[i], b[i]) for i in range(3)]
+        hi = [min(a[i + 3], b[i + 3]) for i in range(3)]
+        if any(lo[i] > hi[i] for i in range(3)):
+            return None
+        return [0.5 * (lo[i] + hi[i]) for i in range(3)]
+    except Exception:
+        return None
 
 
 def _structural_tops(doc, role_map, log):

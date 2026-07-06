@@ -600,12 +600,14 @@ class TierScenarioTests(unittest.TestCase):
         self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-EQ-SYS'))
 
     def test_small_vent_vs_storm_leader_is_major_not_critical(self):
-        # rev 4: a slope-bound mover (the vent) lands in the M1 slope sub-rule.
+        # A small FLAT vent (no measured slope) is the cheap mover, so it lands
+        # in the ordinary crossing sub-rule, not the slope sub-rule -- but the
+        # point of this test holds: it stays Major, never Critical.
         vent = ref(element_id=1, sys_class='Vent', dims_in=[2.0])
         storm = ref(element_id=2, sys_class='Other', sys_abbr='ST',
                     dims_in=[4.0])
         imp = score_one(clash(vent, storm))
-        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-SLOPE'))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-XING'))
 
     def test_n4_floor_drain_seated_at_slab(self):
         drain = ref(category='Pipe Fittings', sys_class='Sanitary',
@@ -881,12 +883,26 @@ class M1PartitionTests(unittest.TestCase):
         imp = score_one(clash(spr, duct))
         self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-FP'))
 
-    def test_slope_gravity_mover_cites_code(self):
+    def test_flat_vent_is_ordinary_crossing_not_slope(self):
+        # A flat 2 in vent (no measured slope) is the cheap mover, NOT a
+        # slope-bound main: it must fall to the ordinary crossing sub-rule with
+        # no pitch narrative and no vent-grade citation (V5 finding: 13 flat
+        # vents were wrongly M1-SLOPE + IPC 905.2).
         vent = ref(element_id=1, sys_class='Vent', dims_in=[2.0])
         duct = self._duct()
         imp = score_one(clash(vent, duct))
+        self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-XING'))
+        self.assertIsNone(imp['code_ref'])
+
+    def test_sloped_vent_stays_slope_aware_and_cites_vent_grade(self):
+        # A vent the model actually PITCHES is genuinely slope-bound and keeps
+        # M1-SLOPE, citing vent grade (IPC 906.1), not the vent-terminal-height
+        # section (IPC 905.2, the old wrong cite).
+        vent = ref(element_id=1, sys_class='Vent', dims_in=[2.0], slope=0.02)
+        duct = self._duct()
+        imp = score_one(clash(vent, duct))
         self.assertEqual((imp['band'], imp['rule']), ('Major', 'M1-SLOPE'))
-        self.assertEqual(imp['code_ref'], 'IPC 905.2')
+        self.assertEqual(imp['code_ref'], 'IPC 906.1')
         # code bar and citation move in lock-step.
         code_bar = [b['v'] for b in imp['brk'] if b['k'] == 'Code'][0]
         self.assertEqual(code_bar, 6)
@@ -1275,12 +1291,23 @@ class Phase3ArchRulesTests(unittest.TestCase):
         self.assertIsNone(self._pen_fact(imp).get('method'))
 
     def test_facts_annotate_full_penetration(self):
-        # depth >= thickness unambiguously spans the wall -> the reliable read.
-        duct = ref(category='Ducts', dims_in=[8.0, 6.0])
+        # 'passes through' is asserted ONLY when provable: the run is wider than
+        # the wall is thick in BOTH cross-axes, so the min-extent depth IS the
+        # wall-normal span. A 30x20 duct through an 8 in wall qualifies.
+        duct = ref(category='Ducts', dims_in=[30.0, 20.0])
         imp = score_one(clash(duct, ref(**self._wall()),
                               penetration_depth_in=8.0, geom_method='boolean'))
         self.assertEqual(self._pen_fact(imp).get('method'),
                          'full - passes through')
+
+    def test_facts_no_pen_method_for_narrow_run(self):
+        # A run NARROWER than the wall cannot be proven through from the min
+        # extent (that min extent is the run's own section, the V4/V5 trap), so
+        # no 'passes through' claim -- just the bare number.
+        pipe = ref(category='Pipes', dims_in=[2.5])
+        imp = score_one(clash(pipe, ref(**self._wall()),
+                              penetration_depth_in=2.5, geom_method='boolean'))
+        self.assertIsNone(self._pen_fact(imp).get('method'))
 
     def test_facts_no_pen_method_when_depth_uncaptured(self):
         # No boolean pass -> no depth -> no class annotation (renders
