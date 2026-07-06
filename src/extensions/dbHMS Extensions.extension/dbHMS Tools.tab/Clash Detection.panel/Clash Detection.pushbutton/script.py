@@ -209,6 +209,7 @@ class CoordinationForm(forms.WPFWindow):
         # it reliably in front and off the taskbar as a separate entry. Prefer
         # the authoritative UIApplication.MainWindowHandle (Revit 2019+); a raw
         # Process.MainWindowHandle can resolve to the wrong top-level window.
+        self._revit_hwnd = None
         try:
             from System.Windows.Interop import WindowInteropHelper
             hwnd = None
@@ -220,6 +221,10 @@ class CoordinationForm(forms.WPFWindow):
                 import System.Diagnostics
                 hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
             WindowInteropHelper(self).Owner = hwnd
+            # Remember Revit's handle so the keep-in-front logic can tell
+            # "Revit stole focus" (pull back) from "my own folder-picker / file
+            # dialog / context menu opened" (leave it alone).
+            self._revit_hwnd = int(hwnd)
             _log("owner: parented to Revit hwnd {0}".format(int(hwnd)))
         except Exception:
             _log("owner: failed to parent to Revit\n{0}".format(
@@ -264,17 +269,29 @@ class CoordinationForm(forms.WPFWindow):
     # --- Web panel ----------------------------------------------------
 
     def _on_deactivated(self, sender, args):
-        """The window lost the foreground. During launch (and just after an
-        export) this is the spurious drift behind Revit, so pull it back. Capped
-        at 30 total re-asserts so a deliberate switch-away much later isn't
-        fought; drift is a load/op-time event, well under the cap."""
+        """The window lost the foreground. Pull it back ONLY when REVIT's own
+        window took the foreground -- the spurious launch/export drift behind
+        Revit. If a child window we opened took focus (the folder picker, a file
+        dialog, a confirmation prompt, or a right-click context menu), or the
+        user switched to another app, do NOT fight it: re-asserting there yanked
+        focus off the folder-browse dialog and made its menu flicker away. Capped
+        so a deliberate switch-away much later is never fought."""
+        # Hard suspend while we deliberately show a native child dialog (the
+        # folder picker): a guaranteed off-switch that does not depend on the
+        # ctypes foreground probe below being available.
+        if getattr(self, '_suspend_front', False):
+            return
         # Don't fight during a long operation (detection/export pumps the
         # message loop and lets Revit activate repeatedly) -- that would flicker
-        # and burn the cap. The operation's own completion pulls us back to the
-        # front instead. So this only ever helps at launch/idle.
+        # and burn the cap. The operation's own completion pulls us back instead.
         if getattr(self, '_op_busy', False):
             return
         if getattr(self, '_front_reasserts', 0) >= 30:
+            return
+        # The critical gate: only Revit warrants a pull-back. On any doubt do
+        # nothing -- a rare drift behind Revit is far better than fighting our
+        # own dialogs, which breaks folder-picking.
+        if not self._revit_is_foreground():
             return
         self._front_reasserts += 1
         # Marshal to the next dispatcher cycle: re-activating synchronously from
@@ -289,6 +306,20 @@ class CoordinationForm(forms.WPFWindow):
                 self._bring_to_front()
             except Exception:
                 pass
+
+    def _revit_is_foreground(self):
+        """True only when Revit's main window is the current foreground window,
+        so the keep-in-front logic can distinguish 'Revit drifted over us' from
+        'we opened a child dialog / the user switched apps'. Returns False on any
+        error -- we never fight when unsure."""
+        hwnd = getattr(self, '_revit_hwnd', None)
+        if not hwnd:
+            return False
+        try:
+            import ctypes
+            return int(ctypes.windll.user32.GetForegroundWindow()) == int(hwnd)
+        except Exception:
+            return False
 
     def _bring_to_front(self):
         """Pull the window to the top of the z-order without leaving it a
@@ -1348,6 +1379,10 @@ class CoordinationForm(forms.WPFWindow):
         # Browse for the folder (the user makes/points at it -- e.g. a "Clash
         # Data" folder in the firm's project structure). We don't create or
         # rename anything and don't care whether it's local or on the network.
+        # Suspend the keep-in-front logic for the whole life of the picker so it
+        # never steals focus back from the dialog, its New Folder / rename box,
+        # or its right-click context menu (that made the picker bounce).
+        self._suspend_front = True
         try:
             clr.AddReference('System.Windows.Forms')
             from System.Windows.Forms import FolderBrowserDialog, DialogResult
@@ -1365,6 +1400,8 @@ class CoordinationForm(forms.WPFWindow):
             _log("set_folder: browser failed\n{0}".format(traceback.format_exc()))
             self._post("status:Could not open the folder picker. See coord.log.")
             return
+        finally:
+            self._suspend_front = False
         if not folder:
             return
         # Store the path in the model (transaction; travels with the file).
