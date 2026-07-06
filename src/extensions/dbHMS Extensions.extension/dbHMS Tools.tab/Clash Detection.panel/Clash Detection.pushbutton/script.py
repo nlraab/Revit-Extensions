@@ -247,8 +247,60 @@ class CoordinationForm(forms.WPFWindow):
         self.Closed += self._on_closed
         # Attach the web panel after layout so the host Border has a real size.
         self.Loaded += self._on_loaded
+        # Keep the tool in front of Revit. The Revit owner above is the right
+        # baseline, but WebView2 initializing + rendering the clash data (all
+        # async, out of process) can still briefly let Revit's window activate
+        # over ours DURING LAUNCH. So we re-assert the window to the front
+        # whenever it gets deactivated, capped so a user who deliberately
+        # switches to another app later is not fought forever. (The window is
+        # shown modal, so in normal use the only deactivations are this spurious
+        # launch/export drift.)
+        self._front_reasserts = 0
+        try:
+            self.Deactivated += self._on_deactivated
+        except Exception:
+            pass
 
     # --- Web panel ----------------------------------------------------
+
+    def _on_deactivated(self, sender, args):
+        """The window lost the foreground. During launch (and just after an
+        export) this is the spurious drift behind Revit, so pull it back. Capped
+        at 30 total re-asserts so a deliberate switch-away much later isn't
+        fought; drift is a load/op-time event, well under the cap."""
+        # Don't fight during a long operation (detection/export pumps the
+        # message loop and lets Revit activate repeatedly) -- that would flicker
+        # and burn the cap. The operation's own completion pulls us back to the
+        # front instead. So this only ever helps at launch/idle.
+        if getattr(self, '_op_busy', False):
+            return
+        if getattr(self, '_front_reasserts', 0) >= 30:
+            return
+        self._front_reasserts += 1
+        # Marshal to the next dispatcher cycle: re-activating synchronously from
+        # inside the Deactivated event can be ignored or re-enter.
+        try:
+            from System import Action
+            from System.Windows.Threading import DispatcherPriority
+            self.Dispatcher.BeginInvoke(
+                DispatcherPriority.Background, Action(self._bring_to_front))
+        except Exception:
+            try:
+                self._bring_to_front()
+            except Exception:
+                pass
+
+    def _bring_to_front(self):
+        """Pull the window to the top of the z-order without leaving it a
+        permanent always-on-top window. The Topmost True->False toggle is the
+        reliable way to jump a WPF window to the front; Activate() also grabs
+        the foreground (allowed here -- the tool runs in Revit's own process)."""
+        try:
+            self.Activate()
+            self.Topmost = True
+            self.Topmost = False
+        except Exception:
+            pass
 
     def _on_loaded(self, sender, args):
         try:
@@ -705,13 +757,10 @@ class CoordinationForm(forms.WPFWindow):
                 _log("push_initial({0}): {1} feed failed\n{2}".format(
                     why, name, traceback.format_exc()))
         # Pull the window back to the front once the data has loaded: WebView2
-        # spinning up can let Revit's window activate over ours during open, so
-        # a belt-and-suspenders Activate() (on top of the Revit owner) ensures
-        # the tool is in front when the user first sees it.
-        try:
-            self.Activate()
-        except Exception:
-            pass
+        # spinning up can let Revit's window activate over ours during open. On
+        # top of the Revit owner + the Deactivated re-assert, force it forward
+        # here too so the tool is in front when the user first sees the data.
+        self._bring_to_front()
 
     # --- host <-> page ------------------------------------------------
 
@@ -862,10 +911,7 @@ class CoordinationForm(forms.WPFWindow):
             # The export drives the Revit API and pumps the message loop, which
             # can let Revit's window activate over ours; pull the tool back to
             # the front when it finishes (the Revit owner keeps it there after).
-            try:
-                self.Activate()
-            except Exception:
-                pass
+            self._bring_to_front()
         if code == "canceled":
             self._post("runstage:canceled")
         elif code == "fail":
