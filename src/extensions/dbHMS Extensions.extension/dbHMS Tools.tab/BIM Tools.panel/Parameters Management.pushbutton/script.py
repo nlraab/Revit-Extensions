@@ -497,6 +497,33 @@ class ParametersManagementForm(forms.WPFWindow):
         _set_legend_mixed(self)
         self._update_selection_count()
 
+        # Brand logo in the header (loaded from the sibling PNG)
+        self._load_logo()
+
+    # ===== Branding =====
+    def _load_logo(self):
+        """Load the dbHMS wordmark PNG into the header Image.
+
+        Decoded down to header height so the 5950px master never sits in
+        memory at full size; wrapped in try/except so a missing or broken
+        file can never break the tool."""
+        try:
+            from System import Uri, UriKind
+            from System.Windows.Media.Imaging import (
+                BitmapImage, BitmapCacheOption)
+            path = os.path.join(SCRIPT_DIR, 'dbhms_logo.png')
+            if not os.path.exists(path):
+                return
+            bmp = BitmapImage()
+            bmp.BeginInit()
+            bmp.CacheOption = BitmapCacheOption.OnLoad
+            bmp.UriSource = Uri(path, UriKind.Absolute)
+            bmp.DecodePixelHeight = 96
+            bmp.EndInit()
+            self.img_logo.Source = bmp
+        except Exception:
+            pass
+
     # ===== Close =====
     def _on_close(self, sender, args):
         self.Close()
@@ -982,13 +1009,16 @@ class ParametersManagementForm(forms.WPFWindow):
 
         if dirty_n == 0:
             self.lbl_pending_changes.Text = "No pending changes."
+            self.pill_pending_changes.Visibility = Visibility.Collapsed
             self.btn_apply_bulk.IsEnabled = False
             self.btn_reset_changes.IsEnabled = False
             self.btn_apply_bulk.Content = "Apply changes"
             return
 
-        self.lbl_pending_changes.Text = "%d pending change%s on %d sheet%s." % (
-            dirty_n,  "" if dirty_n  == 1 else "s",
+        self.lbl_pending_count.Text = str(dirty_n)
+        self.pill_pending_changes.Visibility = Visibility.Visible
+        self.lbl_pending_changes.Text = "pending change%s on %d sheet%s." % (
+            "" if dirty_n  == 1 else "s",
             sheets_n, "" if sheets_n == 1 else "s",
         )
         self.btn_apply_bulk.IsEnabled = has_doc and sheets_n > 0

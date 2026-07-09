@@ -20,7 +20,7 @@ Strategy (matches Navisworks behavior):
     places" - a long pipe crossing a wall twice produces two separate
     clashes. DO NOT change this constant on a live project: every
     existing clash would re-fingerprint and detach from its status,
-    comments, and history (decision D1, CLASH_GROUPING_DESIGN.md).
+    comments, and history (decision D1, Clash Detection.panel/README.md).
   - Test ID: clashes from different tests get different fingerprints,
     even if the same pair fires both. Matches how Navisworks reports
     per-test results separately.

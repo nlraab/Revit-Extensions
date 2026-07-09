@@ -22,6 +22,7 @@ __title__ = "Revisions\nManager"
 __doc__   = "Manage revisions: create, edit, reorder, apply to sheets, find clouds, cloud/tag."
 
 import clr
+import os
 import sys
 
 clr.AddReference("RevitAPI")
@@ -101,6 +102,8 @@ import dbhms_telemetry
 
 doc   = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
+
+SCRIPT_DIR = os.path.dirname(__file__)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -717,7 +720,7 @@ SHARED_RESOURCES = """
     <Style x:Key="SectionHeader" TargetType="TextBlock">
       <Setter Property="FontSize"   Value="14"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Foreground" Value="#1A202C"/>
+      <Setter Property="Foreground" Value="#1A365D"/>
       <Setter Property="Margin"     Value="0,0,0,6"/>
     </Style>
     <Style x:Key="FieldLabel" TargetType="TextBlock">
@@ -814,20 +817,107 @@ SHARED_RESOURCES = """
       <Setter Property="CaretBrush"       Value="#2B6CB0"/>
     </Style>
 
+    <!-- ===== dbHMS standard dropdown (canonical) ===== -->
+    <Style x:Key="ComboToggle" TargetType="ToggleButton">
+      <Setter Property="OverridesDefaultStyle" Value="True"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="ClickMode" Value="Press"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="bd" Background="White" BorderBrush="#CBD5E0"
+                    BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+              <Path x:Name="arrow" HorizontalAlignment="Right" VerticalAlignment="Center"
+                    Margin="0,0,10,0" Data="M0,0 L4,4 L8,0" Stroke="#718096"
+                    StrokeThickness="1.6" StrokeStartLineCap="Round"
+                    StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="#A0AEC0"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="#2B6CB0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="ComboBox">
-      <Setter Property="Background"      Value="White"/>
-      <Setter Property="Foreground"      Value="#1A202C"/>
-      <Setter Property="BorderBrush"     Value="#CBD5E0"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="Padding"         Value="6,4"/>
-      <Setter Property="Height"          Value="28"/>
-      <Setter Property="FontSize"        Value="12"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Foreground" Value="#2D3748"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton x:Name="ToggleButton" Style="{StaticResource ComboToggle}"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+              <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                Margin="10,0,26,0" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+              <TextBox x:Name="PART_EditableTextBox" Visibility="Hidden" Focusable="True"
+                       IsReadOnly="{TemplateBinding IsReadOnly}" Margin="7,0,26,0"
+                       VerticalAlignment="Center" Background="Transparent" BorderThickness="0"/>
+              <Popup x:Name="Popup" Placement="Bottom" Focusable="False"
+                     IsOpen="{TemplateBinding IsDropDownOpen}"
+                     AllowsTransparency="True" PopupAnimation="Slide">
+                <Grid x:Name="DropDown" SnapsToDevicePixels="True"
+                      MinWidth="{TemplateBinding ActualWidth}"
+                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                  <Border x:Name="DropDownBorder" Background="White" BorderBrush="#CBD5E0"
+                          BorderThickness="1" CornerRadius="6" Margin="0,3,0,0"/>
+                  <ScrollViewer Margin="4,7,4,4" SnapsToDevicePixels="True">
+                    <StackPanel IsItemsHost="True"
+                                KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                </Grid>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="HasItems" Value="False">
+                <Setter TargetName="DropDownBorder" Property="MinHeight" Value="34"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="#A0AEC0"/>
+              </Trigger>
+              <Trigger Property="IsEditable" Value="True">
+                <Setter Property="IsTabStop" Value="False"/>
+                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="ContentSite" Property="Visibility" Value="Hidden"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
     <Style TargetType="ComboBoxItem">
-      <Setter Property="Background"  Value="White"/>
-      <Setter Property="Foreground"  Value="#1A202C"/>
-      <Setter Property="Padding"     Value="6,4"/>
-      <Setter Property="FontSize"    Value="12"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="Foreground" Value="#2D3748"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="ib" Background="Transparent" CornerRadius="4"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="ib" Property="Background" Value="#EBF3FB"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="ib" Property="Background" Value="#EBF8FF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style TargetType="CheckBox">
@@ -1041,6 +1131,38 @@ MAIN_XAML = """
         ResizeMode="CanResizeWithGrip">
   <Window.Resources>
 """ + SHARED_RESOURCES + """
+    <!-- section tick accents: blue by default, orange where it matters -->
+    <Style x:Key="Tick" TargetType="Border">
+      <Setter Property="Width" Value="3"/>
+      <Setter Property="Height" Value="15"/>
+      <Setter Property="CornerRadius" Value="2"/>
+      <Setter Property="Background" Value="#2B6CB0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="0,0,8,0"/>
+    </Style>
+    <Style x:Key="TickOrange" TargetType="Border" BasedOn="{StaticResource Tick}">
+      <Setter Property="Background" Value="#EE8A34"/>
+    </Style>
+
+    <!-- light-blue master chip -->
+    <Style x:Key="Chip" TargetType="Border">
+      <Setter Property="Background" Value="#EBF3FB"/>
+      <Setter Property="BorderBrush" Value="#D7E6F6"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="5"/>
+      <Setter Property="Padding" Value="8"/>
+      <Setter Property="Margin" Value="0,9,0,0"/>
+    </Style>
+
+    <!-- count pill (orange, affected items) -->
+    <Style x:Key="CountPill" TargetType="Border">
+      <Setter Property="Background" Value="#FBEEDD"/>
+      <Setter Property="BorderBrush" Value="#E7B183"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="9,1"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
   </Window.Resources>
 
   <Grid>
@@ -1051,25 +1173,54 @@ MAIN_XAML = """
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <!-- HEADER -->
-    <Border Grid.Row="0" Background="#2D3748" Padding="20,14">
+    <!-- HEADER: deep-blue dotted ground, solid orange baseline, brand logo -->
+    <Border Grid.Row="0" BorderBrush="#EE8A34" BorderThickness="0,0,0,3">
       <Grid>
-        <StackPanel Orientation="Vertical" HorizontalAlignment="Left">
-          <TextBlock Text="Revisions Manager" Foreground="White"
-                     FontSize="20" FontWeight="Bold"/>
-          <TextBlock x:Name="lbl_project"
-                     Text="Create, edit, reorder revisions and manage which sheets they appear on."
-                     Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
-                    VerticalAlignment="Center" Opacity="0.85">
-          <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
-                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-          <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
-                     FontWeight="Light" VerticalAlignment="Center"/>
-          <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
-                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-        </StackPanel>
+        <Grid.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#143257" Offset="0"/>
+            <GradientStop Color="#0F2748" Offset="0.55"/>
+            <GradientStop Color="#0B1D34" Offset="1"/>
+          </LinearGradientBrush>
+        </Grid.Background>
+
+        <!-- faint light dot texture, faded out toward the orange baseline -->
+        <Rectangle>
+          <Rectangle.OpacityMask>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+              <GradientStop Color="#FFFFFFFF" Offset="0.0"/>
+              <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+              <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+            </LinearGradientBrush>
+          </Rectangle.OpacityMask>
+          <Rectangle.Fill>
+            <DrawingBrush TileMode="Tile" Stretch="None"
+                          Viewport="0,0,16,16" ViewportUnits="Absolute"
+                          Viewbox="0,0,16,16" ViewboxUnits="Absolute">
+              <DrawingBrush.Drawing>
+                <GeometryDrawing Brush="#26D6ECFF">
+                  <GeometryDrawing.Geometry>
+                    <EllipseGeometry Center="8,8" RadiusX="1.1" RadiusY="1.1"/>
+                  </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+              </DrawingBrush.Drawing>
+            </DrawingBrush>
+          </Rectangle.Fill>
+        </Rectangle>
+
+        <!-- title (left) + brand logo (right) -->
+        <Grid Margin="24,16">
+          <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center">
+            <TextBlock Text="Revisions Manager" Foreground="#F2F7FC"
+                       FontSize="20" FontWeight="Bold"/>
+            <TextBlock x:Name="lbl_project"
+                       Text="Create, edit, reorder revisions and manage which sheets they appear on."
+                       Foreground="#A9C2D8" FontSize="12" Margin="0,3,0,0"/>
+          </StackPanel>
+          <Image x:Name="img_logo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                 Height="38" Stretch="Uniform"
+                 RenderOptions.BitmapScalingMode="HighQuality"/>
+        </Grid>
       </Grid>
     </Border>
 
@@ -1113,15 +1264,23 @@ MAIN_XAML = """
         <ColumnDefinition Width="2*"  MinWidth="400"/>
       </Grid.ColumnDefinitions>
 
-      <!-- ─── REVISIONS PANEL (LEFT) ─── -->
-      <Border Grid.Column="0" Background="White" Padding="16,12">
+      <!-- ─── REVISIONS PANEL (LEFT) — primary card: orange rail marks
+           the revisions this tool creates, edits and drives everything from ─── -->
+      <Border Grid.Column="0" Background="White" Padding="0">
         <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="3"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <Border Grid.Column="0" Background="#EE8A34"/>
+          <Grid Grid.Column="1" Margin="16,12">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
 
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <Border Style="{StaticResource TickOrange}"/>
             <TextBlock Text="Revisions" Style="{StaticResource SectionHeader}"
                        VerticalAlignment="Center" Margin="0"/>
             <TextBlock x:Name="lbl_focus_hint"
@@ -1298,6 +1457,7 @@ MAIN_XAML = """
 
             </DataGrid.Columns>
           </DataGrid>
+          </Grid>
         </Grid>
       </Border>
 
@@ -1319,7 +1479,10 @@ MAIN_XAML = """
           </Grid.RowDefinitions>
 
           <StackPanel Grid.Row="0" Orientation="Vertical" Margin="0,0,0,8">
-            <TextBlock Text="Sheets" Style="{StaticResource SectionHeader}" Margin="0"/>
+            <StackPanel Orientation="Horizontal">
+              <Border Style="{StaticResource Tick}"/>
+              <TextBlock Text="Sheets" Style="{StaticResource SectionHeader}" Margin="0"/>
+            </StackPanel>
             <TextBlock x:Name="lbl_focus_caption"
                        Text="No revision selected — click a revision on the left."
                        Foreground="#718096" FontSize="11" Margin="0,2,0,0"
@@ -1648,6 +1811,20 @@ class RevisionsManagerWindow(object):
 
         w = Markup.XamlReader.Parse(MAIN_XAML)
         self._w = w
+
+        # Load the dbHMS brand logo into the header (decoded at 96px for crispness)
+        try:
+            from System import Uri, UriKind
+            from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
+            _lp = os.path.join(SCRIPT_DIR, 'dbhms_logo.png')
+            if os.path.exists(_lp):
+                _img = w.FindName('img_logo')
+                if _img is not None:
+                    _b = BitmapImage(); _b.BeginInit(); _b.CacheOption = BitmapCacheOption.OnLoad
+                    _b.UriSource = Uri(_lp, UriKind.Absolute); _b.DecodePixelHeight = 96; _b.EndInit()
+                    _img.Source = _b
+        except Exception:
+            pass
 
         # Parent window to Revit so it doesn't float as an independent taskbar window
         try:

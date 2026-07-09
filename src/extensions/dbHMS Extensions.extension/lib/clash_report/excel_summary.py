@@ -33,6 +33,8 @@ import os
 import zipfile
 from xml.sax.saxutils import escape
 
+from . import report_model as rm
+
 
 # ---------------------------------------------------------------------------
 # Columns + widths
@@ -40,18 +42,24 @@ from xml.sax.saxutils import escape
 
 COLUMNS = [
     'Clash #',
+    'Importance',
+    'Score',
     'Status',
     'Trade',
+    'Issue',
     'Test',
     'Kind',
+    'Why it ranks',
+    'Discipline pair',
     'Element A name',
     'Element A ID',
-    'Element A source',
     'Element A category',
+    'Element A source',
     'Element B name',
     'Element B ID',
-    'Element B source',
     'Element B category',
+    'Element B source',
+    'Level',
     'Midpoint X (ft)',
     'Midpoint Y (ft)',
     'Midpoint Z (ft)',
@@ -68,18 +76,24 @@ COLUMNS = [
 # names but doesn't waste space on numeric columns.
 COL_WIDTHS = [
     8,   # Clash #
+    12,  # Importance (band pill)
+    7,   # Score
     12,  # Status (centered pill)
     18,  # Trade (centered pill)
-    28,  # Test
-    8,   # Kind
-    28,  # Element A name
+    10,  # Issue
+    26,  # Test
+    7,   # Kind
+    52,  # Why it ranks (wrap)
+    26,  # Discipline pair
+    26,  # Element A name
     12,  # Element A ID
-    16,  # Element A source
-    16,  # Element A category
-    28,  # Element B name
+    18,  # Element A category
+    18,  # Element A source
+    26,  # Element B name
     12,  # Element B ID
-    22,  # Element B source
-    16,  # Element B category
+    18,  # Element B category
+    18,  # Element B source
+    14,  # Level
     14,  # Midpoint X
     14,  # Midpoint Y
     14,  # Midpoint Z
@@ -111,6 +125,9 @@ STYLE_TRADE_FP         = 11
 STYLE_TRADE_TECH       = 12
 STYLE_TRADE_ARCH       = 13
 STYLE_TRADE_STRUCT     = 14
+STYLE_BAND_CRITICAL    = 15
+STYLE_BAND_MAJOR       = 16
+STYLE_BAND_MINOR       = 17
 
 _STATUS_TO_STYLE = {
     'Open':     STYLE_STATUS_OPEN,
@@ -129,10 +146,16 @@ _TRADE_TO_STYLE = {
     'Structural':      STYLE_TRADE_STRUCT,
 }
 
+_BAND_TO_STYLE = {
+    'Critical': STYLE_BAND_CRITICAL,
+    'Major':    STYLE_BAND_MAJOR,
+    'Minor':    STYLE_BAND_MINOR,
+}
+
 
 # Column names that hold numeric data (right-aligned with the NUMBER style).
 _NUMBER_COLUMNS = {
-    'Clash #', 'Element A ID', 'Element B ID', 'Comment count',
+    'Clash #', 'Score', 'Element A ID', 'Element B ID', 'Comment count',
     'Midpoint X (ft)', 'Midpoint Y (ft)', 'Midpoint Z (ft)',
 }
 
@@ -141,13 +164,16 @@ _NUMBER_COLUMNS = {
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def build_xlsx(clashes, out_path, filter_predicate=None):
+def build_xlsx(clashes, out_path, filter_predicate=None,
+               test_name_lookup=None, group_lookup=None):
     """Write an XLSX summary of `clashes` to `out_path`.
 
     Returns the count of data rows written (excludes the header).
 
     `filter_predicate(clash) -> bool` lets the caller drop clashes (same
-    contract as bcf.build_bcf_zip).
+    contract as bcf.build_bcf_zip). `test_name_lookup` maps test_id ->
+    display name; `group_lookup` maps group_id -> a short issue label
+    (e.g. "#4" or the issue title). Both optional.
 
     Atomic-write: writes to a sibling .tmp file first, then renames onto
     `out_path`. Same robustness pattern as the BCF builder.
@@ -169,7 +195,8 @@ def build_xlsx(clashes, out_path, filter_predicate=None):
     try:
         # Build the dynamic XML parts in memory.
         sst = _SharedStringTable()
-        sheet_xml = _build_sheet_xml(clashes, sst)
+        sheet_xml = _build_sheet_xml(clashes, sst, test_name_lookup or {},
+                                     group_lookup or {})
         shared_strings_xml = _build_shared_strings_xml(sst)
 
         with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -229,7 +256,7 @@ class _SharedStringTable(object):
 # Sheet + shared-strings XML builders
 # ---------------------------------------------------------------------------
 
-def _build_sheet_xml(clashes, sst):
+def _build_sheet_xml(clashes, sst, test_name_lookup, group_lookup):
     """sheet1.xml — column widths, frozen-pane header, all rows, auto-filter."""
     parts = []
     parts.append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
@@ -267,7 +294,7 @@ def _build_sheet_xml(clashes, sst):
     # Data rows.
     for row_idx, clash in enumerate(clashes):
         row_num = row_idx + 2  # row 1 is header
-        row_data = _row_for(clash)
+        row_data = _row_for(clash, test_name_lookup, group_lookup)
         parts.append('<row r="{0}">'.format(row_num))
         for col_idx, value in enumerate(row_data):
             cell_ref = _col_letter(col_idx + 1) + str(row_num)
@@ -314,7 +341,9 @@ def _cell_xml(ref, value, col_idx, sst):
     col_name = COLUMNS[col_idx]
 
     # Style selection
-    if col_name == 'Status':
+    if col_name == 'Importance':
+        style = _BAND_TO_STYLE.get(_safe_str(value), STYLE_BODY)
+    elif col_name == 'Status':
         style = _STATUS_TO_STYLE.get(_safe_str(value), STYLE_BODY)
     elif col_name == 'Trade':
         style = _TRADE_TO_STYLE.get(_safe_str(value), STYLE_BODY)
@@ -346,38 +375,43 @@ def _cell_xml(ref, value, col_idx, sst):
     return '<c r="{0}" s="{1}" t="s"><v>{2}</v></c>'.format(ref, style, s_idx)
 
 
-def _row_for(clash):
-    """Order MUST match COLUMNS above."""
-    a = clash.get('ref_a') or {}
-    b = clash.get('ref_b') or {}
-    midpoint = clash.get('midpoint') or [None, None, None]
-    comments = clash.get('comments') or []
-    comment_count = len(comments)
-    latest_comment = comments[-1] if comments else {}
+def _row_for(clash, test_name_lookup=None, group_lookup=None):
+    """Order MUST match COLUMNS above. Built on report_model so band,
+    score, trade, pair and reason match the app + the HTML/PDF exports."""
+    group_lookup = group_lookup or {}
+    r = rm.row_for(clash, test_name_lookup or {})
+    gid = r['group_id']
+    issue = group_lookup.get(gid) or ('grouped' if gid else '-')
 
     return [
-        clash.get('seq'),
-        clash.get('status') or 'Open',
-        clash.get('assignee') or '-',
-        clash.get('test_name') or clash.get('test_id') or '(unknown)',
-        clash.get('kind') or 'hard',
-        a.get('name') or '',
-        a.get('element_id'),
-        a.get('source') or 'host',
-        a.get('category') or '',
-        b.get('name') or '',
-        b.get('element_id'),
-        b.get('source') or 'host',
-        b.get('category') or '',
-        _coord(midpoint[0] if midpoint and len(midpoint) > 0 else None),
-        _coord(midpoint[1] if midpoint and len(midpoint) > 1 else None),
-        _coord(midpoint[2] if midpoint and len(midpoint) > 2 else None),
-        clash.get('first_seen_run') or '',
-        clash.get('last_seen_run') or '',
-        comment_count,
-        latest_comment.get('body') or '',
-        latest_comment.get('author') or '',
-        clash.get('id') or '',
+        r['seq'],
+        r['band'],
+        r['score'],
+        r['status'],
+        r['trade'] or '-',
+        issue,
+        r['test'],
+        r['kind'],
+        r['reason'],
+        r['pair'],
+        r['a_name'],
+        r['a_id'],
+        r['a_cat'],
+        r['a_src'],
+        r['b_name'],
+        r['b_id'],
+        r['b_cat'],
+        r['b_src'],
+        r['level'],
+        r['x'],
+        r['y'],
+        r['z'],
+        r['first_seen'],
+        r['last_seen'],
+        r['comment_count'],
+        r['latest_comment'],
+        r['latest_comment_author'],
+        r['id'],
     ]
 
 
@@ -499,6 +533,10 @@ _C_TRADE_TECH    = 'FFE0D5E8'
 _C_TRADE_ARCH    = 'FFE5E0D5'
 _C_TRADE_STRUCT  = 'FFD8DCE0'
 _C_TRADE_FG      = 'FF2D3748'   # dark text inside trade pills
+# Importance band fills (light, matching coord.html band chips).
+_C_BAND_CRIT     = 'FFFCEBEB'
+_C_BAND_MAJOR    = 'FFFAEEDA'
+_C_BAND_MINOR    = 'FFF1EFE8'
 
 
 def _build_styles_xml():
@@ -528,11 +566,13 @@ def _build_styles_xml():
     # 2: header bg
     # 3-6: status (Open, Reviewed, Approved, Resolved)
     # 7-13: trade (mechanical, electrical, plumbing, fp, tech, arch, struct)
+    # 14-16: importance band (critical, major, minor)
     fill_colors = [
         _C_HEADER_BG,
         _C_OPEN_BG, _C_REVIEWED_BG, _C_APPROVED_BG, _C_RESOLVED_BG,
         _C_TRADE_MECH, _C_TRADE_ELEC, _C_TRADE_PLUMB, _C_TRADE_FP,
         _C_TRADE_TECH, _C_TRADE_ARCH, _C_TRADE_STRUCT,
+        _C_BAND_CRIT, _C_BAND_MAJOR, _C_BAND_MINOR,
     ]
     parts.append('<fills count="{0}">'.format(2 + len(fill_colors)))
     parts.append('<fill><patternFill patternType="none"/></fill>')
@@ -564,7 +604,7 @@ def _build_styles_xml():
     # ---- cellXfs ----
     # ORDER MATTERS — must match the STYLE_* constants at the top of the file.
     # Index 0 = STYLE_DEFAULT, 1 = STYLE_HEADER, etc.
-    parts.append('<cellXfs count="15">')
+    parts.append('<cellXfs count="18">')
 
     # 0 STYLE_DEFAULT: bare default
     parts.append('<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>')
@@ -602,6 +642,15 @@ def _build_styles_xml():
     # 8-14 TRADE pills (dark bold on light color, centered)
     # Fill indices 7-13 = mechanical, electrical, plumbing, fp, tech, arch, struct
     for fill_idx in (7, 8, 9, 10, 11, 12, 13):
+        parts.append(
+            '<xf numFmtId="0" fontId="3" fillId="{0}" borderId="1" xfId="0" '
+            'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+            '<alignment horizontal="center" vertical="center"/>'
+            '</xf>'.format(fill_idx))
+
+    # 15-17 BAND pills (dark bold on light band color, centered)
+    # Fill indices 14-16 = Critical, Major, Minor
+    for fill_idx in (14, 15, 16):
         parts.append(
             '<xf numFmtId="0" fontId="3" fillId="{0}" borderId="1" xfId="0" '
             'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'

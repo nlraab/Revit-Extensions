@@ -187,13 +187,13 @@ class SheetXmlTests(unittest.TestCase):
             os.remove(out); os.rmdir(os.path.dirname(out))
 
     def test_status_cell_uses_status_pill_style(self):
-        # The Status column is the second column (index 2 in Excel = 'B').
+        # Status is column 4 (Excel 'D'): Clash #, Importance, Score, Status.
         # For an "Open" clash, that cell's style should be STYLE_STATUS_OPEN.
         out = _build_to_temp([_sample_clash(status="Open")])
         try:
             sheet = _read_part_xml(out, 'xl/worksheets/sheet1.xml')
             data_row = sheet.find('.//s:row[@r="2"]', NS)
-            status_cell = data_row.find('s:c[@r="B2"]', NS)
+            status_cell = data_row.find('s:c[@r="D2"]', NS)
             self.assertEqual(status_cell.get('s'),
                              str(excel_summary.STYLE_STATUS_OPEN))
         finally:
@@ -203,18 +203,32 @@ class SheetXmlTests(unittest.TestCase):
         out = _build_to_temp([_sample_clash(status="Resolved")])
         try:
             sheet = _read_part_xml(out, 'xl/worksheets/sheet1.xml')
-            cell = sheet.find('.//s:row[@r="2"]/s:c[@r="B2"]', NS)
+            cell = sheet.find('.//s:row[@r="2"]/s:c[@r="D2"]', NS)
             self.assertEqual(cell.get('s'),
                              str(excel_summary.STYLE_STATUS_RESOLVED))
         finally:
             os.remove(out); os.rmdir(os.path.dirname(out))
 
+    def test_importance_cell_uses_band_style(self):
+        # Importance is column 2 (Excel 'B'). A Critical clash uses the
+        # Critical band pill style.
+        clash = _sample_clash()
+        clash['importance'] = {'score': 88, 'band': 'Critical'}
+        out = _build_to_temp([clash])
+        try:
+            sheet = _read_part_xml(out, 'xl/worksheets/sheet1.xml')
+            cell = sheet.find('.//s:row[@r="2"]/s:c[@r="B2"]', NS)
+            self.assertEqual(cell.get('s'),
+                             str(excel_summary.STYLE_BAND_CRITICAL))
+        finally:
+            os.remove(out); os.rmdir(os.path.dirname(out))
+
     def test_trade_cell_uses_trade_pill_style(self):
-        # Trade is column C (3rd column). For Mechanical:
+        # Trade is column 5 (Excel 'E'). For Mechanical:
         out = _build_to_temp([_sample_clash(assignee="Mechanical")])
         try:
             sheet = _read_part_xml(out, 'xl/worksheets/sheet1.xml')
-            cell = sheet.find('.//s:row[@r="2"]/s:c[@r="C2"]', NS)
+            cell = sheet.find('.//s:row[@r="2"]/s:c[@r="E2"]', NS)
             self.assertEqual(cell.get('s'),
                              str(excel_summary.STYLE_TRADE_MECHANICAL))
         finally:
@@ -252,8 +266,8 @@ class SheetXmlTests(unittest.TestCase):
             sheet = _read_part_xml(out, 'xl/worksheets/sheet1.xml')
             af = sheet.find('.//s:autoFilter', NS)
             self.assertIsNotNone(af)
-            # 5 data + 1 header = 6 rows; 22 columns ends at V
-            self.assertEqual(af.get('ref'), 'A1:V6')
+            # 5 data + 1 header = 6 rows; 28 columns ends at AB
+            self.assertEqual(af.get('ref'), 'A1:AB6')
         finally:
             os.remove(out); os.rmdir(os.path.dirname(out))
 
@@ -280,9 +294,10 @@ class StylesXmlTests(unittest.TestCase):
             styles = _read_part_xml(out, 'xl/styles.xml')
             cell_xfs = styles.find('s:cellXfs', NS)
             xfs = cell_xfs.findall('s:xf', NS)
-            self.assertEqual(len(xfs), 15,
-                             "should have 15 cellXfs entries (default + "
-                             "header + body + number + 4 status + 7 trades)")
+            self.assertEqual(len(xfs), 18,
+                             "should have 18 cellXfs entries (default + "
+                             "header + body + number + 4 status + 7 trades "
+                             "+ 3 bands)")
         finally:
             os.remove(out); os.rmdir(os.path.dirname(out))
 
@@ -422,11 +437,11 @@ class ColLetterTests(unittest.TestCase):
     def test_single_letter_columns(self):
         self.assertEqual(excel_summary._col_letter(1), 'A')
         self.assertEqual(excel_summary._col_letter(2), 'B')
-        self.assertEqual(excel_summary._col_letter(22), 'V')  # last column
         self.assertEqual(excel_summary._col_letter(26), 'Z')
 
     def test_double_letter_columns(self):
         self.assertEqual(excel_summary._col_letter(27), 'AA')
+        self.assertEqual(excel_summary._col_letter(28), 'AB')  # last column
         self.assertEqual(excel_summary._col_letter(52), 'AZ')
 
 

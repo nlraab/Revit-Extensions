@@ -39,6 +39,8 @@ import uuid as _uuid
 import zipfile
 from xml.etree import ElementTree as ET
 
+from . import report_model as rm
+
 
 BCF_VERSION = "2.1"
 FEET_TO_METERS = 0.3048
@@ -483,11 +485,21 @@ def _build_markup_xml(clash, topic_guid, viewpoint_guid, has_viewpoint,
     }
     topic = ET.SubElement(root, 'Topic', topic_attrs)
     _add_text_element(topic, 'Title', _topic_title(clash))
+    # Schema child order is Title, Priority?, Index?, Labels* — so Priority
+    # must be emitted here, before Index. Maps the importance band onto the
+    # High/Normal/Low priorities coordination tools sort and color by.
+    band = rm.band_of(clash)
+    prio = _band_priority(band)
+    if prio:
+        _add_text_element(topic, 'Priority', prio)
     seq = clash.get('seq')
     if seq is not None:
         _add_text_element(topic, 'Index', str(seq))
-    # Labels — comma-separated list. Use the test name + kind as labels.
+    # Labels — the importance band, then the test name + kind, so a
+    # consultant can group/filter by any of them in their tool.
     labels = []
+    if band:
+        labels.append(band)
     test_name = clash.get('test_name')  # not present in dict; let caller add
     if not test_name:
         test_name = clash.get('test_id') or ''
@@ -629,8 +641,17 @@ def _topic_title(clash):
 
 
 def _build_description(clash):
-    """Multi-line description with element details + comment count."""
+    """Multi-line description: the importance verdict first (band + the
+    one-line reason), then element details. The reason is the tool's
+    headline output, so it leads the description a consultant reads."""
     lines = []
+    band = rm.band_of(clash)
+    score = rm.score_of(clash)
+    reason = rm.reason_of(clash)
+    if band:
+        lines.append(u"Importance: {0} ({1})".format(band, score))
+    if reason:
+        lines.append(_safe_str(reason))
     a = clash.get('ref_a') or {}
     b = clash.get('ref_b') or {}
     lines.append(u"Element A: {} (ID {}{})".format(

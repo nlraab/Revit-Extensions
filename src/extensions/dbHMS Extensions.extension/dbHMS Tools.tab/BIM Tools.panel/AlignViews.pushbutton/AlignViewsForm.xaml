@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Align Views"
         Height="780" Width="1040"
+        MinHeight="620" MinWidth="900"
         WindowStartupLocation="CenterScreen"
         Background="#F7FAFC"
         FontFamily="Segoe UI" FontSize="12"
@@ -11,8 +12,60 @@
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#1A202C"/>
-            <Setter Property="Margin" Value="0,0,0,6"/>
+            <Setter Property="Foreground" Value="#1A365D"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!-- section tick accents: blue by default, orange where it matters -->
+        <Style x:Key="Tick" TargetType="Border">
+            <Setter Property="Width" Value="3"/>
+            <Setter Property="Height" Value="15"/>
+            <Setter Property="CornerRadius" Value="2"/>
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+        </Style>
+        <Style x:Key="TickOrange" TargetType="Border" BasedOn="{StaticResource Tick}">
+            <Setter Property="Background" Value="#EE8A34"/>
+        </Style>
+
+        <!-- light-blue master chip -->
+        <Style x:Key="Chip" TargetType="Border">
+            <Setter Property="Background" Value="#EBF3FB"/>
+            <Setter Property="BorderBrush" Value="#D7E6F6"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="5"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="Margin" Value="0,9,0,0"/>
+        </Style>
+
+        <!-- light-blue inset hint -->
+        <Style x:Key="Inset" TargetType="Border">
+            <Setter Property="Background" Value="#EBF8FF"/>
+            <Setter Property="BorderBrush" Value="#D3EAF7"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="Margin" Value="0,10,0,0"/>
+        </Style>
+
+        <!-- count badge (light blue, candidates) and count pill (orange, selected) -->
+        <Style x:Key="CountBadge" TargetType="Border">
+            <Setter Property="Background" Value="#EBF3FB"/>
+            <Setter Property="BorderBrush" Value="#D7E6F6"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Padding" Value="9,1"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="CountPill" TargetType="Border">
+            <Setter Property="Background" Value="#FBEEDD"/>
+            <Setter Property="BorderBrush" Value="#E7B183"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Padding" Value="9,1"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
         </Style>
 
         <Style x:Key="FieldLabel" TargetType="TextBlock">
@@ -28,9 +81,113 @@
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
 
+        <!-- ===== dbHMS standard dropdown (canonical) =====================
+             Flat, rounded, custom chevron, hover + focus states. Mirrors the
+             clash web <select>. Keep ComboToggle above the ComboBox style (it
+             is referenced by StaticResource) and keep the ComboBoxItem style
+             with it. Copy this whole block verbatim into every tool. -->
+        <Style x:Key="ComboToggle" TargetType="ToggleButton">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="ClickMode" Value="Press"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="bd" Background="White" BorderBrush="#CBD5E0"
+                                BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+                            <Path x:Name="arrow" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                  Margin="0,0,10,0" Data="M0,0 L4,4 L8,0" Stroke="#718096"
+                                  StrokeThickness="1.6" StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#A0AEC0"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#2B6CB0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="ComboBox">
-            <Setter Property="Padding" Value="6,4"/>
-            <Setter Property="Height" Value="26"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton" Style="{StaticResource ComboToggle}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+                            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              Margin="10,0,26,0" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                            <TextBox x:Name="PART_EditableTextBox" Visibility="Hidden" Focusable="True"
+                                     IsReadOnly="{TemplateBinding IsReadOnly}" Margin="7,0,26,0"
+                                     VerticalAlignment="Center" Background="Transparent" BorderThickness="0"/>
+                            <Popup x:Name="Popup" Placement="Bottom" Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" PopupAnimation="Slide">
+                                <Grid x:Name="DropDown" SnapsToDevicePixels="True"
+                                      MinWidth="{TemplateBinding ActualWidth}"
+                                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border x:Name="DropDownBorder" Background="White" BorderBrush="#CBD5E0"
+                                            BorderThickness="1" CornerRadius="6" Margin="0,3,0,0"/>
+                                    <ScrollViewer Margin="4,7,4,4" SnapsToDevicePixels="True">
+                                        <StackPanel IsItemsHost="True"
+                                                    KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="False">
+                                <Setter TargetName="DropDownBorder" Property="MinHeight" Value="34"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#A0AEC0"/>
+                            </Trigger>
+                            <Trigger Property="IsEditable" Value="True">
+                                <Setter Property="IsTabStop" Value="False"/>
+                                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="ContentSite" Property="Visibility" Value="Hidden"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Padding" Value="9,5"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ib" Background="Transparent" CornerRadius="4"
+                                Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="ib" Property="Background" Value="#EBF3FB"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ib" Property="Background" Value="#EBF8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <Style TargetType="TextBox">
@@ -43,9 +200,9 @@
             <Setter Property="Background" Value="White"/>
             <Setter Property="BorderBrush" Value="#E2E8F0"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="4"/>
-            <Setter Property="Padding" Value="12"/>
-            <Setter Property="Margin" Value="0,0,0,10"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="13"/>
+            <Setter Property="Margin" Value="0,0,0,12"/>
         </Style>
 
         <Style x:Key="PrimaryButton" TargetType="Button">
@@ -72,44 +229,110 @@
 
         <Style x:Key="MiniButton" TargetType="Button">
             <Setter Property="Background" Value="#EDF2F7"/>
+            <Setter Property="Foreground" Value="#4A5568"/>
             <Setter Property="BorderBrush" Value="#CBD5E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="8,2"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Margin" Value="0,0,4,0"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
         </Style>
 
+        <!-- blue checkbox: filled brand-blue box + white check when on -->
         <Style TargetType="CheckBox">
-            <Setter Property="Margin" Value="0,3,0,3"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,4,0,4"/>
+            <Setter Property="Foreground" Value="#2D3748"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="box" Width="16" Height="16" CornerRadius="4"
+                                    BorderBrush="#CBD5E0" BorderThickness="1.5" Background="White"
+                                    VerticalAlignment="Center" SnapsToDevicePixels="True">
+                                <Viewbox x:Name="chk" Width="10" Height="10" Visibility="Collapsed"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Path Data="M0,5 L3.8,9 L10,0.5" Stroke="White" StrokeThickness="1.6"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                                </Viewbox>
+                            </Border>
+                            <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="box" Property="BorderBrush" Value="#2B6CB0"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="box" Property="Background" Value="#2B6CB0"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="#2B6CB0"/>
+                                <Setter TargetName="chk" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
     <DockPanel>
-        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+        <!-- dbHMS header: deep-blue dotted ground, solid orange baseline, brand logo -->
+        <Border DockPanel.Dock="Top" BorderBrush="#EE8A34" BorderThickness="0,0,0,3">
             <Grid>
-                <StackPanel HorizontalAlignment="Left">
-                    <TextBlock Text="Align Views" Foreground="White" FontSize="20" FontWeight="Bold"/>
-                    <TextBlock Text="Match viewport position and view title across sheets, the same way IDEATE does &#x2014; but inside Revit."
-                               Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
-                </StackPanel>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
-                            VerticalAlignment="Center" Opacity="0.85">
-                    <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
-                               FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-                    <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
-                               FontWeight="Light" VerticalAlignment="Center"/>
-                    <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
-                               FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-                </StackPanel>
+                <Grid.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#143257" Offset="0"/>
+                        <GradientStop Color="#0F2748" Offset="0.55"/>
+                        <GradientStop Color="#0B1D34" Offset="1"/>
+                    </LinearGradientBrush>
+                </Grid.Background>
+
+                <!-- faint light dot texture, faded out toward the orange baseline -->
+                <Rectangle>
+                    <Rectangle.OpacityMask>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                            <GradientStop Color="#FFFFFFFF" Offset="0.0"/>
+                            <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+                            <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                        </LinearGradientBrush>
+                    </Rectangle.OpacityMask>
+                    <Rectangle.Fill>
+                        <DrawingBrush TileMode="Tile" Stretch="None"
+                                      Viewport="0,0,16,16" ViewportUnits="Absolute"
+                                      Viewbox="0,0,16,16" ViewboxUnits="Absolute">
+                            <DrawingBrush.Drawing>
+                                <GeometryDrawing Brush="#26D6ECFF">
+                                    <GeometryDrawing.Geometry>
+                                        <EllipseGeometry Center="8,8" RadiusX="1.1" RadiusY="1.1"/>
+                                    </GeometryDrawing.Geometry>
+                                </GeometryDrawing>
+                            </DrawingBrush.Drawing>
+                        </DrawingBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+
+                <!-- title (left) + brand logo (right) -->
+                <Grid Margin="24,16">
+                    <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <TextBlock Text="Align Views" Foreground="#F2F7FC" FontSize="20" FontWeight="Bold"/>
+                        <TextBlock Text="Match viewport position and view title across sheets, the same way IDEATE does &#x2014; but inside Revit."
+                                   Foreground="#A9C2D8" FontSize="12" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <Image x:Name="img_logo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                           Height="38" Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                </Grid>
             </Grid>
         </Border>
 
         <Border DockPanel.Dock="Bottom" Background="White"
                 BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
             <Grid>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                    <TextBlock x:Name="txt_status" Text="" Foreground="#4A5568"
-                               VerticalAlignment="Center" FontStyle="Italic"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <Border Style="{StaticResource CountPill}">
+                        <TextBlock x:Name="txt_status_count" Text="0" Foreground="#9C4221" FontWeight="Bold"/>
+                    </Border>
+                    <TextBlock x:Name="txt_status" Text="sheet(s) selected to align." Foreground="#4A5568"
+                               VerticalAlignment="Center" FontStyle="Italic" Margin="8,0,0,0"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
@@ -120,72 +343,130 @@
 
         <Grid Margin="20,16,20,16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="320"/>
+                <ColumnDefinition Width="330" MinWidth="300"/>
                 <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*" MinWidth="360"/>
             </Grid.ColumnDefinitions>
 
-            <!-- LEFT COLUMN: master view + filters + match options -->
-            <DockPanel Grid.Column="0">
-                <Border DockPanel.Dock="Top" Style="{StaticResource CardBorder}">
-                    <StackPanel>
-                        <TextBlock Text="Master View" Style="{StaticResource SectionHeader}"/>
-                        <TextBlock Text="Every other viewport will be aligned to this one." Style="{StaticResource HelperText}"/>
-                        <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
-                        <TextBox x:Name="txt_master_search"/>
-                        <TextBlock Text="Master Viewport" Style="{StaticResource FieldLabel}"/>
-                        <ComboBox x:Name="cmb_master"/>
-                        <TextBlock x:Name="txt_master_summary" Style="{StaticResource HelperText}" Margin="0,6,0,0"/>
-                    </StackPanel>
-                </Border>
+            <!-- LEFT COLUMN: master sheet + positions + filters + match options -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                <StackPanel>
+                    <!-- Master sheet: orange rail marks the anchor everything aligns to -->
+                    <Border Style="{StaticResource CardBorder}" Padding="0">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Background="#EE8A34" CornerRadius="6,0,0,6"/>
+                            <StackPanel Grid.Column="1" Margin="13">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                    <Border Style="{StaticResource TickOrange}"/>
+                                    <TextBlock Text="Master Sheet" Style="{StaticResource SectionHeader}"/>
+                                </StackPanel>
+                                <TextBlock Text="Every target sheet aligns to this one." Style="{StaticResource HelperText}"/>
+                                <TextBlock Text="Search" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="txt_master_search"/>
+                                <TextBlock Text="Master sheet" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_master_sheet"/>
+                                <Border Style="{StaticResource Chip}">
+                                    <TextBlock x:Name="txt_master_summary" Foreground="#185FA5"
+                                               FontSize="11" TextWrapping="Wrap"/>
+                                </Border>
 
-                <Border DockPanel.Dock="Top" Style="{StaticResource CardBorder}">
-                    <StackPanel>
-                        <TextBlock Text="Show Only Similar Views" Style="{StaticResource SectionHeader}"/>
-                        <TextBlock Text="Filter the candidate list to viewports that share these traits with the master."
-                                   Style="{StaticResource HelperText}"/>
-                        <CheckBox x:Name="chk_filter_scale" Content="Same view scale"/>
-                        <CheckBox x:Name="chk_filter_titleblock" Content="Same title block / sheet size"/>
-                        <CheckBox x:Name="chk_filter_viewtype" Content="Same view type (plan / RCP / section)"/>
-                        <CheckBox x:Name="chk_filter_scopebox" Content="Same scope box"/>
-                        <Border Background="#F7FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
-                                CornerRadius="3" Padding="8" Margin="0,8,0,0">
-                            <TextBlock Style="{StaticResource HelperText}"
-                                       Text="Uncheck everything to see every viewport in the project."/>
-                        </Border>
-                    </StackPanel>
-                </Border>
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <TextBlock Text="Positions to align" Style="{StaticResource FieldLabel}" Margin="0,0,0,0"/>
+                                    <Border Style="{StaticResource CountBadge}">
+                                        <TextBlock x:Name="txt_positions_count" Text="0" Foreground="#185FA5"
+                                                   FontWeight="Bold" FontSize="11"/>
+                                    </Border>
+                                </StackPanel>
+                                <TextBlock x:Name="txt_positions_hint" Style="{StaticResource HelperText}"
+                                           Text="Each view placed on the master sheet is a position. Uncheck any you don't want to align."/>
+                                <StackPanel x:Name="pnl_positions" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardBorder}">
-                    <StackPanel>
-                        <TextBlock Text="What to Match" Style="{StaticResource SectionHeader}"/>
-                        <CheckBox x:Name="chk_match_position" Content="Viewport position on sheet"/>
-                        <CheckBox x:Name="chk_match_title_pos" Content="View title position"/>
-                        <CheckBox x:Name="chk_match_title_line" Content="View title line length"/>
-                    </StackPanel>
-                </Border>
-            </DockPanel>
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <Border Style="{StaticResource Tick}"/>
+                                <TextBlock Text="Show Only Similar Views" Style="{StaticResource SectionHeader}"/>
+                            </StackPanel>
+                            <TextBlock Text="A view can only fill a position if it shares these traits with that position's view on the master sheet."
+                                       Style="{StaticResource HelperText}"/>
+                            <StackPanel Margin="0,8,0,0">
+                                <CheckBox x:Name="chk_filter_scale" Content="Same view scale"/>
+                                <CheckBox x:Name="chk_filter_titleblock" Content="Same title block / sheet size"/>
+                                <CheckBox x:Name="chk_filter_viewtype" Content="Same view type (plan / RCP / section)"/>
+                                <CheckBox x:Name="chk_filter_scopebox" Content="Same scope box"/>
+                            </StackPanel>
+                            <Border Style="{StaticResource Inset}">
+                                <TextBlock Foreground="#0C447C" FontSize="11" TextWrapping="Wrap"
+                                           Text="Looser filters surface more candidate views but make auto-pairing guess more often."/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
 
-            <!-- RIGHT COLUMN: candidate viewports list -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <Border Style="{StaticResource TickOrange}"/>
+                                <TextBlock Text="What to Match" Style="{StaticResource SectionHeader}"/>
+                            </StackPanel>
+                            <TextBlock Text="These properties get written from each master position onto its paired view."
+                                       Style="{StaticResource HelperText}"/>
+                            <StackPanel Margin="0,8,0,0">
+                                <CheckBox x:Name="chk_match_position" Content="Viewport position on sheet"/>
+                                <CheckBox x:Name="chk_match_title_pos" Content="View title position"/>
+                                <CheckBox x:Name="chk_match_title_line" Content="View title line length"/>
+                            </StackPanel>
+
+                            <Border Style="{StaticResource Inset}" Margin="0,10,0,0">
+                                <TextBlock Foreground="#0C447C" FontSize="11" TextWrapping="Wrap"
+                                           Text="Titles only: uncheck &#x2018;Viewport position on sheet&#x2019; above to move the view titles without moving the views."/>
+                            </Border>
+
+                            <!-- appears only while titles move but views do not -->
+                            <StackPanel x:Name="pnl_title_mode" Visibility="Collapsed" Margin="0,4,0,0">
+                                <TextBlock Text="Place each title" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="cmb_title_mode"/>
+                                <TextBlock x:Name="txt_title_mode_hint" Style="{StaticResource HelperText}" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- RIGHT COLUMN: candidate target sheets -->
             <Border Grid.Column="2" Style="{StaticResource CardBorder}">
                 <DockPanel>
-                    <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
-                        <TextBlock x:Name="txt_views_header" Text="Views to Align"
-                                   Style="{StaticResource SectionHeader}" VerticalAlignment="Center"/>
+                    <Grid DockPanel.Dock="Top" Margin="0,0,0,9">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Style="{StaticResource Tick}"/>
+                            <TextBlock Text="Target Sheets" Style="{StaticResource SectionHeader}"/>
+                            <Border Style="{StaticResource CountBadge}">
+                                <TextBlock x:Name="txt_targets_count" Text="0" Foreground="#185FA5"
+                                           FontWeight="Bold" FontSize="11"/>
+                            </Border>
+                        </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button x:Name="btn_views_refresh" Content="&#x21BB;"
+                            <Button x:Name="btn_targets_refresh" Content="&#x21BB;"
                                     Style="{StaticResource MiniButton}" ToolTip="Refresh list"/>
-                            <Button x:Name="btn_views_all"     Content="All"
+                            <Button x:Name="btn_targets_all"     Content="All"
                                     Style="{StaticResource MiniButton}"/>
-                            <Button x:Name="btn_views_none"    Content="None"
+                            <Button x:Name="btn_targets_none"    Content="None"
                                     Style="{StaticResource MiniButton}"/>
                         </StackPanel>
                     </Grid>
-                    <TextBox x:Name="txt_views_search" DockPanel.Dock="Top"
-                             Margin="0,0,0,8" Height="26" Padding="6,3"
+                    <TextBlock DockPanel.Dock="Top" Style="{StaticResource HelperText}" Margin="0,0,0,7"
+                               Text="Nothing is selected by default. Click a sheet to select it. Sheets flagged with a fork have several views; expand them to choose which view fills each position."/>
+                    <TextBox x:Name="txt_targets_search" DockPanel.Dock="Top"
+                             Margin="0,0,0,9" Height="27" Padding="6,3"
                              VerticalContentAlignment="Center"/>
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel x:Name="pnl_views" Margin="0,4,0,0"/>
+                        <StackPanel x:Name="pnl_targets" Margin="0,2,0,0"/>
                     </ScrollViewer>
                 </DockPanel>
             </Border>

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Layer C grouping: sticky issue containers over the scored clash list.
 
-Design: CLASH_GROUPING_DESIGN.md (Clash Detection.panel/), approved
+Design: Clash Detection.panel/README.md (Clash Detection.panel/), approved
 2026-07-02. The one-paragraph version: a group is an ISSUE - a ticket a
 coordinator names, assigns, and discusses - not a query result. Durable
 identity lives on the member clashes (immortal clash ids; merge never

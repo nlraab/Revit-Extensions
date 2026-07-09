@@ -10,5 +10,6 @@
         "viewport_position": true,
         "title_position": true,
         "title_line_length": true
-    }
+    },
+    "title_mode": "absolute"
 }

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for lib/clash_group: Layer C sticky-issue grouping.
 
-The S1-S8 fixtures mirror CLASH_GROUPING_DESIGN.md section 4; if a change
+The S1-S8 fixtures mirror Clash Detection.panel/README.md section 4; if a change
 moves one of them to a different outcome, that is a design change and the
 doc should move with it. The invariants the design hangs on get named
 tests: sticky rosters (nothing a human touched is ever re-derived),

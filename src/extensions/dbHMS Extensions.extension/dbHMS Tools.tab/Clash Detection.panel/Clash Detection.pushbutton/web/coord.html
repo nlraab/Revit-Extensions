@@ -6,12 +6,15 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; color: #1A202C; background: #F7FAFC; }
   #app { display: flex; flex-direction: column; height: 100vh; }
-  #hdr { background: #2D3748; color: #fff; padding: 14px 20px; display: flex; align-items: center; flex-shrink: 0; }
-  #hdr .ttl { font-size: 20px; font-weight: 700; line-height: 1.1; }
-  #hdr .sub { font-size: 12px; color: #CBD5E0; margin-top: 2px; }
+  #hdr { background:
+           linear-gradient(180deg, rgba(11,29,52,0) 55%, rgba(11,29,52,.55) 100%),
+           radial-gradient(rgba(214,236,255,.15) 1.1px, transparent 1.6px) 0 0/16px 16px,
+           linear-gradient(135deg,#143257 0%, #0F2748 55%, #0B1D34 100%);
+         color: #fff; padding: 15px 20px; display: flex; align-items: center; flex-shrink: 0; border-bottom: 3px solid #EE8A34; }
+  #hdr .ttl { font-size: 20px; font-weight: 700; line-height: 1.1; color: #F2F7FC; }
+  #hdr .sub { font-size: 12px; color: #A9C2D8; margin-top: 2px; }
   .chip { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .wm { margin-left: auto; font-family: "Segoe UI", sans-serif; font-size: 32px; font-weight: 700; opacity: .85; line-height: 1; white-space: nowrap; }
-  .wm .a { color: #00BFFF; } .wm .d { color: #7A8FA6; font-weight: 300; }
+  .wm-logo { margin-left: auto; height: 36px; display: block; }
   #body { flex: 1; display: flex; min-height: 0; }
   #nav { width: 132px; flex-shrink: 0; background: #fff; border-right: 1px solid #E2E8F0; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
   .navitem { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; color: #4A5568; cursor: pointer; }
@@ -486,7 +489,7 @@
       <div class="ttl">Clash Detection</div>
       <div class="sub" id="proj">clash coordination</div>
     </div>
-    <span class="wm"><span class="a">db</span><span class="d"> | </span><span class="a">HMS</span></span>
+    <img class="wm-logo" src="dbhms_logo.png" alt="dbHMS">
   </div>
   <div id="body">
     <div id="nav">
@@ -675,7 +678,72 @@
           <div class="kv muted" id="ts-note" style="margin-top:10px"></div>
         </div>
       </div>
-      <div class="view" id="view-reports"><div class="placeholder">Reports (BCF / Excel / HTML) - coming next</div></div>
+      <div class="view" id="view-reports">
+        <style>
+          #view-reports { flex-direction: row; }
+          #rp-rail { width: 300px; flex-shrink: 0; border-right: 1px solid #E2E8F0; background: #fff; padding: 16px; overflow: auto; }
+          #rp-rail .rp-sub { font-size: 11px; margin-bottom: 6px; line-height: 1.45; }
+          .rp-seclabel { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #718096; font-weight: 600; margin: 16px 0 6px; }
+          .rp-scope { display: block; width: 100%; text-align: left; background: #F7FAFC; border: 1px solid #E2E8F0; color: #2D3748; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font: 12px "Segoe UI"; line-height: 1.4; cursor: pointer; }
+          .rp-scope .muted { font-size: 11px; }
+          /* Orange = the master input that drives the whole export (accent doctrine). */
+          .rp-scope.on { background: #FBEEDD; border-color: #E7B183; color: #9C4221; font-weight: 600; }
+          .rp-scope.on .muted { color: #B25E2A; }
+          .rp-count { font-size: 12px; color: #0C447C; background: #EBF8FF; border: 1px solid #D3EAF7; border-radius: 6px; padding: 8px 10px; margin: 6px 0; }
+          .rp-fmt { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: #fff; border: 1px solid #CBD5E0; border-radius: 10px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; color: #1A202C; }
+          .rp-fmt:hover { border-color: #2B6CB0; }
+          .rp-fmt:disabled { opacity: .5; cursor: default; }
+          .rp-fmt .rp-fi { width: 40px; height: 28px; flex-shrink: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; letter-spacing: .3px; }
+          .rp-fmt .rp-ft { font-size: 13px; font-weight: 600; }
+          .rp-fmt .rp-fs { font-size: 11px; color: #718096; }
+          .rp-fmt.primary { border-color: #9FC0E4; background: #F5F9FD; }
+          .rp-status { font-size: 12px; margin-top: 14px; line-height: 1.5; color: #2D3748; }
+          .rp-status a { color: #2B6CB0; cursor: pointer; text-decoration: underline; }
+          .rp-status.err { color: #742A2A; }
+          #rp-preview { flex: 1; min-width: 0; overflow: auto; padding: 16px 18px; background: #F7FAFC; }
+          .rp-doc { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; max-width: 940px; margin: 0 auto; }
+          .rp-cover { padding: 16px 18px; border-bottom: 1px solid #EDF2F7; }
+          .rp-ct { font-size: 18px; font-weight: 700; color: #1A365D; }
+          .rp-cs { font-size: 12px; color: #718096; margin-top: 2px; }
+          .rp-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; margin-top: 14px; }
+          .rp-stat { border: 1px solid #E2E8F0; border-radius: 8px; padding: 8px 9px; border-top-width: 3px; }
+          .rp-stat .l { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: #718096; }
+          .rp-stat .v { font-size: 20px; font-weight: 700; color: #1A365D; line-height: 1.2; }
+          .rp-stat .d { font-size: 10px; color: #A0AEC0; }
+          .rp-body { padding: 16px 18px; }
+          .rp-cols { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(0,1fr); gap: 20px; }
+          .rp-h { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #718096; font-weight: 600; margin: 0 0 8px; }
+          .rp-sbar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; background: #EDF2F7; }
+          .rp-sbar span { display: block; height: 100%; }
+          .rp-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 11px; color: #4A5568; }
+          .rp-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; font-style: normal; }
+          .rp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+          .rp-tblwrap { margin-top: 16px; border-top: 1px solid #EDF2F7; padding-top: 4px; }
+          .rp-tbl { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+          .rp-tbl th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: #718096; border-bottom: 1px solid #E2E8F0; padding: 6px 8px; }
+          .rp-tbl td { border-bottom: 1px solid #F5F3EE; padding: 6px 8px; vertical-align: top; overflow-wrap: anywhere; }
+          .rp-tbl .rp-reason { color: #4A5568; }
+          .rp-tbl .rp-seq { color: #1A365D; font-weight: 600; white-space: nowrap; }
+          .rp-more { font-size: 11px; color: #A0AEC0; padding: 10px 8px; text-align: center; }
+          .rp-empty { padding: 48px; text-align: center; color: #A0AEC0; font-size: 14px; }
+        </style>
+        <div id="rp-rail">
+          <h3>Export a report</h3>
+          <div class="muted rp-sub">Pick what to include and a format. The preview on the right is exactly what gets exported.</div>
+          <div class="rp-seclabel">What to include</div>
+          <button class="rp-scope on" data-scope="meeting">Meeting set<br><span class="muted">Open · Critical + Major</span></button>
+          <button class="rp-scope" data-scope="everything">Everything<br><span class="muted">every clash, open and closed</span></button>
+          <button class="rp-scope" data-scope="filter">Current Browser filter<br><span class="muted" id="rp-filterhint">whatever the Clash Browser shows</span></button>
+          <div class="rp-count" id="rp-count">&mdash;</div>
+          <div class="rp-seclabel">Format</div>
+          <button class="rp-fmt primary" data-fmt="pdf"><span class="rp-fi" style="background:#C53030">PDF</span><span><span class="rp-ft">PDF report</span><br><span class="rp-fs">Formatted, print-ready. The one to send.</span></span></button>
+          <button class="rp-fmt" data-fmt="xlsx"><span class="rp-fi" style="background:#2F855A">XLS</span><span><span class="rp-ft">Excel workbook</span><br><span class="rp-fs">Every field, colored pills, auto-filters.</span></span></button>
+          <button class="rp-fmt" data-fmt="bcf"><span class="rp-fi" style="background:#2B6CB0">BCF</span><span><span class="rp-ft">BCF 2.1</span><br><span class="rp-fs">Navisworks · ACC · Solibri · Revizto.</span></span></button>
+          <button class="rp-fmt" data-fmt="html"><span class="rp-fi" style="background:#805AD5">WEB</span><span><span class="rp-ft">Interactive HTML</span><br><span class="rp-fs">Filterable web page you can email.</span></span></button>
+          <div class="rp-status" id="rp-status"></div>
+        </div>
+        <div id="rp-preview"></div>
+      </div>
       <div class="view" id="view-settings">
         <div id="st-scroll">
           <div class="icard">
@@ -752,6 +820,8 @@ function switchView(v) {
       }
     } else if (v === "clashes") {
       refreshInspector();
+    } else if (v === "reports") {
+      renderReportPreview();
     }
     // Leaving the 3D tab: stop the active tool so clicks elsewhere don't
     // measure or place cuts (the cuts/measurements themselves stay for return),
@@ -2511,6 +2581,10 @@ function onHostMessage(data) {
   else if (s.startsWith("rundone:")) { try { onRunDone(JSON.parse(s.slice(8))); } catch (e) { onRunDone({ ok: false, message: "run reply parse failed: " + e }); } }
   else if (s.startsWith("settings:")) { try { renderSettings(JSON.parse(s.slice(9))); } catch (e) { setStatus("settings parse failed: " + e); } }
   else if (s.startsWith("model:")) { try { updateModelButtons(JSON.parse(s.slice(6))); } catch (e) {} }
+  else if (s.startsWith("reportbusy:")) { try { onReportBusy(JSON.parse(s.slice(11))); } catch (e) {} }
+  else if (s.startsWith("reportdone:")) { try { onReportDone(JSON.parse(s.slice(11))); } catch (e) {} }
+  else if (s.startsWith("reportfail:")) { try { onReportFail(JSON.parse(s.slice(11))); } catch (e) {} }
+  else if (s.startsWith("reportcancel:")) { onReportEnd(); }
 }
 let modelInfo = null;
 function updateModelButtons(info) {
@@ -4505,7 +4579,163 @@ function renderHome() {
   if (HOSTED && clashes.length === 0) {
     const hb = $("health-banner"); if (hb) hb.textContent = emptyStateMsg();
   }
+  // Keep the Reports preview live: it reads the same clash/group data, so
+  // every data change (run, edit, group op) should refresh it when shown.
+  if (currentView === "reports") renderReportPreview();
 }
+
+// ---- reports view ----
+// The Reports tab is a live report preview + an export panel. Whatever the
+// preview shows for the chosen scope is exactly what the host writes to
+// PDF / Excel / BCF / HTML (we send the scope's clash ids, so "what you see
+// is what exports"). All counts reuse band()/bandName() so the preview and
+// the printed cover always agree.
+const RP = { scope: "meeting", busy: false };
+const RP_BAND_SOLID = { Critical: "#C53030", Major: "#DD8A0B", Minor: "#A0AEC0" };
+const RP_SCOPE_LABEL = {
+  meeting: "Meeting set — Open, Critical + Major",
+  everything: "All clashes (open + closed)",
+  filter: "Current Browser filter",
+};
+function rpScopeClashes() {
+  if (RP.scope === "filter") return visibleClashes();
+  const sorted = clashes.filter((c) => !c.suppressed).sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (RP.scope === "everything") return sorted;
+  return sorted.filter((c) => (c.status === "Open" || c.status === "Reviewed") &&
+    (bandName(c) === "Critical" || bandName(c) === "Major"));
+}
+function rpSummary(list) {
+  const s = { total: list.length, open: 0, closed: 0,
+    byBand: { Critical: 0, Major: 0, Minor: 0 },
+    byStatus: { Open: 0, Reviewed: 0, Approved: 0, Resolved: 0 },
+    byTrade: {}, byPair: {}, issues: new Set() };
+  list.forEach((c) => {
+    s.byBand[bandName(c)]++;
+    const st = c.status || "Open";
+    if (s.byStatus[st] != null) s.byStatus[st]++; else s.byStatus[st] = 1;
+    if (st === "Open" || st === "Reviewed") s.open++; else s.closed++;
+    const t = c.owner || "(unassigned)"; s.byTrade[t] = (s.byTrade[t] || 0) + 1;
+    if (c.pair) s.byPair[c.pair] = (s.byPair[c.pair] || 0) + 1;
+    if (c.gid) s.issues.add(c.gid);
+  });
+  s.pctClosed = s.total ? Math.round(100 * s.closed / s.total) : 0;
+  return s;
+}
+function rpBars(obj, n) {
+  const items = Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n || 8);
+  if (!items.length) return `<div class="muted" style="font-size:12px">(none)</div>`;
+  const top = Math.max(1, ...items.map((x) => x[1]));
+  return items.map(([label, v]) =>
+    `<div class="bar"><span class="t" title="${esc(label)}">${esc(label)}</span><span class="track"><span class="fill" style="width:${100 * v / top}%"></span></span><span>${v}</span></div>`).join("");
+}
+function rpStat(label, value, accent, sub) {
+  return `<div class="rp-stat" style="border-top-color:${accent}"><div class="l">${label}</div><div class="v">${value}</div><div class="d">${sub}</div></div>`;
+}
+function renderReportPreview() {
+  document.querySelectorAll(".rp-scope").forEach((b) => b.classList.toggle("on", b.dataset.scope === RP.scope));
+  const list = rpScopeClashes();
+  const s = rpSummary(list);
+  const cn = $("rp-count");
+  if (cn) cn.innerHTML = `<b>${list.length}</b> clash${list.length === 1 ? "" : "es"}` +
+    (s.issues.size ? ` &middot; <b>${s.issues.size}</b> issue${s.issues.size === 1 ? "" : "s"}` : "") + " in this report";
+  const prev = $("rp-preview");
+  if (!prev) return;
+  if (!list.length) {
+    prev.innerHTML = `<div class="rp-doc"><div class="rp-empty">No clashes in this scope.<br>Try a wider scope on the left, or run a clash test first.</div></div>`;
+    return;
+  }
+  // Importance mix bar.
+  const segs = ["Critical", "Major", "Minor"].filter((b) => s.byBand[b] > 0).map((b) =>
+    `<span style="width:${100 * s.byBand[b] / s.total}%;background:${RP_BAND_SOLID[b]}" title="${b}: ${s.byBand[b]}"></span>`).join("");
+  const legend = ["Critical", "Major", "Minor"].map((b) =>
+    `<span><i style="background:${RP_BAND_SOLID[b]}"></i>${b} <b>${s.byBand[b]}</b></span>`).join("");
+  // Status chips.
+  const statusChips = ["Open", "Reviewed", "Approved", "Resolved"].map((st) => {
+    const [bg, fg] = STATUS_COLORS[st] || ["#EDF2F7", "#4A5568"];
+    return `<span class="chip" style="background:${bg};color:${fg}">${st} ${s.byStatus[st] || 0}</span>`;
+  }).join("");
+  // Compact clash table (top 40; the export carries all of them).
+  const CAP = 40;
+  const rows = list.slice(0, CAP).map((c) => {
+    const [bn, bbg, bfg] = band(c.score);
+    const [sbg, sfg] = STATUS_COLORS[c.status] || ["#EDF2F7", "#4A5568"];
+    const why = c.headline || c.reason || "";
+    return `<tr><td class="rp-seq">#${c.seq}</td>` +
+      `<td><span class="chip" style="background:${bbg};color:${bfg}">${c.score} ${bn}</span></td>` +
+      `<td><span class="chip" style="background:${sbg};color:${sfg}">${esc(c.status)}</span></td>` +
+      `<td>${esc(c.owner || "—")}</td>` +
+      `<td>${esc(c.pair || "")}</td>` +
+      `<td class="rp-reason">${esc(why)}</td></tr>`;
+  }).join("");
+  const more = list.length > CAP ? `<div class="rp-more">…and ${list.length - CAP} more in the exported file</div>` : "";
+  let when = ""; try { when = new Date().toLocaleString(); } catch (e) {}
+  prev.innerHTML = `<div class="rp-doc">
+    <div class="rp-cover">
+      <div class="rp-ct">Coordination report</div>
+      <div class="rp-cs">${esc(RP_SCOPE_LABEL[RP.scope])} &middot; ${list.length} clash${list.length === 1 ? "" : "es"} &middot; generated ${esc(when)}</div>
+      <div class="rp-stats">
+        ${rpStat("Total", s.total, "#2B6CB0", "in scope")}
+        ${rpStat("Open", s.open, "#C53030", "need a decision")}
+        ${rpStat("Closed", s.closed, "#2F855A", s.pctClosed + "% done")}
+        ${rpStat("Critical", s.byBand.Critical, RP_BAND_SOLID.Critical, "score &ge; 70")}
+        ${rpStat("Major", s.byBand.Major, RP_BAND_SOLID.Major, "score 40-69")}
+        ${rpStat("Minor", s.byBand.Minor, RP_BAND_SOLID.Minor, "score &lt; 40")}
+      </div>
+    </div>
+    <div class="rp-body">
+      <div class="rp-cols">
+        <div>
+          <div class="rp-h">Importance mix</div>
+          <div class="rp-sbar">${segs}</div>
+          <div class="rp-legend">${legend}</div>
+          <div class="rp-chips">${statusChips}</div>
+        </div>
+        <div>
+          <div class="rp-h">By trade</div>
+          ${rpBars(s.byTrade, 6)}
+          <div class="rp-h" style="margin-top:12px">By discipline pair</div>
+          ${rpBars(s.byPair, 5)}
+        </div>
+      </div>
+      <div class="rp-tblwrap">
+        <table class="rp-tbl"><colgroup><col style="width:42px"><col style="width:98px"><col style="width:82px"><col style="width:14%"><col style="width:22%"><col></colgroup><thead><tr><th>#</th><th>Importance</th><th>Status</th><th>Trade</th><th>Discipline pair</th><th>Why it ranks</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+        ${more}
+      </div>
+    </div>
+  </div>`;
+}
+function rpStatus(html, err) {
+  const el = $("rp-status"); if (!el) return;
+  el.innerHTML = html; el.classList.toggle("err", !!err);
+}
+function rpSetButtons(on) { document.querySelectorAll(".rp-fmt").forEach((b) => b.disabled = !on); }
+function rpExport(fmt) {
+  if (RP.busy) return;
+  const list = rpScopeClashes();
+  if (!list.length) { rpStatus("Nothing to export in this scope.", true); return; }
+  if (!HOSTED) { rpStatus("Export runs inside Revit. (This is browser preview mode.)", true); return; }
+  RP.busy = true; rpSetButtons(false);
+  rpStatus(`Building ${fmt.toUpperCase()} report… a Save dialog will open.`);
+  toHost("report:" + JSON.stringify({ format: fmt, ids: list.map((c) => c.id), scope: RP_SCOPE_LABEL[RP.scope] }));
+}
+function onReportBusy(r) { rpStatus(`Building ${String(r.format || "").toUpperCase()} report…`); }
+function onReportEnd() { RP.busy = false; rpSetButtons(true); }
+function onReportFail(r) { onReportEnd(); rpStatus("Export failed: " + esc(r.error || "unknown error"), true); }
+function onReportDone(r) {
+  onReportEnd();
+  const name = String(r.path || "").split(/[\\/]/).pop();
+  let msg;
+  if (r.note === "pdf_fallback")
+    msg = `The PDF couldn't be generated here, so I saved the HTML report and opened it — press <b>Ctrl+P &rarr; Save as PDF</b> in the browser. Saved <b>${esc(name)}</b>.`;
+  else
+    msg = `Saved <b>${esc(name)}</b> (${r.count} clash${r.count === 1 ? "" : "es"}). <a id="rp-reveal">Show in folder</a>`;
+  rpStatus(msg);
+  const rv = $("rp-reveal");
+  if (rv) rv.onclick = () => toHost("reveal:" + r.path);
+}
+document.querySelectorAll(".rp-scope").forEach((b) => b.onclick = () => { RP.scope = b.dataset.scope; renderReportPreview(); });
+document.querySelectorAll(".rp-fmt").forEach((b) => b.onclick = () => rpExport(b.dataset.fmt));
 
 // ---- tests view ----
 let tests = [], running = false;

@@ -17380,6 +17380,32 @@ class ChatbotForm(forms.WPFWindow):
         # work when the user closes the window.
         self.Closed += self._on_closed
 
+        # Brand logo in the header (loaded from the sibling PNG)
+        self._load_logo()
+
+    def _load_logo(self):
+        """Load the dbHMS wordmark PNG into the header Image.
+
+        Decoded down to header height so the 5950px master never sits in
+        memory at full size; wrapped in try/except so a missing or broken
+        file can never break the tool."""
+        try:
+            from System import Uri, UriKind
+            from System.Windows.Media.Imaging import (
+                BitmapImage, BitmapCacheOption)
+            path = os.path.join(SCRIPT_DIR, 'dbhms_logo.png')
+            if not os.path.exists(path):
+                return
+            bmp = BitmapImage()
+            bmp.BeginInit()
+            bmp.CacheOption = BitmapCacheOption.OnLoad
+            bmp.UriSource = Uri(path, UriKind.Absolute)
+            bmp.DecodePixelHeight = 96
+            bmp.EndInit()
+            self.img_logo.Source = bmp
+        except Exception:
+            pass
+
     def _on_loaded(self, sender, args):
         self.txt_input.Focus()
         self._scroll_to_bottom()

@@ -9,7 +9,7 @@ stable federation key (fed_key). The full coordination UI (clash grid, issue
 tracker, dashboards) grows inside the web page over the coming phases; unwired
 parts are clearly labelled as sample data for now.
 
-See CLASH_REBUILD_SPEC.md (this panel) for the plan. The WebView2 hosting notes
+See Clash Detection.panel/README.md (this panel) for the plan. The WebView2 hosting notes
 live in the 3D Viewer button's script.py, which this deliberately mirrors so both
 tools behave identically inside Revit (assembly loading, the Revit-2024
 Core/Wpf version-match fix, env-var steering, the virtual-host mapping, and the
@@ -920,6 +920,10 @@ class CoordinationForm(forms.WPFWindow):
                 self._handle_clashop(msg[8:])
             elif msg.startswith("showinrevit:"):
                 self._handle_showinrevit(msg[12:])
+            elif msg.startswith("report:"):
+                self._handle_report(msg[7:])
+            elif msg.startswith("reveal:"):
+                self._reveal_in_explorer(msg[7:])
             elif msg.startswith("diag:"):
                 _log("page: {0}".format(msg[5:]))
             # cam:/filters:/other page messages are ignored for now
@@ -1118,6 +1122,373 @@ class CoordinationForm(forms.WPFWindow):
             self._post("url:" + url)
         except Exception:
             _log("loadlast: EXCEPTION\n{0}".format(traceback.format_exc()))
+
+    # --- Reports: BCF / Excel / HTML / PDF export ---------------------
+
+    def _handle_report(self, payload):
+        """Build and save one report from the current clash database.
+
+        `payload` is JSON: {format: pdf|xlsx|bcf|html, ids: [clash_id...] |
+        null, scope: "human label"}. `ids` is the page's currently-visible
+        selection (what you see is what exports); null means everything.
+        The file goes wherever a native Save As dialog says. Every outcome
+        is reported back to the page (reportdone / reportfail / reportcancel).
+        """
+        import json
+        try:
+            req = json.loads(payload) if payload else {}
+        except Exception:
+            req = {}
+        fmt = (req.get('format') or '').lower()
+        if fmt not in ('pdf', 'xlsx', 'bcf', 'html'):
+            self._post('reportfail:' + json.dumps(
+                {'format': fmt, 'error': 'Unknown export format.'}))
+            return
+        if getattr(self, '_report_busy', False):
+            self._post('reportfail:' + json.dumps(
+                {'format': fmt, 'error': 'Another export is already running.'}))
+            return
+        self._report_busy = True
+        try:
+            from clash_core import binding, persistence, users
+            from clash_report import report_model
+            doc = revit.doc
+            ph = binding.folder_for(doc) if doc is not None else None
+            if not ph:
+                self._post('reportfail:' + json.dumps({
+                    'format': fmt,
+                    'error': 'No clash-data folder is set for this project. '
+                             'Set one on the Settings tab first.'}))
+                return
+            data = persistence.read_clashes_at(ph) or {}
+            clashes = data.get('clashes') or []
+            groups = data.get('groups') or []
+            meta = persistence.read_project_meta_at(ph) or {}
+            project_name = (meta.get('display_name')
+                            or getattr(doc, 'Title', None) or 'dbHMS Project')
+            try:
+                user = users.current_user(revit.uiapp)
+            except Exception:
+                user = None
+
+            selected = report_model.select_by_ids(clashes, req.get('ids'))
+            # Rank every report by importance (stable: ties keep file order).
+            selected.sort(key=lambda c: report_model.score_of(c), reverse=True)
+            if not selected:
+                self._post('reportfail:' + json.dumps({
+                    'format': fmt,
+                    'error': 'Nothing to export: the current scope has no '
+                             'clashes.'}))
+                return
+
+            test_lookup = {}
+            try:
+                for t in self._effective_tests():
+                    tid = t.get('id')
+                    if tid:
+                        test_lookup[tid] = (t.get('name') or t.get('label')
+                                            or tid)
+            except Exception:
+                pass
+            group_lookup = {}
+            for g in groups:
+                gid = g.get('id')
+                if not gid:
+                    continue
+                if g.get('title'):
+                    group_lookup[gid] = g.get('title')
+                elif g.get('seq') is not None:
+                    group_lookup[gid] = '#{0}'.format(g.get('seq'))
+
+            vp_dir = os.path.join(ph, 'viewpoints')
+            if not os.path.isdir(vp_dir):
+                vp_dir = None
+
+            out_path = self._report_save_dialog(
+                fmt, self._report_default_name(fmt, project_name), ph)
+            if not out_path:
+                self._post('reportcancel:' + json.dumps({'format': fmt}))
+                return
+
+            self._post('reportbusy:' + json.dumps({'format': fmt}))
+            count = len(selected)
+            scope_desc = req.get('scope') or '{0} clashes'.format(count)
+
+            if fmt == 'xlsx':
+                from clash_report import excel_summary
+                excel_summary.build_xlsx(
+                    selected, out_path, test_name_lookup=test_lookup,
+                    group_lookup=group_lookup)
+            elif fmt == 'bcf':
+                from clash_report import bcf
+                bcf.build_bcf_zip(meta, selected, vp_dir, out_path,
+                                  project_name=project_name)
+            elif fmt == 'html':
+                from clash_report import html as html_mod
+                html_mod.build_html(
+                    selected, out_path, project_name=project_name,
+                    viewpoints_dir=vp_dir, generated_by=user,
+                    filter_description=scope_desc,
+                    test_name_lookup=test_lookup, groups=groups,
+                    logo_data_uri=self._report_logo_data_uri())
+            elif fmt == 'pdf':
+                # _report_to_pdf owns its own result posting on the fallback
+                # path (save HTML + open browser), so bail without a second.
+                if not self._report_to_pdf(
+                        selected, groups, out_path, project_name, user,
+                        scope_desc, test_lookup, vp_dir):
+                    return
+
+            _log('report: wrote {0} ({1} clashes) -> {2}'.format(
+                fmt, count, out_path))
+            self._post('reportdone:' + json.dumps(
+                {'format': fmt, 'path': out_path, 'count': count}))
+        except Exception:
+            _log('report: EXCEPTION\n{0}'.format(traceback.format_exc()))
+            self._post('reportfail:' + json.dumps(
+                {'format': fmt, 'error': 'Export failed. See coord.log.'}))
+        finally:
+            self._report_busy = False
+
+    def _report_default_name(self, fmt, project_name):
+        """A sensible pre-filled Save As name: <project>_Clash_Report_<date>."""
+        import re
+        base = re.sub(r'[^A-Za-z0-9._-]+', '_',
+                      project_name or 'Clash').strip('_') or 'Clash'
+        try:
+            from System import DateTime
+            stamp = DateTime.Now.ToString('yyyy-MM-dd')
+        except Exception:
+            stamp = ''
+        ext = {'pdf': 'pdf', 'xlsx': 'xlsx', 'bcf': 'bcf', 'html': 'html'}[fmt]
+        return '{0}_Clash_Report_{1}.{2}'.format(base, stamp, ext)
+
+    def _report_save_dialog(self, fmt, default_name, initial_dir):
+        """Native Save As, defaulting into the project's clash-data folder.
+        Returns the chosen path, or None if the user cancels."""
+        try:
+            from Microsoft.Win32 import SaveFileDialog
+        except Exception:
+            _log('report: SaveFileDialog unavailable\n{0}'.format(
+                traceback.format_exc()))
+            return None
+        filters = {
+            'pdf':  'PDF document (*.pdf)|*.pdf',
+            'xlsx': 'Excel workbook (*.xlsx)|*.xlsx',
+            'bcf':  'BCF file (*.bcf;*.bcfzip)|*.bcf;*.bcfzip',
+            'html': 'Web page (*.html)|*.html',
+        }
+        dlg = SaveFileDialog()
+        dlg.Title = 'Save clash report'
+        dlg.Filter = filters.get(fmt, 'All files (*.*)|*.*')
+        dlg.FileName = default_name
+        dlg.DefaultExt = '.{0}'.format('bcf' if fmt == 'bcf' else fmt)
+        dlg.AddExtension = True
+        dlg.OverwritePrompt = True
+        try:
+            if initial_dir and os.path.isdir(initial_dir):
+                dlg.InitialDirectory = initial_dir
+        except Exception:
+            pass
+        try:
+            result = dlg.ShowDialog()
+        except Exception:
+            _log('report: dialog failed\n{0}'.format(traceback.format_exc()))
+            return None
+        if result:
+            return dlg.FileName
+        return None
+
+    def _report_logo_data_uri(self):
+        """The dbHMS logo as a base64 data URI for the report header, or
+        None if it's missing (the builder falls back to a text wordmark)."""
+        try:
+            import base64
+            path = os.path.join(WEB_DIR, 'dbhms_logo.png')
+            if not os.path.isfile(path):
+                return None
+            with open(path, 'rb') as f:
+                data = f.read()
+            enc = base64.b64encode(data)
+            if isinstance(enc, bytes):
+                enc = enc.decode('ascii')
+            return 'data:image/png;base64,' + enc
+        except Exception:
+            return None
+
+    def _report_to_pdf(self, selected, groups, pdf_path, project_name, user,
+                       scope_desc, test_lookup, vp_dir):
+        """Render the report HTML to a real PDF via a hidden WebView2. On
+        any failure, save the HTML next to the requested PDF and open it in
+        the default browser so the user can still Ctrl+P -> Save as PDF.
+        Returns True only when a PDF was actually produced."""
+        import json
+        from clash_report import html as html_mod
+        tmp_dir = os.path.join(_DATA_ROOT, 'report_tmp')
+        try:
+            if not os.path.isdir(tmp_dir):
+                os.makedirs(tmp_dir)
+        except Exception:
+            tmp_dir = os.path.dirname(pdf_path)
+        tmp_html = os.path.join(tmp_dir, 'report_print.html')
+        # Print source: no interactive toolbar/JS, print CSS does the layout.
+        html_mod.build_html(
+            selected, tmp_html, project_name=project_name,
+            viewpoints_dir=vp_dir, generated_by=user,
+            filter_description=scope_desc, test_name_lookup=test_lookup,
+            groups=groups, interactive=False,
+            logo_data_uri=self._report_logo_data_uri())
+
+        if self._print_html_to_pdf(tmp_html, pdf_path):
+            return True
+
+        # Fallback: hand the user the HTML report + open it to print by hand.
+        _log('report: PDF print failed, falling back to HTML+browser')
+        alt = os.path.splitext(pdf_path)[0] + '.html'
+        try:
+            import shutil
+            shutil.copyfile(tmp_html, alt)
+            self._report_open(alt)
+            self._post('reportdone:' + json.dumps(
+                {'format': 'html', 'path': alt, 'count': len(selected),
+                 'note': 'pdf_fallback'}))
+        except Exception:
+            _log('report: fallback failed\n{0}'.format(traceback.format_exc()))
+            self._post('reportfail:' + json.dumps(
+                {'format': 'pdf',
+                 'error': 'Could not generate the PDF. See coord.log.'}))
+        return False
+
+    def _print_html_to_pdf(self, html_path, pdf_path):
+        """Drive a hidden, off-screen WebView2 to print `html_path` to
+        `pdf_path`. Shares the app's WebView2 environment so no second
+        profile is locked. Fully guarded: returns False on any problem and
+        the caller degrades to the HTML+browser path."""
+        import System
+        try:
+            from System import Uri
+            from System.Windows import Window
+        except Exception:
+            return False
+        WebView2 = getattr(self, '_WebView2', None)
+        if WebView2 is None:
+            WebView2, _reason = _load_webview2_type()
+        if WebView2 is None:
+            return False
+
+        state = {'core': None, 'task': None, 'error': None}
+        win = None
+        try:
+            win = Window()
+            win.ShowInTaskbar = False
+            win.ShowActivated = False
+            win.Width = 1024
+            win.Height = 1320
+            win.Left = -20000        # off-screen; never visible to the user
+            win.Top = -20000
+            wv = WebView2()
+            win.Content = wv
+
+            def on_nav(sender, args):
+                try:
+                    core = state['core']
+                    settings = None
+                    try:
+                        settings = core.Environment.CreatePrintSettings()
+                        settings.ShouldPrintBackgrounds = True
+                    except Exception:
+                        settings = None
+                    state['task'] = core.PrintToPdfAsync(pdf_path, settings)
+                except Exception:
+                    state['error'] = traceback.format_exc()
+
+            def on_init(sender, args):
+                try:
+                    if not args.IsSuccess:
+                        state['error'] = 'CoreWebView2 init failed'
+                        return
+                    core = wv.CoreWebView2
+                    state['core'] = core
+                    try:
+                        core.Settings.AreDefaultContextMenusEnabled = False
+                    except Exception:
+                        pass
+                    core.NavigationCompleted += on_nav
+                    core.Navigate(System.Uri(html_path).AbsoluteUri)
+                except Exception:
+                    state['error'] = traceback.format_exc()
+
+            wv.CoreWebView2InitializationCompleted += on_init
+            win.Show()
+
+            env = None
+            try:
+                if (self._webview is not None
+                        and self._webview.CoreWebView2 is not None):
+                    env = self._webview.CoreWebView2.Environment
+            except Exception:
+                env = None
+            wv.EnsureCoreWebView2Async(env)
+
+            start = System.Environment.TickCount
+            timeout_ms = 60000
+            while True:
+                self._do_events()
+                task = state['task']
+                if task is not None and task.IsCompleted:
+                    break
+                if state['error']:
+                    break
+                if System.Environment.TickCount - start > timeout_ms:
+                    state['error'] = 'timeout'
+                    break
+                try:
+                    System.Threading.Thread.Sleep(15)
+                except Exception:
+                    pass
+
+            if state['error']:
+                _log('report pdf: {0}'.format(
+                    str(state['error']).splitlines()[-1]
+                    if state['error'] else '?'))
+            task = state['task']
+            if task is not None and task.IsCompleted and not task.IsFaulted:
+                try:
+                    ok = bool(task.Result)
+                except Exception:
+                    ok = os.path.isfile(pdf_path)
+                return ok and os.path.isfile(pdf_path)
+            return False
+        except Exception:
+            _log('report pdf: EXCEPTION\n{0}'.format(traceback.format_exc()))
+            return False
+        finally:
+            try:
+                if win is not None:
+                    win.Close()
+            except Exception:
+                pass
+
+    def _report_open(self, path):
+        """Open a saved file in its default app (browser for .html)."""
+        try:
+            os.startfile(path)
+        except Exception:
+            try:
+                from System.Diagnostics import Process
+                Process.Start(path)
+            except Exception:
+                _log('report: open failed\n{0}'.format(traceback.format_exc()))
+
+    def _reveal_in_explorer(self, path):
+        """Select the file in a new Explorer window (the 'Show in folder'
+        link on the page's saved-report toast)."""
+        try:
+            from System.Diagnostics import Process
+            if path and os.path.exists(path):
+                Process.Start('explorer.exe', '/select,"{0}"'.format(path))
+        except Exception:
+            _log('report: reveal failed\n{0}'.format(traceback.format_exc()))
 
     def _viewpoints_dir(self):
         """The bound folder's viewpoints/ dir (created), or None if unbound."""

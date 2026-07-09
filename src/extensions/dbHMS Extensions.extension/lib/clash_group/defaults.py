@@ -4,7 +4,7 @@
 Like lib/clash_score/defaults.py, these tables ARE the dbHMS standard
 (decision: one standard across all projects, no per-project tuning). All
 constants are frozen until the Phase-5 calibration run on a real project,
-then adjusted once, firm-wide. Design: CLASH_GROUPING_DESIGN.md section 3.
+then adjusted once, firm-wide. Design: Clash Detection.panel/README.md section 3.
 
 Pure data; imports nothing.
 """

@@ -2,7 +2,7 @@
 """Unit tests for lib/clash_score: the importance engine (Layer A noise
 suppression + Layer B constraint-first tiers).
 
-The worked scenarios here mirror CLASH_IMPORTANCE_RESEARCH.md section 9.10;
+The worked scenarios here mirror Clash Detection.panel/README.md section 9.10;
 if a change moves one of them to a different band, that is a design change
 and the research doc should move with it. The two invariants that the whole
 design hangs on get their own named tests:

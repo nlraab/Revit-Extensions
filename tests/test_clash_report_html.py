@@ -94,7 +94,8 @@ class StructureTests(_TempOutMixin, unittest.TestCase):
         )
         body = self._read()
         self.assertIn("nathan", body)
-        self.assertIn("2026-05-08T14:00:00Z", body)
+        # Timestamps render in a friendly short form (YYYY-MM-DD HH:MM).
+        self.assertIn("2026-05-08 14:00", body)
         self.assertIn("Mechanical only", body)
 
 
@@ -270,7 +271,16 @@ class TestNameLookupTests(_TempOutMixin, unittest.TestCase):
         self.assertIn("MEP vs Arch", body)
 
     def test_unknown_test_falls_back(self):
+        # No name and no lookup hit: show the raw test id (still identifies
+        # which test found it) rather than a generic placeholder.
         clash = _clash(1, test_id='t-unknown')
+        html_mod.build_html([clash], self._out, test_name_lookup={})
+        body = self._read()
+        self.assertIn("t-unknown", body)
+
+    def test_missing_test_id_falls_back_to_placeholder(self):
+        clash = _clash(1)
+        clash.pop('test_id', None)
         html_mod.build_html([clash], self._out, test_name_lookup={})
         body = self._read()
         self.assertIn("(unknown test)", body)

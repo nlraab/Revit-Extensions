@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Importance engine: noise suppression (Layer A) + tiered scoring (Layer B).
 
-Design: CLASH_IMPORTANCE_RESEARCH.md (Clash Detection.panel/), section 9.
+Design: Clash Detection.panel/README.md (Clash Detection.panel/), section 9.
 The one-paragraph version: a clash's importance is the cost of moving the
 thing that must move. Fixed structure/architecture never sit on a ladder --
 they are context that selects which TIER RULE fires. An ordered rule list

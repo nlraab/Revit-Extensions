@@ -12,9 +12,24 @@
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#1A202C"/>
+            <Setter Property="Foreground" Value="#1A365D"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
         </Style>
+
+        <!-- section tick accents: blue by default, orange where it matters -->
+        <Style x:Key="Tick" TargetType="Border">
+            <Setter Property="Width" Value="3"/>
+            <Setter Property="Height" Value="15"/>
+            <Setter Property="CornerRadius" Value="2"/>
+            <Setter Property="Background" Value="#2B6CB0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+        </Style>
+        <Style x:Key="TickOrange" TargetType="Border" BasedOn="{StaticResource Tick}">
+            <Setter Property="Background" Value="#EE8A34"/>
+        </Style>
+
         <Style x:Key="HelperText" TargetType="TextBlock">
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="Foreground" Value="#718096"/>
@@ -52,28 +67,52 @@
 
     <DockPanel>
 
-        <!-- Header: dbHMS branding bar -->
-        <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,14">
+        <!-- dbHMS header: deep-blue dotted ground, solid orange baseline, brand logo -->
+        <Border DockPanel.Dock="Top" BorderBrush="#EE8A34" BorderThickness="0,0,0,3">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                    <TextBlock Text="View Range Helper" Foreground="White"
-                               FontSize="20" FontWeight="Bold"/>
-                    <TextBlock Text="Live plan + section from an exported model slice. Position the view-range planes, then apply back to Revit."
-                               Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
-                </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal"
-                            VerticalAlignment="Center" Opacity="0.85">
-                    <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
-                               FontWeight="Bold" FontFamily="Segoe UI"/>
-                    <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
-                               FontWeight="Light"/>
-                    <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
-                               FontWeight="Bold" FontFamily="Segoe UI"/>
-                </StackPanel>
+                <Grid.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#143257" Offset="0"/>
+                        <GradientStop Color="#0F2748" Offset="0.55"/>
+                        <GradientStop Color="#0B1D34" Offset="1"/>
+                    </LinearGradientBrush>
+                </Grid.Background>
+
+                <!-- faint light dot texture, faded out toward the orange baseline -->
+                <Rectangle>
+                    <Rectangle.OpacityMask>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                            <GradientStop Color="#FFFFFFFF" Offset="0.0"/>
+                            <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+                            <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                        </LinearGradientBrush>
+                    </Rectangle.OpacityMask>
+                    <Rectangle.Fill>
+                        <DrawingBrush TileMode="Tile" Stretch="None"
+                                      Viewport="0,0,16,16" ViewportUnits="Absolute"
+                                      Viewbox="0,0,16,16" ViewboxUnits="Absolute">
+                            <DrawingBrush.Drawing>
+                                <GeometryDrawing Brush="#26D6ECFF">
+                                    <GeometryDrawing.Geometry>
+                                        <EllipseGeometry Center="8,8" RadiusX="1.1" RadiusY="1.1"/>
+                                    </GeometryDrawing.Geometry>
+                                </GeometryDrawing>
+                            </DrawingBrush.Drawing>
+                        </DrawingBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+
+                <!-- title (left) + brand logo (right) -->
+                <Grid Margin="24,16">
+                    <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <TextBlock Text="View Range Helper" Foreground="#F2F7FC" FontSize="20" FontWeight="Bold"/>
+                        <TextBlock Text="Live plan + section from an exported model slice. Position the view-range planes, then apply back to Revit."
+                                   Foreground="#A9C2D8" FontSize="12" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <Image x:Name="img_logo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                           Height="38" Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                </Grid>
             </Grid>
         </Border>
 

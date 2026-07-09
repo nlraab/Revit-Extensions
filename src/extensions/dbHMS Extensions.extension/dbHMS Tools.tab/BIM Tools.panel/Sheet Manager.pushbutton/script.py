@@ -19,6 +19,7 @@ __title__ = "Sheet\nManager"
 __doc__ = "Manage sheets: group, rename, renumber, duplicate with views, revisions."
 
 import clr
+import os
 import re
 import sys
 
@@ -51,6 +52,7 @@ from System.Windows.Controls import (
     ListBox, ListBoxItem, Button, CheckBox, RadioButton,
     StackPanel, Grid, Border, TextBlock, ScrollViewer,
     GroupStyle, Expander, TabControl, TabItem, WrapPanel,
+    ContextMenu, MenuItem,
     Orientation
 )
 from System.Windows.Controls.Primitives import ToggleButton
@@ -560,6 +562,7 @@ class DuplicateRowItem(INotifyPropertyChanged):
         # When True, the View Name column renders muted/italic — it just
         # mirrors NewName and isn't meant to be edited by the user.
         self._mirrored       = False
+        self._conflict       = ""    # set by the dialog after collision-checking
         self.TemplateNames   = template_names   # List[str] for ComboBox
 
     def reset_to_defaults(self):
@@ -608,11 +611,41 @@ class DuplicateRowItem(INotifyPropertyChanged):
         self._mirrored = bool(v); self._notify("IsViewNameMirrored")
     IsViewNameMirrored = property(_g_mirr, _s_mirr)
 
+    # Collision state on the new number, set by the dialog. Drives a red New #
+    # cell + red row tint, and blocks Duplicate until resolved.
+    def _g_conf(self): return self._conflict
+    def _s_conf(self, v):
+        self._conflict = v or ""
+        self._notify("ConflictReason"); self._notify("HasConflict")
+    ConflictReason = property(_g_conf, _s_conf)
+
+    @property
+    def HasConflict(self): return bool(self._conflict)
+
+
+# Scope values used everywhere a transform can be aimed at the sheet number,
+# the sheet name, or both. Kept as short lowercase strings so they can live in
+# a Tag / bound property without an enum + converter dance in IronPython.
+SCOPE_NUM  = "num"
+SCOPE_NAME = "name"
+SCOPE_BOTH = "both"
+
+
+def scope_hits(scope, field):
+    """True when a transform with this scope should touch this field.
+    `field` is SCOPE_NUM or SCOPE_NAME; `scope` may also be SCOPE_BOTH."""
+    return scope == field or scope == SCOPE_BOTH
+
 
 class FindReplaceRule(INotifyPropertyChanged):
-    """One row in the rules editor: find text → replace text, with case toggle.
-    Used by both the Duplicate dialog (re-naming on creation) and the Rename
-    dialog (find/replace mode against existing sheets)."""
+    """One row in the rules editor: find text → replace text, aimed at the sheet
+    number, the sheet name, or both (per-rule scope). Match-case / whole-word are
+    global options on the naming block, not per rule. Shared by the Rename and
+    Duplicate dialogs so the two behave identically.
+
+    IsNum / IsName / IsBoth are radio-style booleans bound TwoWay to the three
+    segment ToggleButtons — checking one sets Scope and un-checks the siblings,
+    which avoids needing a value converter in XAML."""
 
     PropertyChanged = None
 
@@ -626,10 +659,10 @@ class FindReplaceRule(INotifyPropertyChanged):
         if self.PropertyChanged:
             self.PropertyChanged(self, PropertyChangedEventArgs(name))
 
-    def __init__(self, find="", replace="", case_sensitive=True):
+    def __init__(self, find="", replace="", scope=SCOPE_BOTH):
         self._find = find or ""
         self._replace = replace or ""
-        self._cs = bool(case_sensitive)
+        self._scope = scope or SCOPE_BOTH
 
     def _g_f(self): return self._find
     def _s_f(self, v):
@@ -643,32 +676,613 @@ class FindReplaceRule(INotifyPropertyChanged):
         self._notify("Replace")
     Replace = property(_g_r, _s_r)
 
-    def _g_cs(self): return self._cs
-    def _s_cs(self, v):
-        self._cs = bool(v)
-        self._notify("CaseSensitive")
-    CaseSensitive = property(_g_cs, _s_cs)
+    def _g_scope(self): return self._scope
+    def _s_scope(self, v):
+        self._scope = v or SCOPE_BOTH
+        for n in ("Scope", "IsNum", "IsName", "IsBoth"):
+            self._notify(n)
+    Scope = property(_g_scope, _s_scope)
+
+    # -- Segment booleans (radio-style; can't be un-checked directly) --
+    def _g_isnum(self):  return self._scope == SCOPE_NUM
+    def _s_isnum(self, v):
+        if v: self.Scope = SCOPE_NUM
+        else: self._notify("IsNum")
+    IsNum = property(_g_isnum, _s_isnum)
+
+    def _g_isname(self): return self._scope == SCOPE_NAME
+    def _s_isname(self, v):
+        if v: self.Scope = SCOPE_NAME
+        else: self._notify("IsName")
+    IsName = property(_g_isname, _s_isname)
+
+    def _g_isboth(self): return self._scope == SCOPE_BOTH
+    def _s_isboth(self, v):
+        if v: self.Scope = SCOPE_BOTH
+        else: self._notify("IsBoth")
+    IsBoth = property(_g_isboth, _s_isboth)
+
+    def hits(self, field):
+        return scope_hits(self._scope, field)
 
 
-def apply_rules(text, rules):
-    """Apply a list of FindReplaceRule entries in order to a string.
-    Empty 'find' rules are skipped. Falls back to plain replace if regex fails."""
+def _replace_once(text, find, replace, match_case, whole_word):
+    """Apply one find→replace to a string. `replace` is always treated as a
+    literal (no regex backreferences) — we only use re for case-insensitive and
+    whole-word matching, never to interpret the replacement."""
     if text is None:
         text = ""
-    out = text
-    for rule in rules:
-        find = rule.Find or ""
-        if not find:
-            continue
-        replace = rule.Replace or ""
-        if rule.CaseSensitive:
-            out = out.replace(find, replace)
-        else:
+    if not find:
+        return text
+    replace = replace or ""
+    try:
+        if whole_word:
+            pattern = r"\b" + re.escape(find) + r"\b"
+            flags = 0 if match_case else re.IGNORECASE
+            return re.sub(pattern, lambda m: replace, text, flags=flags)
+        if match_case:
+            return text.replace(find, replace)
+        return re.sub(re.escape(find), lambda m: replace, text, flags=re.IGNORECASE)
+    except Exception:
+        return text.replace(find, replace)
+
+
+def _apply_case(text, mode):
+    """mode: 'none' | 'upper' | 'lower' | 'title'."""
+    if not text or mode == "none":
+        return text
+    if mode == "upper":
+        return text.upper()
+    if mode == "lower":
+        return text.lower()
+    if mode == "title":
+        # Capitalize each run of letters; keep separators/digits intact.
+        return re.sub(r"[A-Za-z]+",
+                      lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(),
+                      text)
+    return text
+
+
+def compute_field(source, field, rules, opts, seq_value=None):
+    """Compute the transformed value for one field (SCOPE_NUM or SCOPE_NAME).
+
+    Pipeline:  source → scoped find/replace rules → change-case → prefix + suffix.
+    In sequence mode the NUMBER field's body is the sequence value instead of the
+    source, then prefix/suffix still wrap it (rules + case are skipped for #).
+
+    `opts` is a dict:
+        match_case, whole_word            (bool)
+        case_mode ('none'|'upper'|'lower'|'title'), case_scope
+        prefix_text, prefix_scope, suffix_text, suffix_scope
+        use_seq (bool), seq_pad (int)     (# only; seq_value passed in)
+    """
+    is_seq_num = (field == SCOPE_NUM and opts.get("use_seq") and seq_value is not None)
+    if is_seq_num:
+        pad = opts.get("seq_pad", 0) or 0
+        body = str(seq_value)
+        if pad > 0:
+            body = body.zfill(pad)
+    else:
+        body = source or ""
+        for r in rules:
+            if r.hits(field) and (r.Find or ""):
+                body = _replace_once(body, r.Find, r.Replace,
+                                     opts["match_case"], opts["whole_word"])
+        if opts.get("case_mode", "none") != "none" and scope_hits(opts["case_scope"], field):
+            body = _apply_case(body, opts["case_mode"])
+
+    if scope_hits(opts.get("prefix_scope", SCOPE_BOTH), field):
+        body = (opts.get("prefix_text") or "") + body
+    if scope_hits(opts.get("suffix_scope", SCOPE_BOTH), field):
+        body = body + (opts.get("suffix_text") or "")
+    return body
+
+
+# ═══════════════════════════════════════════════════════════════
+# SHARED BRAND HEADER (deep-blue dotted ground + orange baseline + logo)
+# ═══════════════════════════════════════════════════════════════
+
+def brand_header_xaml(title, subtitle):
+    """Return the dbHMS header Border markup for a DockPanel-rooted sub-dialog,
+    matching the main window. Title/subtitle are literal (no bindings)."""
+    return """
+    <Border DockPanel.Dock="Top" BorderBrush="#EE8A34" BorderThickness="0,0,0,3">
+      <Grid>
+        <Grid.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#143257" Offset="0"/>
+            <GradientStop Color="#0F2748" Offset="0.55"/>
+            <GradientStop Color="#0B1D34" Offset="1"/>
+          </LinearGradientBrush>
+        </Grid.Background>
+        <Rectangle>
+          <Rectangle.OpacityMask>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+              <GradientStop Color="#FFFFFFFF" Offset="0.0"/>
+              <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+              <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+            </LinearGradientBrush>
+          </Rectangle.OpacityMask>
+          <Rectangle.Fill>
+            <DrawingBrush TileMode="Tile" Stretch="None"
+                          Viewport="0,0,16,16" ViewportUnits="Absolute"
+                          Viewbox="0,0,16,16" ViewboxUnits="Absolute">
+              <DrawingBrush.Drawing>
+                <GeometryDrawing Brush="#26D6ECFF">
+                  <GeometryDrawing.Geometry>
+                    <EllipseGeometry Center="8,8" RadiusX="1.1" RadiusY="1.1"/>
+                  </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+              </DrawingBrush.Drawing>
+            </DrawingBrush>
+          </Rectangle.Fill>
+        </Rectangle>
+        <Grid Margin="20,13">
+          <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center">
+            <TextBlock Text="{TITLE}" Foreground="#F2F7FC" FontSize="18" FontWeight="Bold"/>
+            <TextBlock Text="{SUB}" Foreground="#A9C2D8" FontSize="11" Margin="0,3,0,0"/>
+          </StackPanel>
+          <Image x:Name="img_logo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                 Height="32" Stretch="Uniform"
+                 RenderOptions.BitmapScalingMode="HighQuality"/>
+        </Grid>
+      </Grid>
+    </Border>
+    """.replace("{TITLE}", title).replace("{SUB}", subtitle)
+
+
+def load_brand_logo(w):
+    """Load the sibling dbhms_logo.png into the header's img_logo, if present.
+    Fully guarded — a missing/broken logo can never break the dialog."""
+    try:
+        from System import Uri, UriKind
+        from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
+        lp = os.path.join(os.path.dirname(__file__), 'dbhms_logo.png')
+        if not os.path.exists(lp):
+            return
+        img = w.FindName('img_logo')
+        if img is None:
+            return
+        b = BitmapImage(); b.BeginInit(); b.CacheOption = BitmapCacheOption.OnLoad
+        b.UriSource = Uri(lp, UriKind.Absolute); b.DecodePixelHeight = 96; b.EndInit()
+        img.Source = b
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# SHARED NAMING BLOCK (find/replace + prefix/suffix/case + sequence)
+# Embedded verbatim in both the Rename and Duplicate dialogs so the two
+# transform sheets identically. Its controls are driven by NamingBlock below.
+# ═══════════════════════════════════════════════════════════════
+
+NAMING_BLOCK_XAML = """
+  <StackPanel>
+    <!-- Find & replace (primary) -->
+    <Border Style="{StaticResource CardBorder}" Padding="12" Margin="0,0,0,10"
+            BorderBrush="#E7B183">
+      <StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+          <Border Width="3" Height="15" CornerRadius="2" Background="#EE8A34"
+                  VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Text="Find and replace" Style="{StaticResource SectionHeader}" Margin="0"/>
+        </StackPanel>
+        <TextBlock Text="Each rule targets the sheet number, the name, or both."
+                   Style="{StaticResource HelperText}" Margin="0,0,0,8"/>
+
+        <ItemsControl x:Name="rules_list">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Border Background="#FBFCFE" BorderBrush="#E2E8F0" BorderThickness="1"
+                      CornerRadius="5" Padding="7" Margin="0,0,0,6">
+                <StackPanel>
+                  <Grid Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal">
+                      <ToggleButton Style="{StaticResource SegToggle}" Content="#"
+                                    IsChecked="{Binding IsNum, Mode=TwoWay}"
+                                    ToolTip="Apply this rule to the sheet number"/>
+                      <ToggleButton Style="{StaticResource SegToggle}" Content="Name"
+                                    IsChecked="{Binding IsName, Mode=TwoWay}"
+                                    ToolTip="Apply this rule to the sheet name"/>
+                      <ToggleButton Style="{StaticResource SegToggle}" Content="Both"
+                                    IsChecked="{Binding IsBoth, Mode=TwoWay}"
+                                    ToolTip="Apply this rule to both"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Tag="RemoveRule" Content="✕"
+                            Width="24" Height="22" MinWidth="24"
+                            Style="{StaticResource SecondaryButton}"
+                            Margin="0" Padding="0" FontSize="11"
+                            ToolTip="Remove rule"/>
+                  </Grid>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="20"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" Height="26"
+                             Text="{Binding Find, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Grid.Column="1" Text="→" Foreground="#718096"
+                               FontSize="14" VerticalAlignment="Center"
+                               HorizontalAlignment="Center"/>
+                    <TextBox Grid.Column="2" Height="26"
+                             Text="{Binding Replace, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                  </Grid>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <Grid Margin="0,2,0,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <Button Grid.Column="0" x:Name="btn_add_rule" Content="+ Add rule"
+                  Style="{StaticResource SecondaryButton}" Height="28" MinWidth="90" Margin="0"/>
+          <TextBlock Grid.Column="1" Text="Rules run top to bottom"
+                     Foreground="#A0AEC0" FontSize="11"
+                     VerticalAlignment="Center" HorizontalAlignment="Right"/>
+        </Grid>
+
+        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+          <CheckBox x:Name="chk_match_case" Content="Match case" Margin="0,0,18,0"/>
+          <CheckBox x:Name="chk_whole_word" Content="Whole word only"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- Prefix / suffix / case -->
+    <Border Style="{StaticResource CardBorder}" Padding="12" Margin="0,0,0,10">
+      <StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+          <Border Width="3" Height="15" CornerRadius="2" Background="#2B6CB0"
+                  VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Text="Prefix, suffix, and case" Style="{StaticResource SectionHeader}" Margin="0"/>
+        </StackPanel>
+
+        <Grid Margin="0,0,0,7">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="48"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0" Text="Prefix" Style="{StaticResource FieldLabel}"
+                     Margin="0,0,6,0" VerticalAlignment="Center"/>
+          <TextBox Grid.Column="1" x:Name="txt_prefix" Height="26" Margin="0,0,8,0"/>
+          <StackPanel Grid.Column="2" Orientation="Horizontal">
+            <ToggleButton x:Name="seg_prefix_num"  Style="{StaticResource SegToggle}" Content="#"/>
+            <ToggleButton x:Name="seg_prefix_name" Style="{StaticResource SegToggle}" Content="Name"/>
+            <ToggleButton x:Name="seg_prefix_both" Style="{StaticResource SegToggle}" Content="Both"/>
+          </StackPanel>
+        </Grid>
+
+        <Grid Margin="0,0,0,7">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="48"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0" Text="Suffix" Style="{StaticResource FieldLabel}"
+                     Margin="0,0,6,0" VerticalAlignment="Center"/>
+          <TextBox Grid.Column="1" x:Name="txt_suffix" Height="26" Margin="0,0,8,0"/>
+          <StackPanel Grid.Column="2" Orientation="Horizontal">
+            <ToggleButton x:Name="seg_suffix_num"  Style="{StaticResource SegToggle}" Content="#"/>
+            <ToggleButton x:Name="seg_suffix_name" Style="{StaticResource SegToggle}" Content="Name"/>
+            <ToggleButton x:Name="seg_suffix_both" Style="{StaticResource SegToggle}" Content="Both"/>
+          </StackPanel>
+        </Grid>
+
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="48"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0" Text="Case" Style="{StaticResource FieldLabel}"
+                     Margin="0,0,6,0" VerticalAlignment="Center"/>
+          <ComboBox Grid.Column="1" x:Name="cmb_case" Height="26" Margin="0,0,8,0" SelectedIndex="0">
+            <ComboBoxItem Content="Keep as typed"/>
+            <ComboBoxItem Content="UPPERCASE"/>
+            <ComboBoxItem Content="lowercase"/>
+            <ComboBoxItem Content="Title Case"/>
+          </ComboBox>
+          <StackPanel Grid.Column="2" Orientation="Horizontal">
+            <ToggleButton x:Name="seg_case_num"  Style="{StaticResource SegToggle}" Content="#"/>
+            <ToggleButton x:Name="seg_case_name" Style="{StaticResource SegToggle}" Content="Name"/>
+            <ToggleButton x:Name="seg_case_both" Style="{StaticResource SegToggle}" Content="Both"/>
+          </StackPanel>
+        </Grid>
+      </StackPanel>
+    </Border>
+
+    <!-- Sequence (advanced, collapsed by default) -->
+    <Expander x:Name="exp_seq" IsExpanded="False" Margin="0,0,0,2">
+      <Expander.Header>
+        <TextBlock FontSize="12" Foreground="#4A5568" VerticalAlignment="Center">
+          <Run Text="Renumber with a sequence"/><Run Text="    rarely needed" Foreground="#A0AEC0" FontSize="11"/>
+        </TextBlock>
+      </Expander.Header>
+      <Border Style="{StaticResource CardBorder}" Padding="12" Margin="0,6,0,0">
+        <StackPanel>
+          <CheckBox x:Name="chk_sequence" Content="Give Sheet # a running number"/>
+          <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+            <TextBlock Text="Start" Style="{StaticResource FieldLabel}"
+                       Margin="0,0,4,0" VerticalAlignment="Center"/>
+            <TextBox x:Name="txt_seq_start" Width="56" Height="26" Text="100"/>
+            <TextBlock Text="Increment" Style="{StaticResource FieldLabel}"
+                       Margin="14,0,4,0" VerticalAlignment="Center"/>
+            <TextBox x:Name="txt_seq_inc" Width="46" Height="26" Text="1"/>
+            <TextBlock Text="Pad to" Style="{StaticResource FieldLabel}"
+                       Margin="14,0,4,0" VerticalAlignment="Center"/>
+            <TextBox x:Name="txt_seq_pad" Width="40" Height="26" Text="0"/>
+            <TextBlock Text="digits" Style="{StaticResource HelperText}"
+                       Margin="4,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <TextBlock Text="Replaces the whole number with prefix + number + suffix. Find/replace is skipped for the number; the name still transforms."
+                     Style="{StaticResource HelperText}" Margin="0,8,0,0"/>
+        </StackPanel>
+      </Border>
+    </Expander>
+  </StackPanel>
+"""
+
+
+class ScopeSeg(object):
+    """Three named SegToggle buttons acting as one #/Name/Both selector, driven
+    from code (for the dialog-level prefix / suffix / case scopes). Exactly one
+    segment is always active."""
+
+    def __init__(self, w, base, default=SCOPE_BOTH, on_change=None):
+        self._on_change = on_change
+        self._btns = {
+            SCOPE_NUM:  w.FindName(base + "_num"),
+            SCOPE_NAME: w.FindName(base + "_name"),
+            SCOPE_BOTH: w.FindName(base + "_both"),
+        }
+        self._value = default
+        for key, btn in self._btns.items():
+            if btn is not None:
+                btn.Click += self._make_handler(key)
+        self._sync()
+
+    def _make_handler(self, key):
+        def handler(sender, e):
+            self._value = key
+            self._sync()
+            if self._on_change:
+                self._on_change()
+        return handler
+
+    def _sync(self):
+        for key, btn in self._btns.items():
+            if btn is not None:
+                btn.IsChecked = (key == self._value)
+
+    @property
+    def value(self):
+        return self._value
+
+
+class NamingBlock(object):
+    """Controller for NAMING_BLOCK_XAML. Owns the rules collection, exposes the
+    combined transform via compute(), and invokes on_change() whenever anything
+    changes so the host can refresh its live preview / table."""
+
+    def __init__(self, w, on_change=None):
+        self._w = w
+        self._on_change = on_change
+
+        self.rules = ObservableCollection[FindReplaceRule]()
+        self.rules.Add(FindReplaceRule())
+        self._rules_list = w.FindName("rules_list")
+        self._rules_list.ItemsSource = self.rules
+
+        self._btn_add   = w.FindName("btn_add_rule")
+        self._chk_case  = w.FindName("chk_match_case")
+        self._chk_word  = w.FindName("chk_whole_word")
+        self._txt_prefix = w.FindName("txt_prefix")
+        self._txt_suffix = w.FindName("txt_suffix")
+        self._cmb_case   = w.FindName("cmb_case")
+        self._chk_seq    = w.FindName("chk_sequence")
+        self._txt_seq_start = w.FindName("txt_seq_start")
+        self._txt_seq_inc   = w.FindName("txt_seq_inc")
+        self._txt_seq_pad   = w.FindName("txt_seq_pad")
+
+        self._rule_pc = PropertyChangedEventHandler(self._on_rule_pc)
+        self._hook_rule(self.rules[0])
+        self.rules.CollectionChanged += self._on_coll_changed
+
+        self._seg_prefix = ScopeSeg(w, "seg_prefix", SCOPE_BOTH, self._fire)
+        self._seg_suffix = ScopeSeg(w, "seg_suffix", SCOPE_BOTH, self._fire)
+        self._seg_case   = ScopeSeg(w, "seg_case",   SCOPE_BOTH, self._fire)
+
+        self._btn_add.Click += self._on_add
+        self._rules_list.AddHandler(
+            Button.ClickEvent, RoutedEventHandler(self._on_rules_btn))
+
+        for ctrl in (self._chk_case, self._chk_word, self._chk_seq):
+            ctrl.Checked   += self._fire_evt
+            ctrl.Unchecked += self._fire_evt
+        for tb in (self._txt_prefix, self._txt_suffix,
+                   self._txt_seq_start, self._txt_seq_inc, self._txt_seq_pad):
+            tb.TextChanged += self._fire_evt
+        self._cmb_case.SelectionChanged += self._fire_evt
+
+    # -- change plumbing --
+    def _fire(self):
+        if self._on_change:
+            self._on_change()
+
+    def _fire_evt(self, sender, e):
+        self._fire()
+
+    def _on_rule_pc(self, sender, args):
+        self._fire()
+
+    def _hook_rule(self, rule):
+        try:
+            rule.add_PropertyChanged(self._rule_pc)
+        except Exception:
+            pass
+
+    def _on_coll_changed(self, sender, e):
+        try:
+            if e.NewItems:
+                for it in e.NewItems:
+                    self._hook_rule(it)
+        except Exception:
+            pass
+        self._fire()
+
+    def _on_add(self, sender, e):
+        self.rules.Add(FindReplaceRule())
+
+    def _on_rules_btn(self, sender, e):
+        src = e.OriginalSource
+        if isinstance(src, Button) and str(src.Tag) == "RemoveRule":
+            rule = src.DataContext
+            if rule is not None and rule in self.rules:
+                self.rules.Remove(rule)
+                e.Handled = True
+
+    # -- compute --
+    @staticmethod
+    def _int(text, default):
+        try:
+            return int(str(text).strip())
+        except Exception:
+            return default
+
+    def _case_mode(self):
+        idx = self._cmb_case.SelectedIndex
+        modes = ["none", "upper", "lower", "title"]
+        return modes[idx] if 0 <= idx < len(modes) else "none"
+
+    def options(self):
+        return {
+            "match_case":   bool(self._chk_case.IsChecked),
+            "whole_word":   bool(self._chk_word.IsChecked),
+            "case_mode":    self._case_mode(),
+            "case_scope":   self._seg_case.value,
+            "prefix_text":  self._txt_prefix.Text or "",
+            "prefix_scope": self._seg_prefix.value,
+            "suffix_text":  self._txt_suffix.Text or "",
+            "suffix_scope": self._seg_suffix.value,
+            "use_seq":      bool(self._chk_seq.IsChecked),
+            "seq_pad":      self._int(self._txt_seq_pad.Text, 0),
+        }
+
+    def uses_sequence(self):
+        return bool(self._chk_seq.IsChecked)
+
+    def affects(self, field):
+        """True when the block would actually change `field` (SCOPE_NUM or
+        SCOPE_NAME). Used by the Duplicate dialog so 'Apply rules' overwrites a
+        column only when the block touches it, leaving the auto '-DUP' / '(Copy)'
+        defaults in place otherwise."""
+        opts = self.options()
+        if field == SCOPE_NUM and opts["use_seq"]:
+            return True
+        if opts["prefix_text"] and scope_hits(opts["prefix_scope"], field):
+            return True
+        if opts["suffix_text"] and scope_hits(opts["suffix_scope"], field):
+            return True
+        if opts["case_mode"] != "none" and scope_hits(opts["case_scope"], field):
+            return True
+        for r in self.rules:
+            if (r.Find or "") and r.hits(field):
+                return True
+        return False
+
+    def compute(self, src_num, src_name, index):
+        """Return (new_number, new_name) for one source row. `index` drives the
+        sequence value when sequence mode is on."""
+        opts = self.options()
+        rules = list(self.rules)
+        seq_val = None
+        if opts["use_seq"]:
+            start = self._int(self._txt_seq_start.Text, 100)
+            inc   = self._int(self._txt_seq_inc.Text, 1)
+            seq_val = start + index * inc
+        new_num  = compute_field(src_num,  SCOPE_NUM,  rules, opts, seq_val)
+        new_name = compute_field(src_name, SCOPE_NAME, rules, opts, None)
+        return new_num, new_name
+
+
+# ═══════════════════════════════════════════════════════════════
+# COLLISION GUARD — Revit rejects duplicate/blank sheet numbers, so both
+# dialogs validate the whole batch before committing.
+# ═══════════════════════════════════════════════════════════════
+
+def all_sheet_numbers(doc):
+    """Return a set of every ViewSheet's number in the document."""
+    nums = set()
+    try:
+        for s in FilteredElementCollector(doc).OfClass(ViewSheet):
             try:
-                out = re.sub(re.escape(find), replace, out, flags=re.IGNORECASE)
+                nums.add(s.SheetNumber)
             except Exception:
-                out = out.replace(find, replace)
-    return out
+                pass
+    except Exception:
+        pass
+    return nums
+
+
+def occupied_numbers_excluding(doc, exclude_sheets):
+    """Return the set of sheet numbers held by every sheet EXCEPT the given
+    ones. Used by the Rename dialog: the selected sheets are being renamed, so
+    their current numbers are free to reuse among themselves; all other sheets'
+    numbers are off-limits. Compares by ElementId (.NET equality), never by a
+    Python set of ElementId, to stay clear of hashing quirks in IronPython."""
+    exclude_ids = [s.Id for s in exclude_sheets]
+
+    def is_excluded(sid):
+        for eid in exclude_ids:
+            if sid == eid:
+                return True
+        return False
+
+    nums = set()
+    try:
+        for s in FilteredElementCollector(doc).OfClass(ViewSheet):
+            try:
+                if not is_excluded(s.Id):
+                    nums.add(s.SheetNumber)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return nums
+
+
+def validate_numbers(assignments, occupied):
+    """Return {row_key: reason} for every proposed number that is blank,
+    already taken by a sheet outside the batch, or duplicated within the batch.
+
+    assignments : list of (row_key, number)
+    occupied    : set of numbers held by sheets outside the batch."""
+    conflicts = {}
+    seen = {}
+    for key, num in assignments:
+        n = (num or "").strip()
+        if not n:
+            conflicts[key] = "blank number"
+            continue
+        if n in occupied:
+            conflicts[key] = "number already used by another sheet"
+            continue
+        if n in seen:
+            conflicts[key] = "duplicate in this batch"
+            conflicts[seen[n]] = "duplicate in this batch"
+        else:
+            seen[n] = key
+    return conflicts
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -785,21 +1399,107 @@ SHARED_RESOURCES = """
       <Setter Property="CaretBrush"       Value="#2B6CB0"/>
     </Style>
 
-    <!-- ComboBox - dark text on white, dropdown items styled below -->
+    <!-- ===== dbHMS standard dropdown (canonical) ===== -->
+    <Style x:Key="ComboToggle" TargetType="ToggleButton">
+      <Setter Property="OverridesDefaultStyle" Value="True"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="ClickMode" Value="Press"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="bd" Background="White" BorderBrush="#CBD5E0"
+                    BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+              <Path x:Name="arrow" HorizontalAlignment="Right" VerticalAlignment="Center"
+                    Margin="0,0,10,0" Data="M0,0 L4,4 L8,0" Stroke="#718096"
+                    StrokeThickness="1.6" StrokeStartLineCap="Round"
+                    StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="#A0AEC0"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="#2B6CB0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="ComboBox">
-      <Setter Property="Background"      Value="White"/>
-      <Setter Property="Foreground"      Value="#1A202C"/>
-      <Setter Property="BorderBrush"     Value="#CBD5E0"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="Padding"         Value="6,4"/>
-      <Setter Property="Height"          Value="28"/>
-      <Setter Property="FontSize"        Value="12"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Foreground" Value="#2D3748"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton x:Name="ToggleButton" Style="{StaticResource ComboToggle}"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+              <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                Margin="10,0,26,0" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+              <TextBox x:Name="PART_EditableTextBox" Visibility="Hidden" Focusable="True"
+                       IsReadOnly="{TemplateBinding IsReadOnly}" Margin="7,0,26,0"
+                       VerticalAlignment="Center" Background="Transparent" BorderThickness="0"/>
+              <Popup x:Name="Popup" Placement="Bottom" Focusable="False"
+                     IsOpen="{TemplateBinding IsDropDownOpen}"
+                     AllowsTransparency="True" PopupAnimation="Slide">
+                <Grid x:Name="DropDown" SnapsToDevicePixels="True"
+                      MinWidth="{TemplateBinding ActualWidth}"
+                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                  <Border x:Name="DropDownBorder" Background="White" BorderBrush="#CBD5E0"
+                          BorderThickness="1" CornerRadius="6" Margin="0,3,0,0"/>
+                  <ScrollViewer Margin="4,7,4,4" SnapsToDevicePixels="True">
+                    <StackPanel IsItemsHost="True"
+                                KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                </Grid>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="HasItems" Value="False">
+                <Setter TargetName="DropDownBorder" Property="MinHeight" Value="34"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="#A0AEC0"/>
+              </Trigger>
+              <Trigger Property="IsEditable" Value="True">
+                <Setter Property="IsTabStop" Value="False"/>
+                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="ContentSite" Property="Visibility" Value="Hidden"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
     <Style TargetType="ComboBoxItem">
-      <Setter Property="Background"  Value="White"/>
-      <Setter Property="Foreground"  Value="#1A202C"/>
-      <Setter Property="Padding"     Value="6,4"/>
-      <Setter Property="FontSize"    Value="12"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="Foreground" Value="#2D3748"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="ib" Background="Transparent" CornerRadius="4"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="ib" Property="Background" Value="#EBF3FB"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="ib" Property="Background" Value="#EBF8FF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <!-- CheckBox / RadioButton text -->
@@ -841,6 +1541,46 @@ SHARED_RESOURCES = """
         </Setter.Value>
       </Setter>
     </Style>
+
+    <!-- Segment toggle: one cell of a #/Name/Both scope selector. Blue when
+         checked, light grey otherwise. Per-rule cells bind IsChecked to
+         IsNum/IsName/IsBoth; dialog-level cells (prefix/suffix/case) are named
+         and driven from code via ScopeSeg. -->
+    <Style x:Key="SegToggle" TargetType="ToggleButton">
+      <Setter Property="Background"      Value="#EDF2F7"/>
+      <Setter Property="Foreground"      Value="#4A5568"/>
+      <Setter Property="BorderBrush"     Value="#CBD5E0"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding"         Value="9,2"/>
+      <Setter Property="FontSize"        Value="11"/>
+      <Setter Property="Cursor"          Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <MultiTrigger>
+                <MultiTrigger.Conditions>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                  <Condition Property="IsChecked"   Value="False"/>
+                </MultiTrigger.Conditions>
+                <Setter TargetName="bd" Property="Background" Value="#E2E8F0"/>
+              </MultiTrigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bd" Property="Background"  Value="#2B6CB0"/>
+                <Setter TargetName="bd" Property="BorderBrush" Value="#2B6CB0"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
 """
 
 
@@ -858,6 +1598,41 @@ MAIN_XAML = """
         ResizeMode="CanResizeWithGrip">
   <Window.Resources>
 """ + SHARED_RESOURCES + """
+
+    <!-- Section tick accents: blue by default, orange where it marks the
+         operation payload (the sheets being managed). -->
+    <Style x:Key="Tick" TargetType="Border">
+      <Setter Property="Width"    Value="3"/>
+      <Setter Property="Height"   Value="15"/>
+      <Setter Property="CornerRadius" Value="2"/>
+      <Setter Property="Background"   Value="#2B6CB0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin"   Value="0,0,8,0"/>
+    </Style>
+    <Style x:Key="TickOrange" TargetType="Border" BasedOn="{StaticResource Tick}">
+      <Setter Property="Background" Value="#EE8A34"/>
+    </Style>
+
+    <!-- Light-blue master chip -->
+    <Style x:Key="Chip" TargetType="Border">
+      <Setter Property="Background"      Value="#EBF3FB"/>
+      <Setter Property="BorderBrush"     Value="#D7E6F6"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius"    Value="5"/>
+      <Setter Property="Padding"         Value="8"/>
+      <Setter Property="Margin"          Value="0,9,0,0"/>
+    </Style>
+
+    <!-- Count pill (orange): live count of the selected sheets the toolbar
+         actions operate on. -->
+    <Style x:Key="CountPill" TargetType="Border">
+      <Setter Property="Background"      Value="#FBEEDD"/>
+      <Setter Property="BorderBrush"     Value="#E7B183"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius"    Value="10"/>
+      <Setter Property="Padding"         Value="9,1"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
 
     <!-- DataGrid -->
     <Style TargetType="DataGrid">
@@ -1059,25 +1834,54 @@ MAIN_XAML = """
       <RowDefinition Height="Auto"/>  <!-- 4: status -->
     </Grid.RowDefinitions>
 
-    <!-- HEADER (dark blue bar) -->
-    <Border Grid.Row="0" Background="#2D3748" Padding="20,14">
+    <!-- dbHMS header: deep-blue dotted ground, solid orange baseline, brand logo -->
+    <Border Grid.Row="0" BorderBrush="#EE8A34" BorderThickness="0,0,0,3">
       <Grid>
-        <StackPanel Orientation="Vertical" HorizontalAlignment="Left">
-          <TextBlock Text="Sheet Manager" Foreground="White"
-                     FontSize="20" FontWeight="Bold"/>
-          <TextBlock x:Name="lbl_project"
-                     Text="Group, rename, renumber, duplicate with views, and manage revisions."
-                     Foreground="#CBD5E0" FontSize="12" Margin="0,2,0,0"/>
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
-                    VerticalAlignment="Center" Opacity="0.85">
-          <TextBlock Text="db" Foreground="#00BFFF" FontSize="32"
-                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-          <TextBlock Text=" | " Foreground="#7A8FA6" FontSize="32"
-                     FontWeight="Light" VerticalAlignment="Center"/>
-          <TextBlock Text="HMS" Foreground="#00BFFF" FontSize="32"
-                     FontWeight="Bold" FontFamily="Segoe UI" VerticalAlignment="Center"/>
-        </StackPanel>
+        <Grid.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#143257" Offset="0"/>
+            <GradientStop Color="#0F2748" Offset="0.55"/>
+            <GradientStop Color="#0B1D34" Offset="1"/>
+          </LinearGradientBrush>
+        </Grid.Background>
+
+        <!-- faint light dot texture, faded out toward the orange baseline -->
+        <Rectangle>
+          <Rectangle.OpacityMask>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+              <GradientStop Color="#FFFFFFFF" Offset="0.0"/>
+              <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+              <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+            </LinearGradientBrush>
+          </Rectangle.OpacityMask>
+          <Rectangle.Fill>
+            <DrawingBrush TileMode="Tile" Stretch="None"
+                          Viewport="0,0,16,16" ViewportUnits="Absolute"
+                          Viewbox="0,0,16,16" ViewboxUnits="Absolute">
+              <DrawingBrush.Drawing>
+                <GeometryDrawing Brush="#26D6ECFF">
+                  <GeometryDrawing.Geometry>
+                    <EllipseGeometry Center="8,8" RadiusX="1.1" RadiusY="1.1"/>
+                  </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+              </DrawingBrush.Drawing>
+            </DrawingBrush>
+          </Rectangle.Fill>
+        </Rectangle>
+
+        <!-- title (left) + brand logo (right) -->
+        <Grid Margin="24,16">
+          <StackPanel HorizontalAlignment="Left" VerticalAlignment="Center">
+            <TextBlock Text="Sheet Manager" Foreground="#F2F7FC"
+                       FontSize="20" FontWeight="Bold"/>
+            <TextBlock x:Name="lbl_project"
+                       Text="Group, rename, renumber, duplicate with views, and manage revisions."
+                       Foreground="#A9C2D8" FontSize="12" Margin="0,3,0,0"/>
+          </StackPanel>
+          <Image x:Name="img_logo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                 Height="38" Stretch="Uniform"
+                 RenderOptions.BitmapScalingMode="HighQuality"/>
+        </Grid>
       </Grid>
     </Border>
 
@@ -1286,8 +2090,14 @@ MAIN_XAML = """
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock x:Name="lbl_status" Foreground="#4A5568"
-                   FontSize="12" VerticalAlignment="Center"/>
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+          <!-- orange pill: live count of the sheets the toolbar actions operate on -->
+          <Border Style="{StaticResource CountPill}">
+            <TextBlock x:Name="lbl_sel_count" Text="0" Foreground="#9C4221" FontWeight="Bold"/>
+          </Border>
+          <TextBlock x:Name="lbl_status" Foreground="#4A5568"
+                     FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
+        </StackPanel>
         <Button x:Name="btn_sel_all"   Grid.Column="1" Content="Select All"
                 Style="{StaticResource SecondaryButton}" Height="28" MinWidth="100"/>
         <Button x:Name="btn_sel_none"  Grid.Column="2" Content="Select None"
@@ -1302,7 +2112,8 @@ MAIN_XAML = """
 RENAME_XAML = """
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Rename / Renumber Sheets" Width="780" Height="800"
+        Title="Rename / Renumber Sheets" Width="1020" Height="720"
+        MinWidth="820" MinHeight="560"
         WindowStartupLocation="CenterOwner"
         Background="#F7FAFC" Foreground="#1A202C"
         FontFamily="Segoe UI" FontSize="12"
@@ -1316,48 +2127,96 @@ RENAME_XAML = """
       <Setter Property="CornerRadius"    Value="4"/>
       <Setter Property="Padding"         Value="14"/>
     </Style>
+
+    <!-- Preview DataGrid -->
+    <Style TargetType="DataGrid">
+      <Setter Property="Background"               Value="White"/>
+      <Setter Property="Foreground"               Value="#1A202C"/>
+      <Setter Property="BorderThickness"          Value="0"/>
+      <Setter Property="RowBackground"            Value="White"/>
+      <Setter Property="AlternatingRowBackground" Value="#F7FAFC"/>
+      <Setter Property="GridLinesVisibility"      Value="None"/>
+      <Setter Property="HeadersVisibility"        Value="Column"/>
+      <Setter Property="CanUserAddRows"           Value="False"/>
+      <Setter Property="CanUserDeleteRows"        Value="False"/>
+      <Setter Property="AutoGenerateColumns"      Value="False"/>
+      <Setter Property="IsReadOnly"               Value="True"/>
+      <Setter Property="RowHeight"                Value="28"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background"      Value="#EDF2F7"/>
+      <Setter Property="Foreground"      Value="#2D3748"/>
+      <Setter Property="FontSize"        Value="11"/>
+      <Setter Property="FontWeight"      Value="SemiBold"/>
+      <Setter Property="Padding"         Value="8,7"/>
+      <Setter Property="BorderBrush"     Value="#E2E8F0"/>
+      <Setter Property="BorderThickness" Value="0,0,1,1"/>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Setter Property="Foreground" Value="#1A202C"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding HasConflict}" Value="True">
+          <Setter Property="Background" Value="#FFF5F5"/>
+        </DataTrigger>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#F2F8FD"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness"   Value="0"/>
+      <Setter Property="Foreground"        Value="#1A202C"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="FocusVisualStyle"  Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="Foreground" Value="#1A202C"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
 
   <DockPanel>
-    <!-- Header bar -->
-    <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,12">
+""" + brand_header_xaml("Rename / renumber sheets",
+                        "Find and replace across numbers and names, with a live preview.") + """
+
+    <!-- Footer: impact / conflict status on the left, actions on the right -->
+    <Border DockPanel.Dock="Bottom" Background="White"
+            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
       <Grid>
-        <StackPanel HorizontalAlignment="Left">
-          <TextBlock Text="Rename / Renumber Sheets" Foreground="White"
-                     FontSize="18" FontWeight="Bold"/>
-          <TextBlock Text="Edit a single sheet, or batch-transform numbers and names with prefix/suffix, sequence, and find/replace rules."
-                     Foreground="#CBD5E0" FontSize="11" Margin="0,2,0,0"/>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0" x:Name="lbl_footer" Text=""
+                   Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
+          <Button x:Name="btn_apply"  Content="Rename" Style="{StaticResource PrimaryButton}"/>
         </StackPanel>
       </Grid>
     </Border>
 
-    <!-- Footer -->
-    <Border DockPanel.Dock="Bottom" Background="White"
-            BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button x:Name="btn_cancel" Content="Cancel" Style="{StaticResource SecondaryButton}"/>
-        <Button x:Name="btn_apply"  Content="Apply"  Style="{StaticResource PrimaryButton}"/>
-      </StackPanel>
-    </Border>
-
-    <Grid Margin="20,16">
+    <Grid Margin="16,14">
       <Grid.RowDefinitions>
-        <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
       </Grid.RowDefinitions>
 
-      <!-- Mode tabs -->
-      <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,14">
-        <RadioButton x:Name="rb_single"   Content="Single Rename"  IsChecked="True"
+      <!-- Mode toggle (only shown when a single sheet is selected) -->
+      <StackPanel x:Name="pnl_modes" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
+        <RadioButton x:Name="rb_single" Content="Edit one sheet" IsChecked="True"
                      Margin="0,0,20,0" Cursor="Hand"/>
-        <RadioButton x:Name="rb_batch"    Content="Batch"          Cursor="Hand"/>
+        <RadioButton x:Name="rb_batch"  Content="Find and replace" Cursor="Hand"/>
       </StackPanel>
 
-      <!-- Single rename panel -->
-      <Border x:Name="pnl_single" Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,0,0,12">
+      <!-- Single-sheet direct edit -->
+      <Border x:Name="pnl_single" Grid.Row="1" VerticalAlignment="Top"
+              Style="{StaticResource CardBorder}">
         <StackPanel>
-          <TextBlock Text="Edit the selected sheet's number and name."
+          <TextBlock Text="Edit this sheet's number and name directly."
                      Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
           <Grid>
             <Grid.ColumnDefinitions>
@@ -1369,139 +2228,110 @@ RENAME_XAML = """
               <RowDefinition Height="8"/>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <TextBlock Text="Sheet Number:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
+            <TextBlock Text="Sheet number:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
             <TextBox x:Name="txt_new_number" Grid.Column="1" Height="30"/>
-            <TextBlock Grid.Row="2" Text="Sheet Name:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
+            <TextBlock Grid.Row="2" Text="Sheet name:" Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"/>
             <TextBox x:Name="txt_new_name" Grid.Row="2" Grid.Column="1" Height="30"/>
           </Grid>
         </StackPanel>
       </Border>
 
-      <!-- Batch panel — per-target Apply/Prefix/Suffix + optional sequence + rules. -->
-      <Border x:Name="pnl_batch" Grid.Row="1" Style="{StaticResource CardBorder}"
-              Visibility="Collapsed" Margin="0,0,0,12">
-        <StackPanel>
-          <TextBlock Text="Each target transforms independently:  source → find/replace → prefix + suffix.  Uncheck Apply to leave a target alone."
-                     Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
+      <!-- Batch: builder (left) + live preview (right) -->
+      <Grid x:Name="pnl_batch" Grid.Row="1" Visibility="Collapsed">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="362" MinWidth="320"/>
+          <ColumnDefinition Width="14"/>
+          <ColumnDefinition Width="*" MinWidth="280"/>
+        </Grid.ColumnDefinitions>
 
-          <!-- Per-target Apply / Prefix / Suffix grid -->
-          <Grid Margin="0,0,0,8">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="100"/>
-              <ColumnDefinition Width="60"/>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="10"/>
-              <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="4"/>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="4"/>
-              <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-            <!-- Column headers -->
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="Target"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <TextBlock Grid.Row="0" Grid.Column="1" Text="Apply"
-                       Style="{StaticResource FieldLabel}" Margin="0"
-                       HorizontalAlignment="Center"/>
-            <TextBlock Grid.Row="0" Grid.Column="2" Text="Prefix"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <TextBlock Grid.Row="0" Grid.Column="4" Text="Suffix"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <!-- Sheet # -->
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="Sheet #"
-                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
-            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="chk_b_apply_num"
-                      IsChecked="True" HorizontalAlignment="Center"
-                      VerticalAlignment="Center" Margin="0"/>
-            <TextBox Grid.Row="2" Grid.Column="2" x:Name="txt_b_prefix_num" Height="28"/>
-            <TextBox Grid.Row="2" Grid.Column="4" x:Name="txt_b_suffix_num" Height="28"/>
-            <!-- Sheet Name -->
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="Sheet Name"
-                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
-            <CheckBox Grid.Row="4" Grid.Column="1" x:Name="chk_b_apply_name"
-                      IsChecked="False" HorizontalAlignment="Center"
-                      VerticalAlignment="Center" Margin="0"/>
-            <TextBox Grid.Row="4" Grid.Column="2" x:Name="txt_b_prefix_name" Height="28"/>
-            <TextBox Grid.Row="4" Grid.Column="4" x:Name="txt_b_suffix_name" Height="28"/>
-          </Grid>
-
-          <!-- Sequence renumber (Sheet # only) -->
-          <StackPanel Orientation="Horizontal" Margin="0,4,0,2">
-            <CheckBox x:Name="chk_b_sequence" Content="Renumber Sheet # with sequence"
-                      VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <TextBlock Text="Start:" Foreground="#4A5568" FontSize="11"
-                       VerticalAlignment="Center" Margin="0,0,4,0"/>
-            <TextBox x:Name="txt_b_seq_start" Width="60" Height="26" Text="100"
-                     VerticalContentAlignment="Center"/>
-            <TextBlock Text="Increment:" Foreground="#4A5568" FontSize="11"
-                       VerticalAlignment="Center" Margin="14,0,4,0"/>
-            <TextBox x:Name="txt_b_seq_inc" Width="50" Height="26" Text="1"
-                     VerticalContentAlignment="Center"/>
-          </StackPanel>
-          <TextBlock Text="When sequence is on, prefix + sequence number + suffix replaces the source #; find/replace rules are skipped for numbers."
-                     Style="{StaticResource HelperText}" Margin="0,2,0,10"/>
-
-          <!-- Find / replace rules -->
-          <TextBlock Text="Find / replace rules (applied to enabled non-sequence targets):"
-                     Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
-          <ItemsControl x:Name="b_rules_list" Margin="0,0,0,4">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate>
-                <Grid Margin="0,2">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="22"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="Auto"/>
-                  </Grid.ColumnDefinitions>
-                  <TextBox Grid.Column="0" Height="26"
-                           Text="{Binding Find, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                  <TextBlock Grid.Column="1" Text="→" Foreground="#718096"
-                             FontSize="14" VerticalAlignment="Center"
-                             HorizontalAlignment="Center"/>
-                  <TextBox Grid.Column="2" Height="26"
-                           Text="{Binding Replace, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                  <CheckBox Grid.Column="4" Content="Aa"
-                            IsChecked="{Binding CaseSensitive, Mode=TwoWay}"
-                            ToolTip="Case-sensitive match"
-                            VerticalAlignment="Center" Margin="0"/>
-                  <Button Grid.Column="6" Tag="RemoveRule" Content="✕"
-                          Width="26" Height="26" MinWidth="26"
-                          Style="{StaticResource SecondaryButton}"
-                          Margin="0" Padding="0" FontSize="11"
-                          ToolTip="Remove rule"/>
-                </Grid>
-              </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-          <Grid Margin="0,6,0,0">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <Button Grid.Column="0" x:Name="btn_b_add_rule" Content="+ Add rule"
-                    Style="{StaticResource SecondaryButton}" Height="30" MinWidth="100"
-                    Margin="0"/>
-            <Button Grid.Column="2" x:Name="btn_preview" Content="Preview Changes"
-                    Style="{StaticResource SecondaryButton}" Height="30" MinWidth="140"/>
-          </Grid>
-        </StackPanel>
-      </Border>
-
-      <!-- Preview list -->
-      <Border Grid.Row="2" Style="{StaticResource CardBorder}">
-        <ScrollViewer>
-          <ListBox x:Name="lst_preview" Background="Transparent" BorderThickness="0"
-                   Foreground="#1A202C" FontSize="12"/>
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
+""" + NAMING_BLOCK_XAML + """
         </ScrollViewer>
-      </Border>
+
+        <Border Grid.Column="2" Style="{StaticResource CardBorder}" Padding="0">
+          <DockPanel>
+            <Border DockPanel.Dock="Top" Background="White"
+                    BorderBrush="#EDF2F7" BorderThickness="0,0,0,1" Padding="11,9">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal">
+                  <Border Width="3" Height="15" CornerRadius="2" Background="#2B6CB0"
+                          VerticalAlignment="Center" Margin="0,0,8,0"/>
+                  <TextBlock Text="Live preview" Style="{StaticResource SectionHeader}" Margin="0"/>
+                </StackPanel>
+                <TextBlock Grid.Column="1" x:Name="lbl_preview_hint"
+                           Text="only changes are highlighted"
+                           Foreground="#718096" FontSize="11" VerticalAlignment="Center"/>
+              </Grid>
+            </Border>
+            <DataGrid x:Name="grid_preview" SelectionMode="Extended" SelectionUnit="FullRow">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="34">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <CheckBox IsChecked="{Binding Include, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                ToolTip="Include this sheet in the rename"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="Sheet #" Binding="{Binding NumberDisplay}"
+                                    Width="1.1*" MinWidth="90">
+                  <DataGridTextColumn.ElementStyle>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Padding"           Value="8,0"/>
+                      <Setter Property="VerticalAlignment" Value="Center"/>
+                      <Setter Property="TextTrimming"      Value="CharacterEllipsis"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding NumChanged}" Value="True">
+                          <Setter Property="Foreground" Value="#2B6CB0"/>
+                          <Setter Property="FontWeight" Value="SemiBold"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding HasConflict}" Value="True">
+                          <Setter Property="Foreground" Value="#C53030"/>
+                          <Setter Property="FontWeight" Value="SemiBold"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="Sheet name" Binding="{Binding NameDisplay}"
+                                    Width="1.7*" MinWidth="120">
+                  <DataGridTextColumn.ElementStyle>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Padding"           Value="8,0"/>
+                      <Setter Property="VerticalAlignment" Value="Center"/>
+                      <Setter Property="TextTrimming"      Value="CharacterEllipsis"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding NameChanged}" Value="True">
+                          <Setter Property="Foreground" Value="#2B6CB0"/>
+                          <Setter Property="FontWeight" Value="SemiBold"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="Note" Binding="{Binding ConflictReason}"
+                                    Width="0.9*" MinWidth="80">
+                  <DataGridTextColumn.ElementStyle>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Padding"           Value="8,0"/>
+                      <Setter Property="VerticalAlignment" Value="Center"/>
+                      <Setter Property="Foreground"        Value="#C53030"/>
+                      <Setter Property="FontSize"          Value="11"/>
+                      <Setter Property="TextTrimming"      Value="CharacterEllipsis"/>
+                    </Style>
+                  </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+              </DataGrid.Columns>
+            </DataGrid>
+          </DockPanel>
+        </Border>
+      </Grid>
     </Grid>
   </DockPanel>
 </Window>
@@ -1511,7 +2341,8 @@ RENAME_XAML = """
 DUPLICATE_XAML = """
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Duplicate Sheets with Views" Width="980" Height="880"
+        Title="Duplicate Sheets with Views" Width="1000" Height="940"
+        MinWidth="860" MinHeight="620"
         WindowStartupLocation="CenterOwner"
         Background="#F7FAFC" Foreground="#1A202C"
         FontFamily="Segoe UI" FontSize="12"
@@ -1550,6 +2381,10 @@ DUPLICATE_XAML = """
     <Style TargetType="DataGridRow">
       <Setter Property="Foreground" Value="#1A202C"/>
       <Style.Triggers>
+        <!-- Conflict tint (selection wins over it, being declared later). -->
+        <DataTrigger Binding="{Binding HasConflict}" Value="True">
+          <Setter Property="Background" Value="#FFF5F5"/>
+        </DataTrigger>
         <Trigger Property="IsSelected" Value="True">
           <!-- Soft pale blue for selected rows so edit text stays readable -->
           <Setter Property="Background" Value="#EBF8FF"/>
@@ -1618,171 +2453,76 @@ DUPLICATE_XAML = """
   </Window.Resources>
 
   <DockPanel>
-    <!-- Header -->
-    <Border DockPanel.Dock="Top" Background="#2D3748" Padding="20,12">
-      <Grid>
-        <StackPanel HorizontalAlignment="Left">
-          <TextBlock Text="Duplicate Sheets with Views" Foreground="White"
-                     FontSize="18" FontWeight="Bold"/>
-          <TextBlock Text="Edit number, name, view name, and template for each sheet to duplicate."
-                     Foreground="#CBD5E0" FontSize="11" Margin="0,2,0,0"/>
-        </StackPanel>
-      </Grid>
-    </Border>
+""" + brand_header_xaml("Duplicate sheets with views",
+                        "Same find and replace as Rename, then set view templates in bulk.") + """
 
     <!-- Footer -->
     <Border DockPanel.Dock="Bottom" Background="White"
             BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="20,12">
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button x:Name="btn_cancel"    Content="Cancel"    Style="{StaticResource SecondaryButton}"/>
-        <Button x:Name="btn_duplicate" Content="Duplicate" Style="{StaticResource PrimaryButton}"/>
-      </StackPanel>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0" x:Name="lbl_footer" Text=""
+                   Foreground="#4A5568" FontSize="12" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button x:Name="btn_cancel"    Content="Cancel"    Style="{StaticResource SecondaryButton}"/>
+          <Button x:Name="btn_duplicate" Content="Duplicate" Style="{StaticResource PrimaryButton}"/>
+        </StackPanel>
+      </Grid>
     </Border>
 
-    <Grid Margin="20,16">
+    <Grid Margin="16,14">
       <Grid.RowDefinitions>
-        <RowDefinition Height="Auto"/>  <!-- 0: naming rules card -->
-        <RowDefinition Height="*"/>     <!-- 1: table -->
-        <RowDefinition Height="Auto"/>  <!-- 2: options bar -->
+        <RowDefinition Height="Auto"/>  <!-- 0: naming block + actions -->
+        <RowDefinition Height="Auto"/>  <!-- 1: bulk view-template bar -->
+        <RowDefinition Height="*"/>     <!-- 2: table -->
+        <RowDefinition Height="Auto"/>  <!-- 3: options bar -->
       </Grid.RowDefinitions>
 
-      <!-- Naming rules card -->
-      <Border Grid.Row="0" Style="{StaticResource CardBorder}" Margin="0,0,0,12" Padding="14">
-        <StackPanel>
-          <TextBlock Text="Naming rules" Style="{StaticResource SectionHeader}"/>
-          <TextBlock Text="Each target transforms independently:  source → find/replace → prefix + suffix.  Uncheck Apply to leave a target at its default ('-DUP' / '(Copy)')."
-                     Style="{StaticResource HelperText}" Margin="0,0,0,10"/>
-
-          <!-- Per-target Apply / Prefix / Suffix grid -->
-          <Grid Margin="0,0,0,8">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="100"/>  <!-- target label -->
-              <ColumnDefinition Width="60"/>   <!-- apply -->
-              <ColumnDefinition Width="*"/>    <!-- prefix -->
-              <ColumnDefinition Width="10"/>
-              <ColumnDefinition Width="*"/>    <!-- suffix -->
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="4"/>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="4"/>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="4"/>
-              <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-            <!-- Column headers -->
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="Target"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <TextBlock Grid.Row="0" Grid.Column="1" Text="Apply"
-                       Style="{StaticResource FieldLabel}" Margin="0"
-                       HorizontalAlignment="Center"/>
-            <TextBlock Grid.Row="0" Grid.Column="2" Text="Prefix"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <TextBlock Grid.Row="0" Grid.Column="4" Text="Suffix"
-                       Style="{StaticResource FieldLabel}" Margin="0"/>
-            <!-- Sheet # row -->
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="Sheet #"
-                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
-            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="chk_apply_num"
-                      IsChecked="True" HorizontalAlignment="Center"
-                      VerticalAlignment="Center" Margin="0"/>
-            <TextBox Grid.Row="2" Grid.Column="2" x:Name="txt_prefix_num" Height="28"/>
-            <TextBox Grid.Row="2" Grid.Column="4" x:Name="txt_suffix_num" Height="28"/>
-            <!-- Sheet Name row -->
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="Sheet Name"
-                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
-            <CheckBox Grid.Row="4" Grid.Column="1" x:Name="chk_apply_name"
-                      IsChecked="True" HorizontalAlignment="Center"
-                      VerticalAlignment="Center" Margin="0"/>
-            <TextBox Grid.Row="4" Grid.Column="2" x:Name="txt_prefix_name" Height="28"/>
-            <TextBox Grid.Row="4" Grid.Column="4" x:Name="txt_suffix_name" Height="28"/>
-            <!-- View Name row -->
-            <TextBlock Grid.Row="6" Grid.Column="0" Text="View Name"
-                       Foreground="#2D3748" FontSize="12" VerticalAlignment="Center"/>
-            <CheckBox Grid.Row="6" Grid.Column="1" x:Name="chk_apply_view"
-                      IsChecked="True" HorizontalAlignment="Center"
-                      VerticalAlignment="Center" Margin="0"/>
-            <TextBox Grid.Row="6" Grid.Column="2" x:Name="txt_prefix_view" Height="28"/>
-            <TextBox Grid.Row="6" Grid.Column="4" x:Name="txt_suffix_view" Height="28"/>
-          </Grid>
-
-          <!-- Sequence renumber (Sheet # only) -->
-          <StackPanel Orientation="Horizontal" Margin="0,4,0,2">
-            <CheckBox x:Name="chk_sequence" Content="Renumber Sheet # with sequence"
-                      VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <TextBlock Text="Start:" Foreground="#4A5568" FontSize="11"
-                       VerticalAlignment="Center" Margin="0,0,4,0"/>
-            <TextBox x:Name="txt_seq_start" Width="60" Height="26" Text="100"
-                     VerticalContentAlignment="Center"/>
-            <TextBlock Text="Increment:" Foreground="#4A5568" FontSize="11"
-                       VerticalAlignment="Center" Margin="14,0,4,0"/>
-            <TextBox x:Name="txt_seq_inc" Width="50" Height="26" Text="1"
-                     VerticalContentAlignment="Center"/>
-          </StackPanel>
-          <TextBlock Text="In sequence mode: prefix + sequence number + suffix replaces the source #. Find/replace rules are skipped for Sheet # but still apply to Name and View Name."
-                     Style="{StaticResource HelperText}" Margin="0,2,0,10"/>
-
-          <!-- Rules list -->
-          <ItemsControl x:Name="rules_list" Margin="0,4,0,4">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate>
-                <Grid Margin="0,2">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="22"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="Auto"/>
-                  </Grid.ColumnDefinitions>
-                  <TextBox Grid.Column="0" Height="26"
-                           Text="{Binding Find, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                  <TextBlock Grid.Column="1" Text="→" Foreground="#718096"
-                             FontSize="14" VerticalAlignment="Center"
-                             HorizontalAlignment="Center"/>
-                  <TextBox Grid.Column="2" Height="26"
-                           Text="{Binding Replace, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                  <CheckBox Grid.Column="4" Content="Aa"
-                            IsChecked="{Binding CaseSensitive, Mode=TwoWay}"
-                            ToolTip="Case-sensitive match"
-                            VerticalAlignment="Center" Margin="0"/>
-                  <Button Grid.Column="6" Tag="RemoveRule" Content="✕"
-                          Width="26" Height="26" MinWidth="26"
-                          Style="{StaticResource SecondaryButton}"
-                          Margin="0" Padding="0" FontSize="11"
-                          ToolTip="Remove rule"/>
-                </Grid>
-              </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-
-          <!-- Rule actions -->
-          <Grid Margin="0,6,0,0">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <Button Grid.Column="0" x:Name="btn_add_rule" Content="+ Add rule"
-                    Style="{StaticResource SecondaryButton}" Height="30" MinWidth="100"
-                    Margin="0"/>
-            <TextBlock Grid.Column="1" x:Name="lbl_rules_hint" Text=""
-                       Foreground="#A0AEC0" FontSize="11"
-                       VerticalAlignment="Center" Margin="14,0,0,0"/>
-            <Button Grid.Column="2" x:Name="btn_reset_rules" Content="Reset Names"
-                    Style="{StaticResource SecondaryButton}" Height="30" MinWidth="100"
+      <!-- Naming block (shared with Rename) + rule actions -->
+      <StackPanel Grid.Row="0" Margin="0,0,0,10">
+""" + NAMING_BLOCK_XAML + """
+        <Grid Margin="0,2,0,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0" x:Name="lbl_rules_hint" Text=""
+                     Foreground="#718096" FontSize="11" VerticalAlignment="Center"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal">
+            <Button x:Name="btn_reset_rules" Content="Reset to defaults"
+                    Style="{StaticResource SecondaryButton}" Height="30" MinWidth="130"
                     ToolTip="Restore the auto-generated -DUP / (Copy) names."/>
-            <Button Grid.Column="3" x:Name="btn_apply_rules" Content="Apply Rules"
+            <Button x:Name="btn_apply_rules" Content="Apply rules"
                     Style="{StaticResource PrimaryButton}" Height="30" MinWidth="120"/>
-          </Grid>
+          </StackPanel>
+        </Grid>
+      </StackPanel>
+
+      <!-- Bulk view-template bar: select rows, set one template on all of them -->
+      <Border Grid.Row="1" Background="#F7FAFC" BorderBrush="#E2E8F0"
+              BorderThickness="1" CornerRadius="6" Padding="8,7" Margin="0,0,0,8">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Background="#FBEEDD" BorderBrush="#E7B183" BorderThickness="1"
+                  CornerRadius="10" Padding="9,1" VerticalAlignment="Center" Margin="0,0,10,0">
+            <TextBlock x:Name="lbl_bulk_count" Text="No rows selected"
+                       Foreground="#9C4221" FontWeight="Bold" FontSize="11"/>
+          </Border>
+          <TextBlock Text="Set view template:" Foreground="#4A5568" FontSize="12"
+                     VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <ComboBox x:Name="cmb_bulk_template" Width="210" Height="27" Margin="0,0,8,0"/>
+          <Button x:Name="btn_bulk_apply" Content="Apply to selected"
+                  Style="{StaticResource PrimaryButton}" Height="28" MinWidth="140"/>
+          <TextBlock Text="Shift-click or Ctrl-click rows to multi-select (or right-click)."
+                     Foreground="#A0AEC0" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0"/>
         </StackPanel>
       </Border>
 
       <!-- Table -->
-      <Border Grid.Row="1" Style="{StaticResource CardBorder}">
+      <Border Grid.Row="2" Style="{StaticResource CardBorder}">
         <DataGrid x:Name="dup_grid" Margin="0"
                   SelectionMode="Extended" SelectionUnit="FullRow">
           <DataGrid.Columns>
@@ -1830,6 +2570,12 @@ DUPLICATE_XAML = """
                   <Setter Property="Padding"           Value="8,0"/>
                   <Setter Property="VerticalAlignment" Value="Center"/>
                   <Setter Property="TextTrimming"      Value="CharacterEllipsis"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding HasConflict}" Value="True">
+                      <Setter Property="Foreground" Value="#C53030"/>
+                      <Setter Property="FontWeight" Value="SemiBold"/>
+                    </DataTrigger>
+                  </Style.Triggers>
                 </Style>
               </DataGridTextColumn.ElementStyle>
             </DataGridTextColumn>
@@ -1895,7 +2641,7 @@ DUPLICATE_XAML = """
       </Border>
 
       <!-- Options (two rows: duplicate type + per-sheet toggles) -->
-      <StackPanel Grid.Row="2" Margin="0,14,0,0">
+      <StackPanel Grid.Row="3" Margin="0,14,0,0">
         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
           <TextBlock Text="Duplicate type:" Foreground="#4A5568" FontSize="12"
                      VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1910,7 +2656,7 @@ DUPLICATE_XAML = """
                     IsChecked="True" VerticalAlignment="Center" Cursor="Hand" Margin="0,0,24,0"
                     ToolTip="Copy non-readonly instance parameters (Yes/No toggles, text fields) from each source title block and sheet to its duplicate."/>
           <CheckBox x:Name="chk_view_eq_name" Content="View name = Sheet name"
-                    VerticalAlignment="Center" Cursor="Hand"
+                    IsChecked="True" VerticalAlignment="Center" Cursor="Hand"
                     ToolTip="Force every duplicate's view name to match its sheet name. The View Name column becomes read-only when this is on."/>
         </StackPanel>
       </StackPanel>
@@ -2083,17 +2829,82 @@ class RevisionRow(INotifyPropertyChanged):
 # RENAME DIALOG
 # ═══════════════════════════════════════════════════════════════
 
+class RenamePreviewItem(INotifyPropertyChanged):
+    """One row in the Rename dialog's live preview grid. Old/new values are
+    computed once per rebuild; Include is two-way; ConflictReason is set by the
+    dialog after collision-checking the whole batch."""
+
+    PropertyChanged = None
+
+    def add_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Combine(self.PropertyChanged, value)
+
+    def remove_PropertyChanged(self, value):
+        self.PropertyChanged = System.Delegate.Remove(self.PropertyChanged, value)
+
+    def _notify(self, name):
+        if self.PropertyChanged:
+            self.PropertyChanged(self, PropertyChangedEventArgs(name))
+
+    def __init__(self, sheet_item, new_num, new_name):
+        self._src      = sheet_item
+        self._old_num  = sheet_item.SheetNumber
+        self._old_name = sheet_item.SheetName
+        self._new_num  = new_num
+        self._new_name = new_name
+        self._include  = True
+        self._conflict = ""
+
+    @property
+    def SourceItem(self): return self._src
+    @property
+    def NewNumber(self):  return self._new_num
+    @property
+    def NewName(self):    return self._new_name
+    @property
+    def OldNumber(self):  return self._old_num
+    @property
+    def NumChanged(self):  return self._new_num  != self._old_num
+    @property
+    def NameChanged(self): return self._new_name != self._old_name
+
+    @property
+    def NumberDisplay(self):
+        if self.NumChanged:
+            return u"{0}   →   {1}".format(self._old_num, self._new_num)
+        return self._old_num
+
+    @property
+    def NameDisplay(self):
+        if self.NameChanged:
+            return u"{0}   →   {1}".format(self._old_name, self._new_name)
+        return self._old_name
+
+    def _g_inc(self): return self._include
+    def _s_inc(self, v):
+        self._include = bool(v)
+        self._notify("Include")
+    Include = property(_g_inc, _s_inc)
+
+    def _g_conf(self): return self._conflict
+    def _s_conf(self, v):
+        self._conflict = v or ""
+        self._notify("ConflictReason")
+        self._notify("HasConflict")
+    ConflictReason = property(_g_conf, _s_conf)
+
+    @property
+    def HasConflict(self): return bool(self._conflict)
+
+
 class RenameDialog(object):
-    """Two modes:
-       - Single Rename: direct edit of one sheet's #/name (when only 1 sheet
-         is selected).
-       - Batch: per-target Apply / Prefix / Suffix for Sheet # and Sheet Name,
-         optional sequence-number renumber for Sheet #, and a Find/Replace
-         rules list. Mirrors the Duplicate dialog's pipeline so the two tools
-         behave the same way.
-       Pipeline per target:  source → find/replace → prefix + suffix
-       Sheet # in sequence mode: prefix + (start + i*inc) + suffix (rules
-       skipped for #, still applied to Name).
+    """Rename / renumber selected sheets.
+       - 'Edit one sheet' (only offered for a single selection): direct number +
+         name edit.
+       - 'Find and replace' (batch): the shared naming block (scoped find/replace,
+         prefix/suffix, change-case, and an optional advanced sequence) drives a
+         live preview. Resulting numbers are collision-checked against the batch
+         and the rest of the project; conflicts block Apply.
     """
 
     def __init__(self, owner, selected_items):
@@ -2102,189 +2913,190 @@ class RenameDialog(object):
         w = Markup.XamlReader.Parse(RENAME_XAML)
         self._w = w
         w.Owner = owner
+        load_brand_logo(w)
 
+        self._pnl_modes  = w.FindName("pnl_modes")
         self._rb_single  = w.FindName("rb_single")
         self._rb_batch   = w.FindName("rb_batch")
         self._pnl_single = w.FindName("pnl_single")
         self._pnl_batch  = w.FindName("pnl_batch")
         self._txt_num    = w.FindName("txt_new_number")
         self._txt_name   = w.FindName("txt_new_name")
-        self._lst        = w.FindName("lst_preview")
-        self._btn_prev   = w.FindName("btn_preview")
+        self._grid       = w.FindName("grid_preview")
+        self._lbl_hint   = w.FindName("lbl_preview_hint")
+        self._lbl_footer = w.FindName("lbl_footer")
         self._btn_apply  = w.FindName("btn_apply")
         self._btn_cancel = w.FindName("btn_cancel")
-        # Batch-mode controls
-        self._chk_b_apply_num  = w.FindName("chk_b_apply_num")
-        self._chk_b_apply_name = w.FindName("chk_b_apply_name")
-        self._txt_b_prefix_num  = w.FindName("txt_b_prefix_num")
-        self._txt_b_suffix_num  = w.FindName("txt_b_suffix_num")
-        self._txt_b_prefix_name = w.FindName("txt_b_prefix_name")
-        self._txt_b_suffix_name = w.FindName("txt_b_suffix_name")
-        self._chk_b_sequence    = w.FindName("chk_b_sequence")
-        self._txt_b_seq_start   = w.FindName("txt_b_seq_start")
-        self._txt_b_seq_inc     = w.FindName("txt_b_seq_inc")
-        self._b_rules_list      = w.FindName("b_rules_list")
-        self._btn_b_add_rule    = w.FindName("btn_b_add_rule")
 
-        # Pre-fill single fields
+        # Numbers held by every OTHER sheet in the document — off-limits.
+        self._occupied = occupied_numbers_excluding(
+            doc, [it.Sheet for it in selected_items])
+
+        # Live preview collection + the engine that drives it.
+        self._excluded = set()   # SheetItems the user has un-ticked
+        self._preview  = ObservableCollection[RenamePreviewItem]()
+        self._grid.ItemsSource = self._preview
+        self._item_pc  = PropertyChangedEventHandler(self._on_preview_item_changed)
+
+        # Pre-fill the single-edit fields with the first selection.
         if selected_items:
             self._txt_num.Text  = selected_items[0].SheetNumber
             self._txt_name.Text = selected_items[0].SheetName
 
-        # Single Rename only makes sense for a single sheet — when the user
-        # has multiple sheets selected, hide that radio entirely and switch
-        # the default to Batch.
-        if len(selected_items) > 1:
-            self._rb_single.Visibility = Visibility.Collapsed
+        # 'Edit one sheet' only makes sense for exactly one sheet.
+        if len(selected_items) != 1:
+            self._pnl_modes.Visibility = Visibility.Collapsed
             self._rb_single.IsChecked  = False
             self._rb_batch.IsChecked   = True
-            self._pnl_single.Visibility = Visibility.Collapsed
-            self._pnl_batch.Visibility  = Visibility.Visible
 
-        # Batch rules collection (starts with one empty rule for affordance).
-        self._b_rules = ObservableCollection[FindReplaceRule]()
-        self._b_rules.Add(FindReplaceRule())
-        self._b_rules_list.ItemsSource = self._b_rules
+        # The naming block recomputes the preview on every change. Attach the
+        # callback AFTER construction so its own initial setup (adding the first
+        # rule, syncing the scope segments) doesn't fire into a half-built dialog.
+        self._naming = NamingBlock(w)
+        self._naming._on_change = self._rebuild_preview
 
-        # Events
-        self._rb_single.Checked   += self._on_mode
-        self._rb_batch.Checked    += self._on_mode
-        self._btn_prev.Click      += self._on_preview
-        self._btn_b_add_rule.Click += self._on_b_add_rule
-        self._btn_apply.Click     += self._on_apply
-        self._btn_cancel.Click    += lambda s, e: w.Close()
-        # Bubble class handler for the per-row "Remove rule" buttons.
-        self._b_rules_list.AddHandler(
-            Button.ClickEvent,
-            RoutedEventHandler(self._on_b_rules_button_click))
+        self._rb_single.Checked += self._on_mode
+        self._rb_batch.Checked  += self._on_mode
+        self._btn_apply.Click   += self._on_apply
+        self._btn_cancel.Click  += lambda s, e: w.Close()
+
+        self._sync_mode()
         w.ShowDialog()
 
+    # ── Mode ─────────────────────────────────────────────────
     def _on_mode(self, sender, e):
+        self._sync_mode()
+
+    def _sync_mode(self):
         is_single = bool(self._rb_single.IsChecked)
         self._pnl_single.Visibility = Visibility.Visible if is_single else Visibility.Collapsed
         self._pnl_batch.Visibility  = Visibility.Collapsed if is_single else Visibility.Visible
+        if is_single:
+            self._btn_apply.IsEnabled = True
+            self._btn_apply.Content   = "Rename sheet"
+            self._lbl_footer.Text     = ""
+        else:
+            self._rebuild_preview()
 
-    # ── Batch mode ────────────────────────────────────────────
-
-    def _on_b_add_rule(self, sender, e):
-        self._b_rules.Add(FindReplaceRule())
-
-    def _on_b_rules_button_click(self, sender, e):
-        src = e.OriginalSource
-        if isinstance(src, Button) and str(src.Tag) == "RemoveRule":
-            rule = src.DataContext
-            if rule is not None and rule in self._b_rules:
-                self._b_rules.Remove(rule)
-                e.Handled = True
-
-    def _build_batch_rows(self):
-        """Return list of (old_label, new_label, new_number_or_None,
-        new_name_or_None) for every selected sheet, after applying the active
-        prefix/suffix, sequence, and rules. Either new_* is None when that
-        target's Apply checkbox is off (signaling 'leave it alone')."""
-        apply_num  = bool(self._chk_b_apply_num.IsChecked)
-        apply_name = bool(self._chk_b_apply_name.IsChecked)
-        pre_num    = self._txt_b_prefix_num.Text  or ""
-        suf_num    = self._txt_b_suffix_num.Text  or ""
-        pre_name   = self._txt_b_prefix_name.Text or ""
-        suf_name   = self._txt_b_suffix_name.Text or ""
-        use_seq    = bool(self._chk_b_sequence.IsChecked)
-        try:    seq_start = int(self._txt_b_seq_start.Text)
-        except: seq_start = 100
-        try:    seq_inc = int(self._txt_b_seq_inc.Text)
-        except: seq_inc = 1
-        rules = list(self._b_rules)
-
-        def wrap(prefix, body, suffix):
-            return "{0}{1}{2}".format(prefix or "", body, suffix or "")
-
-        # When sequence is on, sort the items by current sheet number so the
-        # generated sequence follows a predictable order. Otherwise iterate in
-        # selection order (which preserves any user-meaningful ordering).
-        items = sorted(self._items, key=lambda x: x.SheetNumber) if use_seq else list(self._items)
-
-        rows = []
+    # ── Live preview ─────────────────────────────────────────
+    def _rebuild_preview(self):
+        if not bool(self._rb_batch.IsChecked):
+            return
+        use_seq = self._naming.uses_sequence()
+        items = (sorted(self._items, key=lambda x: x.SheetNumber)
+                 if use_seq else list(self._items))
+        for pv in self._preview:
+            try: pv.remove_PropertyChanged(self._item_pc)
+            except Exception: pass
+        self._preview.Clear()
         for i, item in enumerate(items):
-            if apply_num:
-                if use_seq:
-                    new_num = wrap(pre_num, seq_start + i * seq_inc, suf_num)
-                else:
-                    new_num = wrap(pre_num, apply_rules(item.SheetNumber, rules), suf_num)
-            else:
-                new_num = None
-            if apply_name:
-                new_name = wrap(pre_name, apply_rules(item.SheetName, rules), suf_name)
-            else:
-                new_name = None
-            old_lbl = "{0}  -  {1}".format(item.SheetNumber, item.SheetName)
-            disp_num  = new_num  if new_num  is not None else item.SheetNumber
-            disp_name = new_name if new_name is not None else item.SheetName
-            new_lbl = "{0}  -  {1}".format(disp_num, disp_name)
-            rows.append((old_lbl, new_lbl, new_num, new_name, item))
-        return rows
+            new_num, new_name = self._naming.compute(
+                item.SheetNumber, item.SheetName, i)
+            pv = RenamePreviewItem(item, new_num, new_name)
+            pv.Include = (item not in self._excluded)
+            pv.add_PropertyChanged(self._item_pc)
+            self._preview.Add(pv)
+        self._revalidate()
 
-    def _on_preview(self, sender, e):
-        self._lst.Items.Clear()
-        for old_lbl, new_lbl, _nn, _nm, _it in self._build_batch_rows():
-            lbi = System.Windows.Controls.ListBoxItem()
-            unchanged = (old_lbl == new_lbl)
-            lbi.Content = "{0}  →  {1}{2}".format(
-                old_lbl, new_lbl, "    (no change)" if unchanged else "")
-            color = (0x71, 0x80, 0x96) if unchanged else (0x1A, 0x20, 0x2C)
-            lbi.Foreground = SolidColorBrush(Color.FromRgb(*color))
-            self._lst.Items.Add(lbi)
+    def _on_preview_item_changed(self, sender, args):
+        if args.PropertyName == "Include":
+            try:
+                if sender.Include: self._excluded.discard(sender.SourceItem)
+                else:              self._excluded.add(sender.SourceItem)
+            except Exception:
+                pass
+            self._revalidate()
+
+    def _revalidate(self):
+        # Effective final number per row: the new number when the row is
+        # included and actually changing, else the sheet keeps its current one.
+        assignments = []
+        for pv in self._preview:
+            final = pv.NewNumber if (pv.Include and pv.NumChanged) else pv.OldNumber
+            assignments.append((pv, final))
+        conflicts = validate_numbers(assignments, self._occupied)
+        for pv in self._preview:
+            pv.ConflictReason = conflicts.get(pv, "")
+        n_conf   = len(conflicts)
+        n_change = sum(1 for pv in self._preview
+                       if pv.Include and (pv.NumChanged or pv.NameChanged))
+        self._btn_apply.Content   = "Rename {0} sheet{1}".format(
+            n_change, "" if n_change == 1 else "s")
+        self._btn_apply.IsEnabled = (n_conf == 0 and n_change > 0)
+        if n_conf:
+            self._lbl_footer.Foreground = SolidColorBrush(Color.FromRgb(0xC5, 0x30, 0x30))
+            self._lbl_footer.Text = "{0} number conflict{1} — fix to enable Rename.".format(
+                n_conf, "" if n_conf == 1 else "s")
+        elif n_change:
+            self._lbl_footer.Foreground = SolidColorBrush(Color.FromRgb(0x2F, 0x85, 0x5A))
+            self._lbl_footer.Text = "{0} sheet{1} changing · all numbers unique".format(
+                n_change, "" if n_change == 1 else "s")
+        else:
+            self._lbl_footer.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
+            self._lbl_footer.Text = "No changes yet"
 
     # ── Apply ────────────────────────────────────────────────
-
     def _on_apply(self, sender, e):
+        if bool(self._rb_single.IsChecked):
+            self._apply_single()
+        else:
+            self._apply_batch()
+
+    def _apply_single(self):
+        with Transaction(doc, "Sheet Manager: Rename Sheet") as t:
+            t.Start()
+            try:
+                if self._items:
+                    sheet = self._items[0].Sheet
+                    new_num  = (self._txt_num.Text  or "").strip()
+                    new_name = (self._txt_name.Text or "").strip()
+                    if new_num:  sheet.SheetNumber = new_num
+                    if new_name: sheet.Name = new_name
+                t.Commit()
+                self._applied = True
+            except Exception as ex:
+                t.RollBack()
+                TaskDialog.Show("Rename Error", str(ex))
+        self._w.Close()
+
+    def _apply_batch(self):
+        rows = [pv for pv in self._preview
+                if pv.Include and (pv.NumChanged or pv.NameChanged)]
+        if not rows:
+            self._w.Close()
+            return
+        # Apply is disabled while conflicts exist, but re-check as a safety net.
+        assignments = [(pv, pv.NewNumber if (pv.Include and pv.NumChanged) else pv.OldNumber)
+                       for pv in self._preview]
+        if validate_numbers(assignments, self._occupied):
+            TaskDialog.Show("Rename", "Resolve the number conflicts first.")
+            return
         with Transaction(doc, "Sheet Manager: Rename/Renumber Sheets") as t:
             t.Start()
             try:
-                if self._rb_single.IsChecked:
-                    # Single rename — first selected item
-                    if self._items:
-                        sheet = self._items[0].Sheet
-                        new_num  = self._txt_num.Text.strip()
-                        new_name = self._txt_name.Text.strip()
-                        if new_num:  sheet.SheetNumber = new_num
-                        if new_name: sheet.Name = new_name
-                else:
-                    # Batch: prefix/suffix + optional sequence + rules.
-                    rows = self._build_batch_rows()
-                    # If any number is changing, stage every selected sheet to
-                    # a unique temp number first so we never collide with an
-                    # existing sheet number mid-rename.
-                    has_num_changes = any(
-                        nn is not None and nn != it.SheetNumber
-                        for (_o, _n, nn, _nm, it) in rows)
-                    if has_num_changes:
-                        for i, (_o, _n, _nn, _nm, it) in enumerate(rows):
+                # Stage every changing number to a unique temp value first so we
+                # never collide with a sheet mid-rename.
+                num_rows = [pv for pv in rows if pv.NumChanged]
+                for i, pv in enumerate(num_rows):
+                    try:
+                        pv.SourceItem.Sheet.SheetNumber = "__tmp_rn_{0}__".format(i)
+                    except Exception:
+                        pass
+                for pv in rows:
+                    sheet = pv.SourceItem.Sheet
+                    if pv.NumChanged and (pv.NewNumber or "").strip():
+                        try:
+                            sheet.SheetNumber = pv.NewNumber
+                        except Exception:
                             try:
-                                it.Sheet.SheetNumber = "__tmp_b_{0}__".format(i)
+                                sheet.SheetNumber = pv.NewNumber + "-1"
                             except Exception:
                                 pass
-                    for (_o, _n, new_num, new_name, it) in rows:
-                        sheet = it.Sheet
-                        if new_num is not None and new_num.strip():
-                            try:
-                                sheet.SheetNumber = new_num
-                            except Exception:
-                                try:
-                                    sheet.SheetNumber = new_num + "-1"
-                                except Exception:
-                                    pass
-                        elif has_num_changes:
-                            # Number wasn't being changed for this row — put
-                            # it back to its original value.
-                            try:
-                                sheet.SheetNumber = it.SheetNumber
-                            except Exception:
-                                pass
-                        if new_name is not None and new_name.strip():
-                            try:
-                                sheet.Name = new_name
-                            except Exception:
-                                pass
+                    if pv.NameChanged and (pv.NewName or "").strip():
+                        try:
+                            sheet.Name = pv.NewName
+                        except Exception:
+                            pass
                 t.Commit()
                 self._applied = True
             except Exception as ex:
@@ -2302,17 +3114,16 @@ class RenameDialog(object):
 
 class DuplicateDialog(object):
     def __init__(self, owner, selected_items, template_map):
-        """
-        template_map: list of (name, ElementId) tuples
-        """
-        self._items       = selected_items
+        """template_map: list of (name, ElementId) tuples."""
+        self._items        = selected_items
         self._template_map = template_map
-        self._success     = False
-        template_names    = [t[0] for t in template_map]
+        self._success      = False
+        template_names     = [t[0] for t in template_map]
 
         w = Markup.XamlReader.Parse(DUPLICATE_XAML)
         self._w = w
         w.Owner = owner
+        load_brand_logo(w)
 
         self._grid      = w.FindName("dup_grid")
         self._rb_with   = w.FindName("rb_with_det")
@@ -2320,46 +3131,23 @@ class DuplicateDialog(object):
         self._rb_dep    = w.FindName("rb_dependent")
         self._chk_align = w.FindName("chk_align")
         self._chk_copy_tb_params = w.FindName("chk_copy_tb_params")
-        self._btn_dup   = w.FindName("btn_duplicate")
+        self._chk_view_eq_name = w.FindName("chk_view_eq_name")
+        self._btn_dup    = w.FindName("btn_duplicate")
         self._btn_cancel = w.FindName("btn_cancel")
-        # Naming-rules controls
-        self._rules_list      = w.FindName("rules_list")
-        self._btn_add_rule    = w.FindName("btn_add_rule")
         self._btn_apply_rules = w.FindName("btn_apply_rules")
         self._btn_reset_rules = w.FindName("btn_reset_rules")
-        self._chk_apply_num   = w.FindName("chk_apply_num")
-        self._chk_apply_name  = w.FindName("chk_apply_name")
-        self._chk_apply_view  = w.FindName("chk_apply_view")
-        self._chk_view_eq_name = w.FindName("chk_view_eq_name")
         self._lbl_rules_hint  = w.FindName("lbl_rules_hint")
-        # Per-target prefix / suffix textboxes (new in the per-target grid).
-        self._txt_prefix_num  = w.FindName("txt_prefix_num")
-        self._txt_suffix_num  = w.FindName("txt_suffix_num")
-        self._txt_prefix_name = w.FindName("txt_prefix_name")
-        self._txt_suffix_name = w.FindName("txt_suffix_name")
-        self._txt_prefix_view = w.FindName("txt_prefix_view")
-        self._txt_suffix_view = w.FindName("txt_suffix_view")
-        # Sequence renumber controls (Sheet # only).
-        self._chk_sequence    = w.FindName("chk_sequence")
-        self._txt_seq_start   = w.FindName("txt_seq_start")
-        self._txt_seq_inc     = w.FindName("txt_seq_inc")
+        self._lbl_footer      = w.FindName("lbl_footer")
+        # Bulk view-template bar
+        self._lbl_bulk_count    = w.FindName("lbl_bulk_count")
+        self._cmb_bulk_template = w.FindName("cmb_bulk_template")
+        self._btn_bulk_apply    = w.FindName("btn_bulk_apply")
 
-        # Build rows; subscribe to row PropertyChanged so the
-        # "View name = Sheet name" toggle can mirror NewName → NewViewName live.
-        # Wrap the bound method as a PropertyChangedEventHandler delegate —
-        # SheetItem/DuplicateRowItem combine via System.Delegate.Combine, which
-        # only accepts a real Delegate (not a Python instancemethod).
+        # Numbers held by every existing sheet — new sheets must avoid them all.
+        self._occupied = all_sheet_numbers(doc)
+
+        # Guards mirror re-entrancy while we set values explicitly.
         self._suppress_mirror = False
-        # Used while broadcasting a per-row template change to other selected
-        # rows — without it, each propagated assignment would re-trigger the
-        # broadcast and recurse.
-        self._suppress_template_propagation = False
-        # Snapshot of the grid's selection captured the moment the user
-        # mouse-downs into a cell. WPF resets multi-selection to one row when
-        # the user clicks into the per-row template combo, so we save it
-        # here and restore it after the template change so the user doesn't
-        # lose their shift/ctrl selection.
-        self._last_multi_selection = []
         self._row_pc_handler = PropertyChangedEventHandler(self._on_row_property_changed)
         self._rows = ObservableCollection[DuplicateRowItem]()
         for item in selected_items:
@@ -2368,42 +3156,41 @@ class DuplicateDialog(object):
             self._rows.Add(row)
         self._grid.ItemsSource = self._rows
 
-        # Cache the View Name column so the "View name = Sheet name" toggle
-        # can flip its IsReadOnly state. Column order is fixed in the XAML:
-        # [From #][From Name][New #][New Name][New View Name][View Template].
+        # View Name column (index 4) — flipped read-only when mirroring is on.
+        # Column order is fixed: [From #][From Name][New #][New Name][New View
+        # Name][View Template].
         try:
             self._col_view_name = self._grid.Columns[4]
         except Exception:
             self._col_view_name = None
 
-        # Rules collection (start with one empty rule for affordance)
-        self._rules = ObservableCollection[FindReplaceRule]()
-        self._rules.Add(FindReplaceRule())
-        self._rules_list.ItemsSource = self._rules
+        # Shared naming engine — same block as the Rename dialog. Attach the
+        # change callback AFTER construction so its own setup doesn't fire into
+        # a half-built dialog.
+        self._naming = NamingBlock(w)
+        self._naming._on_change = self._update_rules_hint
+
+        # Bulk template combo + right-click menu.
+        self._cmb_bulk_template.ItemsSource = template_names
+        if template_names:
+            self._cmb_bulk_template.SelectedIndex = 0
+        self._build_context_menu(template_names)
+
         self._update_rules_hint()
 
         # Wire events
         self._btn_dup.Click          += self._on_duplicate
         self._btn_cancel.Click       += lambda s, e: w.Close()
-        self._btn_add_rule.Click     += self._on_add_rule
         self._btn_apply_rules.Click  += self._on_apply_rules
         self._btn_reset_rules.Click  += self._on_reset_rules
         self._chk_view_eq_name.Checked   += self._on_view_eq_name
         self._chk_view_eq_name.Unchecked += self._on_view_eq_name
-        # Snapshot the selection BEFORE the click hits the cell — WPF reduces
-        # multi-row selection to a single row once the click lands on a cell,
-        # so we need PreviewMouseLeftButtonDown (the bubbling mouse event
-        # would already be too late).
-        self._grid.PreviewMouseLeftButtonDown += self._on_grid_preview_mouse_down
-        # Bubble class handler for the per-row "Remove rule" buttons.
-        self._rules_list.AddHandler(
-            Button.ClickEvent,
-            RoutedEventHandler(self._on_rules_button_click))
+        self._grid.SelectionChanged      += self._on_selection_changed
+        self._btn_bulk_apply.Click       += self._on_bulk_apply
 
-        # Establish initial mirror state (toggle starts OFF so this is mostly
-        # a no-op, but keeps everything consistent).
         self._on_view_eq_name(None, None)
-
+        self._on_selection_changed(None, None)
+        self._revalidate()
         w.ShowDialog()
 
     def _get_dup_option(self):
@@ -2419,106 +3206,61 @@ class DuplicateDialog(object):
                 return eid
         return ElementId.InvalidElementId
 
-    # ── Rules wiring ─────────────────────────────────────────
-
+    # ── Rules ────────────────────────────────────────────────
     def _update_rules_hint(self):
-        n = sum(1 for r in self._rules if (r.Find or "").strip())
+        n = sum(1 for r in self._naming.rules if (r.Find or "").strip())
         if n == 0:
-            self._lbl_rules_hint.Text = "Click Apply Rules to preview your transforms."
+            self._lbl_rules_hint.Text = "Set rules, prefix/suffix, or case, then click Apply rules."
         else:
-            self._lbl_rules_hint.Text = "{0} active rule(s).".format(n)
-
-    def _on_add_rule(self, sender, e):
-        self._rules.Add(FindReplaceRule())
-        self._update_rules_hint()
-
-    def _on_rules_button_click(self, sender, e):
-        src = e.OriginalSource
-        if isinstance(src, Button) and str(src.Tag) == "RemoveRule":
-            rule = src.DataContext
-            if rule is not None and rule in self._rules:
-                self._rules.Remove(rule)
-                self._update_rules_hint()
-                e.Handled = True
+            self._lbl_rules_hint.Text = "{0} active rule(s) — click Apply rules to update the table.".format(n)
 
     def _on_apply_rules(self, sender, e):
-        """Pipeline (per target):  source → find/replace → prefix + suffix
-        Sheet # in sequence mode:  prefix + (start + i*inc) + suffix   (rules
-        skipped for #, but they still run on Name and View Name)."""
-        apply_num    = bool(self._chk_apply_num.IsChecked)
-        apply_name   = bool(self._chk_apply_name.IsChecked)
-        apply_view   = bool(self._chk_apply_view.IsChecked)
+        """Transform each row's New # / New Name from its source via the shared
+        naming block, overwriting only the columns the block actually touches so
+        the auto '-DUP' / '(Copy)' defaults survive when a field is untouched."""
         view_eq_name = bool(self._chk_view_eq_name.IsChecked)
-        pre_num   = self._txt_prefix_num.Text  or ""
-        suf_num   = self._txt_suffix_num.Text  or ""
-        pre_name  = self._txt_prefix_name.Text or ""
-        suf_name  = self._txt_suffix_name.Text or ""
-        pre_view  = self._txt_prefix_view.Text or ""
-        suf_view  = self._txt_suffix_view.Text or ""
-        use_seq   = bool(self._chk_sequence.IsChecked)
-        try:    seq_start = int(self._txt_seq_start.Text)
-        except: seq_start = 100
-        try:    seq_inc = int(self._txt_seq_inc.Text)
-        except: seq_inc = 1
-        rules = list(self._rules)
-
-        def wrap(prefix, body, suffix):
-            return "{0}{1}{2}".format(prefix or "", body, suffix or "")
-
-        # Suppress NewName→NewViewName mirroring while we set values explicitly.
+        hit_num  = self._naming.affects(SCOPE_NUM)
+        hit_name = self._naming.affects(SCOPE_NAME)
+        use_seq  = self._naming.uses_sequence()
+        rows = (sorted(self._rows, key=lambda r: r.SourceNumber)
+                if use_seq else list(self._rows))
         self._suppress_mirror = True
         try:
-            for i, row in enumerate(self._rows):
-                if apply_num:
-                    if use_seq:
-                        row.NewNumber = wrap(pre_num, seq_start + i * seq_inc, suf_num)
-                    else:
-                        row.NewNumber = wrap(
-                            pre_num, apply_rules(row.SourceNumber, rules), suf_num)
-                if apply_name:
-                    row.NewName = wrap(
-                        pre_name, apply_rules(row.SourceName, rules), suf_name)
+            for i, row in enumerate(rows):
+                new_num, new_name = self._naming.compute(
+                    row.SourceNumber, row.SourceName, i)
+                if hit_num:
+                    row.NewNumber = new_num
+                if hit_name:
+                    row.NewName = new_name
                 if view_eq_name:
                     row.NewViewName = row.NewName
-                elif apply_view:
-                    row.NewViewName = wrap(
-                        pre_view, apply_rules(row.SourceViewName, rules), suf_view)
         finally:
             self._suppress_mirror = False
         self._update_rules_hint()
+        self._revalidate()
 
     def _on_reset_rules(self, sender, e):
         self._suppress_mirror = True
         try:
             for row in self._rows:
                 row.reset_to_defaults()
+                if bool(self._chk_view_eq_name.IsChecked):
+                    row.NewViewName = row.NewName
         finally:
             self._suppress_mirror = False
+        self._revalidate()
 
     def _on_view_eq_name(self, sender, e):
-        """Sync UI state to the "View name = Sheet name" toggle. When ON:
-          - the View Name column becomes read-only and renders muted/italic
-            (via the IsViewNameMirrored DataTrigger),
-          - the rules-card "Apply to: View Name" checkbox is disabled (since
-            rules can't target a mirrored field), and
-          - every row's NewViewName is immediately mirrored to NewName.
-        When OFF, all of those revert."""
+        """When 'View name = Sheet name' is ON, the View Name column becomes
+        read-only + muted (via the IsViewNameMirrored DataTrigger) and every
+        row's NewViewName mirrors NewName. When OFF it reverts to editable."""
         on = bool(self._chk_view_eq_name.IsChecked)
-        # Disable the entire View Name row of the per-target grid when
-        # mirroring is on (Apply checkbox + Prefix + Suffix).
-        for ctrl in (self._chk_apply_view, self._txt_prefix_view, self._txt_suffix_view):
-            try:
-                ctrl.IsEnabled = not on
-            except Exception:
-                pass
-        # Flip the column to read-only when mirroring is on.
         if self._col_view_name is not None:
             try:
                 self._col_view_name.IsReadOnly = on
             except Exception:
                 pass
-        # Update each row's mirrored flag (drives the muted-italic style) and,
-        # if on, copy NewName into NewViewName so the cell reflects the lock.
         self._suppress_mirror = True
         try:
             for row in self._rows:
@@ -2528,128 +3270,106 @@ class DuplicateDialog(object):
         finally:
             self._suppress_mirror = False
 
-    # ── Multi-row template propagation ───────────────────────
-
-    def _hit_test_row(self, e):
-        """Walk up from e.OriginalSource to find the DataGridRow it belongs
-        to, and return the bound row item (DuplicateRowItem) - or None if
-        the click wasn't on a row (header, scrollbar, empty space, etc.)."""
-        node = e.OriginalSource
-        while node is not None:
-            if isinstance(node, DataGridRow):
-                try:
-                    return node.Item
-                except Exception:
-                    return None
-            try:
-                node = VisualTreeHelper.GetParent(node)
-            except Exception:
-                return None
-        return None
-
-    def _on_grid_preview_mouse_down(self, sender, e):
-        """Maintain the multi-selection snapshot used by the per-row template
-        dropdown to broadcast a template pick to every highlighted row.
-
-        WPF collapses multi-row selection to a single row as soon as a click
-        lands on a cell. To survive that, we snapshot the selection here
-        (Preview events tunnel down before the click is processed) and only
-        clear the snapshot when the user clicks a row that is NOT in the
-        existing multi-selection (which signals a fresh single-select)."""
-        try:
-            current = list(self._grid.SelectedItems)
-        except Exception:
-            current = []
-
-        # Capture a fresh multi-selection if the live selection has more than
-        # one row. This handles the initial shift/ctrl-click sequence that
-        # built the multi-selection.
-        if len(current) > 1:
-            self._last_multi_selection = current
-            return
-
-        # Otherwise: WPF may be about to collapse the selection. Decide
-        # whether to keep the prior snapshot (user clicked inside their own
-        # multi-selection - probably opening a dropdown) or clear it (user
-        # clicked outside - making a fresh single-select).
-        if not self._last_multi_selection:
-            return  # nothing snapshotted yet
-
-        clicked_item = self._hit_test_row(e)
-        if clicked_item is None:
-            return  # click on header/scrollbar/etc. - leave snapshot alone
-
-        if clicked_item in self._last_multi_selection:
-            # Click inside the multi-selection -> preserve snapshot so the
-            # template broadcast still has the rows it needs.
-            return
-
-        # Click on a row outside the multi-selection -> user is making a
-        # fresh selection, drop the snapshot so we don't broadcast to
-        # stale rows.
-        self._last_multi_selection = []
-
-    def _restore_multi_selection(self):
-        """Re-apply the snapshotted multi-selection to the grid so the user
-        keeps their shift/ctrl context after a per-row template change."""
-        if not self._last_multi_selection:
-            return
-        try:
-            self._grid.SelectedItems.Clear()
-            for row in self._last_multi_selection:
-                self._grid.SelectedItems.Add(row)
-        except Exception:
-            pass
-
     def _on_row_property_changed(self, sender, args):
         if self._suppress_mirror:
             return
+        if args.PropertyName == "NewNumber":
+            self._revalidate()
+            return
+        if args.PropertyName == "NewName":
+            if bool(self._chk_view_eq_name.IsChecked):
+                try:
+                    sender.NewViewName = sender.NewName
+                except Exception:
+                    pass
 
-        # Broadcast a per-row template pick to every row that was part of the
-        # multi-selection at click-time, so the per-row ComboBox feels like an
-        # in-cell version of the "Apply to selected" toolbar.
-        if args.PropertyName == "TemplateName":
-            if (not self._suppress_template_propagation
-                    and self._last_multi_selection
-                    and sender in self._last_multi_selection):
-                new_value = sender.TemplateName
-                targets = [r for r in self._last_multi_selection if r is not sender]
-                if targets:
-                    self._suppress_template_propagation = True
-                    try:
-                        for row in targets:
-                            try:
-                                if row.TemplateName != new_value:
-                                    row.TemplateName = new_value
-                            except Exception:
-                                pass
-                    finally:
-                        self._suppress_template_propagation = False
-                    # Defer the selection restore to the next dispatcher tick
-                    # so it happens after WPF finishes closing the cell editor.
-                    try:
-                        self._w.Dispatcher.BeginInvoke(
-                            DispatcherPriority.Background,
-                            Action(self._restore_multi_selection))
-                    except Exception:
-                        # If deferring fails (older WPF/IronPython), restore
-                        # inline. WPF tolerates this in most cases.
-                        self._restore_multi_selection()
-            return
+    # ── Collision guard ──────────────────────────────────────
+    def _revalidate(self):
+        assignments = [(row, row.NewNumber) for row in self._rows]
+        conflicts = validate_numbers(assignments, self._occupied)
+        for row in self._rows:
+            row.ConflictReason = conflicts.get(row, "")
+        n = len(list(self._rows))
+        n_conf = len(conflicts)
+        self._btn_dup.Content   = "Duplicate {0} sheet{1}".format(n, "" if n == 1 else "s")
+        self._btn_dup.IsEnabled = (n_conf == 0 and n > 0)
+        if n_conf:
+            self._lbl_footer.Foreground = SolidColorBrush(Color.FromRgb(0xC5, 0x30, 0x30))
+            self._lbl_footer.Text = ("{0} new number{1} clash with an existing sheet "
+                                     "or each other — fix to enable Duplicate.").format(
+                n_conf, "" if n_conf == 1 else "s")
+        else:
+            self._lbl_footer.Foreground = SolidColorBrush(Color.FromRgb(0x2F, 0x85, 0x5A))
+            self._lbl_footer.Text = "{0} new sheet{1} · all numbers unique".format(
+                n, "" if n == 1 else "s")
 
-        if args.PropertyName != "NewName":
-            return
-        if not bool(self._chk_view_eq_name.IsChecked):
-            return
-        # Live-mirror sheet name into view name when the toggle is on.
+    # ── Bulk view-template ───────────────────────────────────
+    def _on_selection_changed(self, sender, e):
         try:
-            sender.NewViewName = sender.NewName
+            cnt = self._grid.SelectedItems.Count
+        except Exception:
+            cnt = 0
+        self._lbl_bulk_count.Text = ("No rows selected" if cnt == 0
+                                     else "{0} row{1} selected".format(cnt, "" if cnt == 1 else "s"))
+
+    def _selected_rows(self):
+        try:
+            return list(self._grid.SelectedItems)
+        except Exception:
+            return []
+
+    def _apply_template_to(self, rows, name):
+        if not rows or name is None:
+            return
+        self._suppress_mirror = True
+        try:
+            for row in rows:
+                try:
+                    if row.TemplateName != name:
+                        row.TemplateName = name
+                except Exception:
+                    pass
+        finally:
+            self._suppress_mirror = False
+
+    def _on_bulk_apply(self, sender, e):
+        rows = self._selected_rows()
+        if not rows:
+            TaskDialog.Show("Set View Template",
+                            "Select one or more rows first, then choose a template.")
+            return
+        self._apply_template_to(rows, self._cmb_bulk_template.SelectedItem)
+
+    def _build_context_menu(self, template_names):
+        """Right-click a selection → 'Set view template for selected rows ▸'
+        with the template list as a submenu. A redundant, discoverable path to
+        the bulk bar."""
+        try:
+            menu = ContextMenu()
+            parent = MenuItem()
+            parent.Header = "Set view template for selected rows"
+            for nm in template_names:
+                mi = MenuItem()
+                mi.Header = nm
+                mi.Click += self._make_ctx_handler(nm)
+                parent.Items.Add(mi)
+            menu.Items.Add(parent)
+            self._grid.ContextMenu = menu
         except Exception:
             pass
+
+    def _make_ctx_handler(self, name):
+        def handler(sender, e):
+            self._apply_template_to(self._selected_rows(), name)
+        return handler
 
     # ── Duplicate execution ──────────────────────────────────
 
     def _on_duplicate(self, sender, e):
+        # Duplicate is disabled while conflicts exist, but re-check as a guard.
+        if validate_numbers([(row, row.NewNumber) for row in self._rows], self._occupied):
+            TaskDialog.Show("Duplicate", "Resolve the number conflicts first.")
+            return
         dup_option   = self._get_dup_option()
         preserve_pos = bool(self._chk_align.IsChecked)
         copy_params  = bool(self._chk_copy_tb_params.IsChecked)
@@ -2907,6 +3627,21 @@ class SheetManagerWindow(object):
         w = Markup.XamlReader.Parse(MAIN_XAML)
         self._w = w
 
+        # Brand logo in the header (loaded from the sibling PNG, decoded down to
+        # header height). Guarded so a missing/broken file can never break the tool.
+        try:
+            from System import Uri, UriKind
+            from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
+            _lp = os.path.join(os.path.dirname(__file__), 'dbhms_logo.png')
+            if os.path.exists(_lp):
+                _img = w.FindName('img_logo')
+                if _img is not None:
+                    _b = BitmapImage(); _b.BeginInit(); _b.CacheOption = BitmapCacheOption.OnLoad
+                    _b.UriSource = Uri(_lp, UriKind.Absolute); _b.DecodePixelHeight = 96; _b.EndInit()
+                    _img.Source = _b
+        except Exception:
+            pass
+
         # Parent to Revit's main window so it doesn't spawn as a separate taskbar entry
         try:
             hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle
@@ -2921,6 +3656,7 @@ class SheetManagerWindow(object):
         self._cmb_group    = w.FindName("cmb_group")
         self._grid         = w.FindName("sheet_grid")
         self._lbl_status   = w.FindName("lbl_status")
+        self._lbl_sel_count = w.FindName("lbl_sel_count")
         self._btn_open     = w.FindName("btn_open")
         self._btn_rename   = w.FindName("btn_rename")
         self._btn_dup      = w.FindName("btn_duplicate")
@@ -3096,8 +3832,11 @@ class SheetManagerWindow(object):
 
     def _update_status(self):
         selected = [i for i in self._filtered if i.IsSelected]
-        self._lbl_status.Text = "{0} selected  |  {1} shown  |  {2} total".format(
-            len(selected), len(self._filtered), len(self._all_items))
+        # Orange pill carries the live selected count; the label carries context.
+        if self._lbl_sel_count is not None:
+            self._lbl_sel_count.Text = str(len(selected))
+        self._lbl_status.Text = "selected  |  {0} shown  |  {1} total".format(
+            len(self._filtered), len(self._all_items))
         has_sel = len(selected) > 0
         self._btn_open.IsEnabled    = (len(selected) == 1)
         self._btn_rename.IsEnabled  = has_sel

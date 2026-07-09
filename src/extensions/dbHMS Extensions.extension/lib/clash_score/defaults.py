@@ -7,7 +7,7 @@ file (or, later, a firm-level override in the shared folder's global store),
 never a per-project knob -- so "Critical" means the same thing on every job.
 
 Every value is grounded in the research dossier
-(CLASH_IMPORTANCE_RESEARCH.md): the rigidity ladder in code physics
+(Clash Detection.panel/README.md): the rigidity ladder in code physics
 (IPC 704.1 slope, IMC 506.3.7 grease, NEC bend budgets, NFPA 13), the noise
 floors in published practitioner tolerances, and the band semantics in the
 published owner standards (Ashghal, Indiana University).
@@ -48,7 +48,7 @@ EQUIPMENT_CATS = frozenset((
 ))
 # Mounted fixtures: troffers, diffusers, wall-hung sanitary, device boxes.
 # Split out of EQUIPMENT_CATS after the NIUHTC calibration
-# (NIUHTC_CALIBRATION_FINDINGS.md section 4): rigidity 4 for a light
+# (Clash Detection.panel/README.md section 4): rigidity 4 for a light
 # fixture made every troffer-in-its-own-ceiling a Major routing conflict
 # (1,766 rows on one hospital). These are cheap, field-adjusted movers.
 MOUNTED_CATS = frozenset((
@@ -150,7 +150,7 @@ DEFAULTS = {
     # rev 3 = stage 2: the M3 drain/penetration split (N4) and the C3
     # tightening (equipment never satisfies C3; known-small vents drop to
     # rigidity 2).
-    # rev 4 = importance v2 Phase 1 (pure rescore, CLASH_IMPORTANCE_V2_PLAN.md
+    # rev 4 = importance v2 Phase 1 (pure rescore, Clash Detection.panel/README.md
     # section 5): M1 split into 8 named sub-rules, N-PT + N-DUP demotions,
     # sys_class set-matching (gated), the composed 2-3 sentence reasons with
     # headline/code_ref/resolve_by/facts, and the score-composition remap

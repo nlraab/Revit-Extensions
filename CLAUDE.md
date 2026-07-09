@@ -38,11 +38,13 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
 
 1. **`lib/clash_*/`** — the **`Clash Detection.panel/`** (inside
    `dbHMS Tools.tab/`) uses an extension-level `lib/` folder
-   (`dbHMS Extensions.extension/lib/clash_*/`) shared across its six
-   pushbuttons. Clash detection is a single coherent system — six
-   buttons read and write the same JSON database, share the same
-   data model, and use the same detection algorithms; duplicating
-   thousands of lines across them would be unworkable. pyRevit
+   (`dbHMS Extensions.extension/lib/clash_*/`) shared across its
+   pushbuttons (currently two: `Clash Detection.pushbutton` and
+   `3D Viewer.pushbutton`; the legacy WPF suite was removed 2026-07).
+   Clash detection is a single coherent system — the buttons read and
+   write the same JSON database, share the same data model, and use the
+   same detection algorithms; duplicating thousands of lines across them
+   would be unworkable. pyRevit
    auto-adds extension-level `lib/` to `sys.path`. Architecture, data
    model, and storage layout are documented in
    `src/extensions/dbHMS Extensions.extension/dbHMS Tools.tab/Clash Detection.panel/README.md`
@@ -84,7 +86,7 @@ Each `script.py` is self-contained: it sets `__title__` / `__author__` for the t
    `web/lib/three/`). The page has a **browser dev-fallback mode**: when
    not hosted in WebView2 it auto-loads the sample fixture under
    `web/sample/` so the entire UI is testable in a plain browser over
-   HTTP (no Revit). `python.py` stays a thin host: export, build + post
+   HTTP (no Revit). `script.py` stays a thin host: export, build + post
    `meta` (levels, current view range, template state), and on Apply
    convert plane elevations back to (level, offset) and write them in a
    transaction. Reusing `export_region` rather than copying it keeps one
@@ -159,7 +161,11 @@ When adding a new pushbutton, update the `expected` set in `test_expected_pushbu
 
 ## UI conventions (read this before building a new tool)
 
-Every tool with a form follows the same dbHMS-branded WPF design system. New tools must match — the styles below are **copied into each XAML's `<Window.Resources>`** rather than imported from a shared file (intentional, so each pushbutton stays standalone-deployable). Reference implementations: `AlignViews.pushbutton/AlignViewsForm.xaml` and `View Range Helper.pushbutton/ViewRangeHelperForm.xaml` are the most complete; copy from one of those.
+> **THIS SECTION IS MANDATORY, NOT REFERENCE. Read it in full and apply it before you build or edit any form, and re-read it when you finish to confirm every control you touched conforms.** At dbHMS the UI is a first-class deliverable, weighted equally with the function behind a tool. UI is not a finishing coat applied at the end; it is designed deliberately and up front, the same as the logic. Every form MUST match this design system to the letter: the canonical header, the canonical controls (checkbox, dropdown, radio, buttons, cards, chips, ticks), the color tokens, and the layout patterns. "It works" is not "it's done" — a tool that behaves correctly but does not look like it belongs to the same firm as every other tool is not finished. Do not hand-roll a control that already has a canonical style, and do not fall back to a bare WPF default. The canonical controls all live in `AlignViews.pushbutton/AlignViewsForm.xaml` (checkbox, dropdown, buttons, chips, ticks, cards) plus `Sheet Manager.pushbutton/script.py` (radio); copy them verbatim. If a request would break a convention here, say so and reconcile it before shipping rather than quietly diverging. Treat drift from these rules as a bug.
+
+Every tool with a form follows the same dbHMS-branded WPF design system. New tools must match — the styles below are **copied into each XAML's `<Window.Resources>`** rather than imported from a shared file (intentional, so each pushbutton stays standalone-deployable).
+
+> **2026-07 visual refresh — read this first.** The header and accent palette were redesigned: a deep-blue dotted header carrying the real dbHMS logo and a solid orange baseline, plus a cyan/blue/orange accent system in the body (from the clash web app's light-blue palette). **`AlignViews.pushbutton` is the reference implementation of the current look** — copy its `AlignViewsForm.xaml` `<Window.Resources>` and header `Border`, plus the `_load_logo` and `_make_row_content` methods in its `script.py`. Older tools still on the flat `#2D3748` header are being migrated; do **not** copy their header. `View Range Helper.pushbutton/ViewRangeHelperForm.xaml` is still a good reference for dual-canvas layout, but treat its header as legacy until migrated.
 
 ### Window chrome
 
@@ -174,15 +180,40 @@ Every tool with a form follows the same dbHMS-branded WPF design system. New too
 
 ### Header (mandatory dbHMS branding bar)
 
-Every primary form has a top `Border` `DockPanel.Dock="Top"` with `Background="#2D3748"` (dark slate), `Padding="20,14"`. Inside, a two-column `Grid`:
+Every primary form has a top `Border` `DockPanel.Dock="Top"` with a **solid orange baseline** (`BorderBrush="#EE8A34"`, `BorderThickness="0,0,0,3"`) wrapping a `Grid` whose layers are, back to front:
 
-- **Left column**: tool title in `White`, `FontSize="20"`, `FontWeight="Bold"`; underneath, a one-line description in `Foreground="#CBD5E0"`, `FontSize="12"`, `Margin="0,2,0,0"`.
-- **Right column** (the wordmark): `StackPanel Orientation="Horizontal"`, `VerticalAlignment="Center"`, `Opacity="0.85"`, made of three `TextBlock`s:
-  - `"db"` — `Foreground="#00BFFF"`, `FontSize="32"`, `FontWeight="Bold"`, `FontFamily="Segoe UI"`
-  - `" | "` — `Foreground="#7A8FA6"`, `FontSize="32"`, `FontWeight="Light"`
-  - `"HMS"` — same as `"db"`
+1. **Deep-blue ground** — `Grid.Background` = a subtle diagonal `LinearGradientBrush` (`StartPoint="0,0" EndPoint="1,1"`) with stops `#143257` (0) → `#0F2748` (0.55) → `#0B1D34` (1). A *chosen* navy (≈`#102A4C`), richer and bluer than the old pyRevit slate so it never reads as the default.
+2. **Faint dot texture** — a `Rectangle` filled with a tiled `DrawingBrush` (16×16 absolute `Viewport` + `Viewbox`, an `EllipseGeometry` `Center="8,8" RadiusX="1.1"` in brush `#26D6ECFF`), with an `OpacityMask` `LinearGradientBrush` (top→bottom, opaque fading to `#00FFFFFF`) so the dots fade out before the orange line.
+3. **Content `Grid`** (`Margin="24,16"`):
+   - **Left**: tool title `Foreground="#F2F7FC"`, `FontSize="20"`, `FontWeight="Bold"`; below it a one-line description `Foreground="#A9C2D8"`, `FontSize="12"`.
+   - **Right**: the real dbHMS logo as `<Image x:Name="img_logo" Height="38" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>` — **not** hand-set `TextBlock`s. Source set in code-behind (see *Brand logo asset*).
 
-Sub-dialogs (e.g. `PlanTypeSettingsForm`, `PreviewForm`) keep the `#2D3748` bar but drop the wordmark and use a smaller title (`FontSize="16–18"`).
+Copy the header verbatim from `AlignViews.pushbutton/AlignViewsForm.xaml`.
+
+Sub-dialogs (e.g. `PlanTypeSettingsForm`, `PreviewForm`) may keep a simpler flat header and drop the logo, using a smaller title (`FontSize="16–18"`).
+
+**Brand logo asset.** Ship `dbhms_logo.png` in the pushbutton folder (master transparent PNG: `tools/icon_work/out/dbHMS Logo (PNG) Transparent.png`, 5950×1404). Load it in `script.py` so the huge master never sits in memory at full size and the file is never locked:
+
+```python
+def _load_logo(self):
+    try:
+        from System import Uri, UriKind
+        from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
+        path = os.path.join(SCRIPT_DIR, 'dbhms_logo.png')
+        if not os.path.exists(path):
+            return
+        bmp = BitmapImage()
+        bmp.BeginInit()
+        bmp.CacheOption = BitmapCacheOption.OnLoad
+        bmp.UriSource = Uri(path, UriKind.Absolute)
+        bmp.DecodePixelHeight = 96
+        bmp.EndInit()
+        self.img_logo.Source = bmp
+    except Exception:
+        pass
+```
+
+Call `self._load_logo()` at the end of the form's `__init__`. The try/except means a missing or bad logo file can never break the tool. The brand cyan is `#00B4EF` (the old `#00BFFF` wordmark tint is deprecated).
 
 ### Footer
 
@@ -192,22 +223,29 @@ Sub-dialogs (e.g. `PlanTypeSettingsForm`, `PreviewForm`) keep the `#2D3748` bar 
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| App surface | `#F7FAFC` | window background, inset hint panels |
+| App surface | `#F7FAFC` | window background, tool body, inset hint panels |
 | Card surface | `White` | every `CardBorder`, footer, canvas backgrounds |
-| Header bar | `#2D3748` | dbHMS branding bar, modal headers |
 | Card border | `#E2E8F0` | card stroke, footer top stroke, canvas frame |
-| Input border | `#CBD5E0` | secondary/mini button strokes, canvas frames |
-| Primary | `#2B6CB0` | `PrimaryButton` background, primary actions |
-| Primary text | `White` | text on `PrimaryButton` and header |
+| Input border | `#CBD5E0` | text/combo strokes, secondary/mini button strokes |
+| **Header ground** | `#143257`→`#0F2748`→`#0B1D34` | deep-blue header gradient (the chosen navy, ≈`#102A4C`) |
+| **Header dots** | `#26D6ECFF` | faint tiled dot texture in the header (ARGB, ~15% alpha) |
+| **Orange accent** | `#EE8A34` | header baseline + the rationed "operation" accent (see *Accent doctrine*) |
+| **Orange text** | `#9C4221` | text on the orange `CountPill` |
+| **Orange chip** | `#FBEEDD` / border `#E7B183` | orange count-pill surface / stroke |
+| **Brand cyan** | `#00B4EF` | the dbHMS logo ONLY (exact brand cyan; old `#00BFFF` deprecated) |
+| Primary | `#2B6CB0` | `PrimaryButton`, blue section ticks, checked-checkbox fill |
+| Primary text | `White` | text on `PrimaryButton` and header title |
 | Secondary | `#EDF2F7` | `SecondaryButton`/`MiniButton` background, table header rows |
-| Section heading text | `#1A202C` | `SectionHeader` |
-| Body text | `#2D3748` | default text on cards, `SecondaryButton` foreground |
-| Field label | `#4A5568` | `FieldLabel`, footer status text |
-| Helper text | `#718096` | `HelperText`, sub-titles in dark header |
-| Subtle hint | `#A0AEC0` | inline hints under inputs |
-| Header subtitle | `#CBD5E0` | description text inside `#2D3748` bar |
-| Wordmark accent | `#00BFFF` | `db` and `HMS` glyphs |
-| Wordmark divider | `#7A8FA6` | `" | "` between glyphs |
+| **Section title** | `#1A365D` | `SectionHeader` text + list sheet numbers (deep navy) |
+| **Deep blue** | `#185FA5` | `Chip` text, `CountBadge` text |
+| **Info blue** | `#0C447C` | `Inset` hint text |
+| **Light-blue chip** | `#EBF3FB` / border `#D7E6F6` | master-trait `Chip`, `CountBadge` (from the clash web app) |
+| **Selected row** | `#EBF8FF` / border `#9FD8F1` | highlight on a checked list row (`ViewRowCheck`) |
+| Body text | `#2D3748` | default text on cards, `SecondaryButton` foreground, legacy header |
+| Field label | `#4A5568` | `FieldLabel`, footer status label |
+| Helper text | `#718096` | `HelperText` |
+| Subtle hint | `#A0AEC0` | inline hints, list-row meta |
+| Header subtitle | `#A9C2D8` | description text inside the header |
 | Warn surface | `#FFFBEA` / `#FEFCBF` | banner background / `WarnButton` background |
 | Warn border | `#D69E2E` | warn banner & button stroke |
 | Warn text | `#744210` | warn banner & button foreground |
@@ -221,19 +259,47 @@ Sub-dialogs (e.g. `PlanTypeSettingsForm`, `PreviewForm`) keep the `#2D3748` bar 
 
 Define these in `<Window.Resources>`. Names are part of the convention — keep them so the look stays consistent.
 
-- `SectionHeader` (TextBlock) — `FontSize="14"`, `FontWeight="SemiBold"`, `Foreground="#1A202C"`, `Margin="0,0,0,6"`
+- `SectionHeader` (TextBlock) — `FontSize="14"`, `FontWeight="SemiBold"`, `Foreground="#1A365D"` (deep navy), `VerticalAlignment="Center"`. Precede it with a `Tick` in a horizontal `StackPanel`.
 - `FieldLabel` (TextBlock) — `FontSize="11"`, `FontWeight="SemiBold"`, `Foreground="#4A5568"`, `Margin="0,8,0,2"`
 - `HelperText` (TextBlock) — `FontSize="11"`, `Foreground="#718096"`, `TextWrapping="Wrap"`
 - `MonoText` (TextBlock, optional) — `FontFamily="Consolas"`, `FontSize="11"`, `Foreground="#2D3748"` (use for sheet-number previews, code-like values)
-- Default `ComboBox` — `Padding="6,4"`, `Height="26"`
-- Default `TextBox` — `Padding="6,3"`, `Height="26"`, `VerticalContentAlignment="Center"`
-- `CardBorder` (Border) — `Background="White"`, `BorderBrush="#E2E8F0"`, `BorderThickness="1"`, `CornerRadius="4"`, `Padding="12"`, `Margin="0,0,0,10"`
+- `Tick` (Border) — a 3×15 rounded accent bar before a `SectionHeader`: `Width="3"`, `Height="15"`, `CornerRadius="2"`, `Background="#2B6CB0"`, `VerticalAlignment="Center"`, `Margin="0,0,8,0"`. `TickOrange` = `BasedOn="{StaticResource Tick}"` with `Background="#EE8A34"` (see *Accent doctrine*).
+- `Chip` (Border) — light-blue info chip: `Background="#EBF3FB"`, `BorderBrush="#D7E6F6"`, `CornerRadius="5"`, `Padding="8"`; put `Foreground="#185FA5"` text inside.
+- `Inset` (Border) — light-blue hint panel: `Background="#EBF8FF"`, `BorderBrush="#D3EAF7"`, `CornerRadius="4"`, `Padding="8"`; `Foreground="#0C447C"` text inside.
+- `CountBadge` (Border) — light-blue count pill (candidates / found): `Background="#EBF3FB"`, `BorderBrush="#D7E6F6"`, `CornerRadius="10"`, `Padding="9,1"`; `Foreground="#185FA5" FontWeight="Bold"` text.
+- `CountPill` (Border) — **orange** count pill (the live / selected count): `Background="#FBEEDD"`, `BorderBrush="#E7B183"`, `CornerRadius="10"`, `Padding="9,1"`; `Foreground="#9C4221" FontWeight="Bold"` text.
+- **`ComboBox` (dropdowns)** — never use the bare default combo (flat gray box with a square drop arrow). Every dropdown uses the canonical modern template (rounded field, custom thin chevron, hover/focus border, rounded popup). See **Dropdowns (ComboBox)** below and copy the three-style block verbatim from `AlignViews.pushbutton/AlignViewsForm.xaml`.
+- Default `TextBox` — `Padding="6,3"`, `Height="27"`, `VerticalContentAlignment="Center"`
+- `CardBorder` (Border) — `Background="White"`, `BorderBrush="#E2E8F0"`, `BorderThickness="1"`, `CornerRadius="6"`, `Padding="13"`, `Margin="0,0,0,12"`
 - `PrimaryButton` — `Background="#2B6CB0"`, `Foreground="White"`, `FontWeight="SemiBold"`, `Padding="14,6"`, `MinWidth="120"`, `BorderThickness="0"`, `Cursor="Hand"`, `Margin="6,0,0,0"`
 - `SecondaryButton` — `Background="#EDF2F7"`, `Foreground="#2D3748"`, `Padding="12,6"`, `MinWidth="120"`, `BorderBrush="#CBD5E0"`, `BorderThickness="1"`, `Cursor="Hand"`, `Margin="6,0,0,0"`
-- `MiniButton` — `Background="#EDF2F7"`, `BorderBrush="#CBD5E0"`, `Padding="8,2"`, `Cursor="Hand"`, `Margin="0,0,4,0"` (for All/None/refresh icons in card headers)
+- `MiniButton` — `Background="#EDF2F7"`, `Foreground="#4A5568"`, `BorderBrush="#CBD5E0"`, `BorderThickness="1"`, `Padding="8,2"`, `Cursor="Hand"`, `Margin="4,0,0,0"` (for All/None/refresh in card headers)
 - `WarnButton` — `BasedOn="{StaticResource SecondaryButton}"`, `Background="#FEFCBF"`, `BorderBrush="#D69E2E"`, `Foreground="#744210"`, `MinWidth="0"`
-- Default `CheckBox` — `Margin="0,3,0,3"`, `VerticalContentAlignment="Center"`
+- **`CheckBox`** (default) — retemplate to a 16×16 rounded box (`CornerRadius="4"`) that fills brand-blue `#2B6CB0` with a white check when `IsChecked`, `#CBD5E0` border when off (hover border `#2B6CB0`). **The check MUST be centered:** wrap the check `Path` in a `<Viewbox x:Name="chk" Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center">` (path `Data="M0,5 L3.8,9 L10,0.5"`, `Stroke="White"`, `StrokeThickness="1.6"`, rounded caps). The Viewbox guarantees the check sits dead-center; the old bare `<Path>` check (which drifted up and to the left) is **retired** — do not reintroduce it. Copy the whole `<Style TargetType="CheckBox">` from `AlignViews.pushbutton/AlignViewsForm.xaml`. The plain default WPF checkbox is deprecated for new work. **Three-state exception:** the blue template renders only checked/unchecked, so any tool that uses `IsThreeState="True"` checkboxes (Parameters Management, View Templates Manager + its `Vg*Dialog` sub-dialogs, Sheet Manager, Revisions Manager) must KEEP the plain native `<Style TargetType="CheckBox">` (just `Margin` + `VerticalContentAlignment`) so the indeterminate "mixed" state stays visible. Rule of thumb: **if a form contains any `IsThreeState="True"` checkbox, do not brand any of its checkboxes** — leave them all native (see the tri-state legend section).
+- **`ViewRowCheck`** (CheckBox, for selectable list rows) — same blue box, but the row `Border` gains the **selected-row highlight** (`Background="#EBF8FF"`, `BorderBrush="#9FD8F1"`) when checked and a subtle `#F2F8FD` on hover. Its content is a composite row (bold navy sheet number, name, gray meta docked right) built in code — see `_make_row_content` in `AlignViews.pushbutton/script.py`. Copy both from `AlignViews`.
 - **`RadioButton`** — WPF's default radio button looks small and off-center next to text. Use the firm-standard custom template with a 14 px outer ellipse + 7 px inner dot, both centered, blue (`#2B6CB0`) when checked or hovered. Reference implementation lives in `Sheet Manager.pushbutton/script.py` (`<Style TargetType="RadioButton">` block); copy the whole `Style` (including `Setter Property="Template"`) into the new form's `<Window.Resources>`. Without this template, the radio dot is offset and undersized — every form with `RadioButton`s must include it.
+
+### Dropdowns (ComboBox) — canonical modern style
+
+The plain WPF ComboBox (flat gray box, square drop arrow) is **retired firm-wide**. Every dropdown in every tool uses the canonical modern template, which mirrors the clash web app `<select>` exactly: a white field, `1px #CBD5E0` border, `CornerRadius="6"`, a thin custom chevron (`#718096`, rounded caps), a hover border (`#A0AEC0`), and an open/focus border (`#2B6CB0`). The popup is a rounded `#CBD5E0` card whose item rows highlight `#EBF3FB` on hover and `#EBF8FF` when selected.
+
+The style is **three resources that travel together** and must be pasted in this order (the ComboBox template references `ComboToggle` by `StaticResource`, so it has to be defined first):
+
+1. `<Style x:Key="ComboToggle" TargetType="ToggleButton">` — draws the field border + chevron and the hover/open border states.
+2. `<Style TargetType="ComboBox">` — the full `ControlTemplate` (ToggleButton + selected-item `ContentPresenter` + `PART_EditableTextBox` + rounded `Popup` with the items host).
+3. `<Style TargetType="ComboBoxItem">` — the rounded item rows with hover/selected fills.
+
+Copy all three **verbatim** from `AlignViews.pushbutton/AlignViewsForm.xaml`. For the two code-built tools (Sheet Manager, Revisions Manager) the identical block lives inside their resources XAML string (`SHARED_RESOURCES` in Sheet Manager). An intentionally borderless in-cell combo (e.g. Revisions Manager `GridCombo`, applied by `x:Key` to grid cells) is the one exception — leave it alone; it is meant to read as plain text until clicked.
+
+Do not "simplify" this to a few property setters on the default template — that is exactly the dated gray look this replaces.
+
+### Accent doctrine: cyan, blue, and orange
+
+The brand has two accent colors and they are not interchangeable.
+
+- **Brand cyan `#00B4EF`** belongs to the **logo only**. Do not use it for UI accents.
+- **Blue `#2B6CB0`, deep navy `#1A365D`, and the light-blue clash family** are the **workhorse UI accent**: section ticks, primary button, checkbox fill, selected-row highlight, chips, count badges, section titles, sheet numbers.
+- **Orange `#EE8A34` is rationed.** It appears in the header baseline, then in a **small number of deliberate, spread-out spots that each carry meaning** — never as decoration. In Align Views the three body spots are: the **master / primary input** (orange rail + `TickOrange`, the thing everything else bends to), the **card whose options get written** (orange tick, "these changes will be applied"), and the **live / selected count** in the footer (`CountPill`). Adding orange to a new tool? Ask "does this element drive or represent the operation?" If not, keep it blue.
 
 ### Tri-state checkbox legend
 
