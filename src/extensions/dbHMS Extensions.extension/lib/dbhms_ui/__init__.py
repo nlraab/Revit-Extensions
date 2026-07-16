@@ -19,14 +19,19 @@ Why a shared lib (deviation from the "duplicate per tool" rule):
     ignore it. See CLAUDE.md for the full rule.
 
 Public API:
-    dbhms_ui.info(message, title="dbHMS")
+    dbhms_ui.info(message, title="dbHMS", kind="info")
         — friendly OK-only dialog with the dbHMS slate header bar.
           Use this in place of `forms.alert(message, title=title)` for
           informational popups (export complete, X was queued, etc.).
-          Errors and yes/no confirmations stay on `forms.alert` for now.
+    dbhms_ui.error(message, title="dbHMS")
+        — same dialog with a red X glyph. Use for failures/exceptions so
+          a failed action never shows the friendly green check.
+    dbhms_ui.warn(message, title="dbHMS")
+        — same dialog with an amber ! glyph, for "can't do that / not ready".
+          Yes/no confirmations still use `forms.alert(..., yes=True, no=True)`.
 
 Lazy WPF imports — this module's top level is pure Python so the test
 suite parses it under CPython 3 without needing PresentationFramework.
 """
 
-from .dialogs import info  # noqa: F401
+from .dialogs import info, error, warn  # noqa: F401

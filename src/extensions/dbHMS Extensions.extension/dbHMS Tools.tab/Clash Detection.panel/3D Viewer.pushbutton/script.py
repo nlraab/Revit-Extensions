@@ -1,28 +1,23 @@
 # -*- coding: utf-8 -*-
-"""3D Viewer - dbHMS's own 3D model viewer (Phase 1: foundation).
+"""3D Viewer - dbHMS's own web-tech 3D model viewer, hosted in a pyRevit window.
 
-This is the first phase of a custom, web-tech 3D model viewer that lives
-inside a pyRevit window. The long-term plan (see the Clash Detection panel
-README and the project notes): export the Revit model to a lightweight 3D
-file once, then fly through it smoothly with WASD / gamepad, toggle
-categories / worksets / disciplines instantly, overlay clash markers, and
-eventually open the same viewer in a plain browser so PMs and contractors
-can review without Revit.
+Export the active Revit 3D view (host + linked models) to a lightweight glTF
+once, then fly through it with WASD / drag-look / gamepad, toggle categories /
+worksets / levels, review clashes, and share a self-contained copy that opens
+in any browser (no Revit).
 
-Phase 1 builds ONLY the foundation:
-  * the dbHMS-styled window + side controls (mostly placeholders for now),
-  * an embedded web panel powered by Revit's own bundled WebView2 engine,
-  * a self-contained local page that renders a spinning cube with raw
-    WebGL, proving we can host a GPU-rendered 3D view inside Revit with no
-    external files and no internet.
+Architecture: this WPF window is BARE CHROME. It hosts one WebView2 control
+that fills the window and renders web/viewer3.html (three.js). The entire tool
+UI -- header, mode tabs (Explore / Clashes / Markups), panels, toolbar,
+inspector -- lives in that page. The host's only jobs are: start WebView2 (from
+Revit's own bundled engine), export the model to glTF, and relay a small set of
+page<->host string messages (export:/loadlast/share/popout/fullscreen in;
+url:/stats:/exportstate: out). See UI_REDESIGN_PLAN.md (next to this script) for
+the phased rebuild and the Clash Detection panel README for the architecture.
 
-Why WebView2: Revit 2025/2026 ship the WebView2 assemblies right next to
-Revit.exe, so we can reference Revit's own copy (nothing to install, the
-engine is guaranteed present whenever Revit is running). "Web" here means
-local files rendered by the Edge engine that's already on the machine, not
-the internet.
-
-See dbHMS Tools.tab/Clash Detection.panel/README.md for the architecture.
+Why WebView2: Revit 2025/2026 ship the WebView2 assemblies next to Revit.exe,
+so we reference Revit's own copy -- nothing to install, guaranteed present
+whenever Revit is running, all rendered by the local Edge engine (no internet).
 """
 
 __title__  = '3D\nViewer'
@@ -65,7 +60,6 @@ import clash_share
 
 SCRIPT_DIR = os.path.dirname(__file__)
 FORM_XAML  = os.path.join(SCRIPT_DIR, 'ViewerForm.xaml')
-MODEL_VIS_XAML = os.path.join(SCRIPT_DIR, 'ModelVisibilityForm.xaml')
 SUBCAT_XAML = os.path.join(SCRIPT_DIR, 'SubcategoryPickerForm.xaml')
 WEB_DIR    = os.path.join(SCRIPT_DIR, 'web')
 WEB_INDEX  = os.path.join(WEB_DIR, 'index.html')   # file:// init trigger + fallback
@@ -240,44 +234,19 @@ class ViewerForm(forms.WPFWindow):
         self._popout = None         # the pop-out render window, when detached
         self._fs = False            # pop-out fullscreen state
 
-        self.btn_close.Click      += self._on_close
-        self.btn_export.Click     += self._on_export
-        self.btn_load_last.Click  += self._on_load_last
-        self.btn_open_browser.Click += self._on_share
-        self.btn_popout.Click     += self._on_popout
-        self.btn_fullscreen.Click += self._on_fullscreen
-        self.sl_speed.ValueChanged += self._on_speed_changed
-        self.sl_look.ValueChanged  += self._on_look_changed
-        self.sl_time_of_day.ValueChanged  += self._on_sun_changed
-        self.sl_sun_strength.ValueChanged += self._on_sun_changed
-        self.sl_sun_direction.ValueChanged += self._on_sun_changed
-        self.chk_edges.Checked   += self._on_edges_changed
-        self.chk_edges.Unchecked += self._on_edges_changed
-        self.chk_perf.Checked   += self._on_perf_changed
-        self.chk_perf.Unchecked += self._on_perf_changed
-        self.chk_ground.Checked   += self._on_ground_changed
-        self.chk_ground.Unchecked += self._on_ground_changed
-        self.chk_minimap.Checked   += self._on_minimap_changed
-        self.chk_minimap.Unchecked += self._on_minimap_changed
-        self.chk_clash_markers.Checked   += self._on_clash_filter_changed
-        self.chk_clash_markers.Unchecked += self._on_clash_filter_changed
-        self.txt_clash_search.TextChanged += self._on_clash_filter_changed
-        self.btn_saved_views.Click += self._on_save_viewpoint
-        self.cmb_quality.SelectionChanged += self._on_quality_changed
-        # Forward fly/nav keys to the viewer whenever the tool window is focused, so F/WASD
-        # work without first clicking into the render area. PreviewKeyDown tunnels from the
-        # window root, so it fires no matter which panel control has focus.
+        # The entire tool UI now lives in the web page (web/viewer3.html); this
+        # WPF window is bare chrome hosting the WebView2 control. Everything the old
+        # WPF sidebar did -- export/load, appearance, navigation tuning, visibility,
+        # clashes, saved views, share, pop-out -- is driven by page->host messages
+        # (export:/loadlast/share/popout/fullscreen, plus the settings the page now
+        # owns outright) handled in _on_web_message. So there are NO WPF controls to
+        # wire here; we keep only:
+        #   - nav-key forwarding so F/WASD work whenever the tool window is focused
+        #   - window-close cleanup (dispose the webview, close any pop-out)
         self.PreviewKeyDown += self._on_nav_key_down
         self.PreviewKeyUp   += self._on_nav_key_up
-        self._last_cam = None    # latest camera reported by the viewer
-        self._clash_rows = []    # every clash for this project (row dicts)
-        self._trade_chks = []    # dynamic filter checkboxes, by dimension
-        self._status_chks = []
-        self._kind_chks = []
-        self._refresh_tuning_labels()
-        # Show this project's saved viewpoints immediately on open (they persist to disk),
-        # not only after a model loads -- so they're clearly still there across Revit restarts.
-        self._build_viewpoints_list()
+        self.Closed += self._on_window_closed
+        self._last_cam = None    # latest camera reported by the viewer (for saved views)
 
         # Attach the web panel after the window is laid out, so the host
         # Border has a real size for WebView2 to initialize into.
@@ -645,15 +614,17 @@ class ViewerForm(forms.WPFWindow):
             pass
         return None
 
-    def _on_export(self, sender, args):
+    def _on_export(self, pick_subcats=False):
         """Export the whole model (host + linked) to a .glb and load it into
         the panel. Streams to disk so large models stay memory-safe; models
-        too big for the in-panel loader are saved and their size measured."""
+        too big for the in-panel loader are saved and their size measured.
+        Driven by the page's Model menu (`export:{picksubcats}` message)."""
         from pyrevit import revit
         doc = revit.doc
         if doc is None:
-            dbhms_ui.info("No active Revit document to export.", title='3D Viewer')
+            dbhms_ui.warn("No active Revit document to export.", title='3D Viewer')
             return
+        self._post("exportstate:started")
         try:
             view = doc.ActiveView
         except Exception:
@@ -662,7 +633,7 @@ class ViewerForm(forms.WPFWindow):
         # Optional: let the user hide host subcategories (e.g. equipment Clearances) from this
         # export. Only prompts when the checkbox is on; otherwise everything exports as before.
         hide_subcats = []
-        if self.chk_pick_subcats.IsChecked:
+        if pick_subcats:
             try:
                 Mouse.OverrideCursor = Cursors.Wait
                 groups = _gather_host_subcategories(doc)
@@ -713,13 +684,14 @@ class ViewerForm(forms.WPFWindow):
         seconds = time.time() - t0
 
         if error is not None:
-            dbhms_ui.info("Export failed:\n\n{}".format(error),
-                          title='3D Viewer export failed')
+            self._post("exportstate:fail:export failed")
+            dbhms_ui.error("Export failed:\n\n{}".format(error),
+                           title='3D Viewer export failed')
             return
 
         stats = result["stats"]
         if stats["elements"] == 0 or stats["bytes"] == 0:
-            dbhms_ui.info(
+            dbhms_ui.warn(
                 "No 3D geometry found to export.\n\n"
                 "Open a 3D view with model elements and try again.",
                 title='3D Viewer')
@@ -737,20 +709,21 @@ class ViewerForm(forms.WPFWindow):
         # channel, which maxes out around 25 MB.
         _log("export done: bytes={0}, vhost_ok={1}".format(
             size_bytes, self._vhost_ok))
-        self.txt_stats.Text = (
-            "{0} host + {1} linked elements\n{2:,} triangles  -  {3:.1f} MB  -  "
-            "{4:.0f}s{5}".format(host_n, link_n, stats["triangles"], size_mb,
-                                 seconds, cap))
+        try:
+            import json as _json
+            self._post("stats:" + _json.dumps({
+                "host": host_n, "link": link_n, "triangles": stats["triangles"],
+                "mb": round(size_mb, 1), "seconds": round(seconds, 1),
+                "capped": bool(stats.get("capped"))}))
+        except Exception:
+            pass
         can_load = self._vhost_ok or size_bytes <= 25 * 1024 * 1024
         if can_load and self._load_into_panel(path):
-            self.txt_status.Text = "Model loaded. Press F to fly, or drag to look."
+            self._post("exportstate:done")
             return
 
-        self.txt_status.Text = (
-            "Exported {0} host + {1} linked elements, {2:,} triangles, "
-            "{3:.1f} MB in {4:.1f}s.".format(
-                host_n, link_n, stats["triangles"], size_mb, seconds))
-        dbhms_ui.info(
+        self._post("exportstate:fail:exported, but the 3D panel was not ready")
+        dbhms_ui.warn(
             "Exported the full model to glTF (.glb), but the 3D panel "
             "wasn't available to display it (the viewer engine may not have "
             "started). It's saved to disk.\n\n"
@@ -763,28 +736,30 @@ class ViewerForm(forms.WPFWindow):
         except Exception:
             pass
 
-    def _on_load_last(self, sender, args):
-        """Load the most recent export for this document without re-exporting."""
+    def _on_load_last(self):
+        """Load the most recent export for this document without re-exporting.
+        Driven by the page's Model menu (`loadlast` message)."""
         from pyrevit import revit
         doc = revit.doc
         if doc is None:
-            dbhms_ui.info("No active Revit document.", title='3D Viewer')
+            dbhms_ui.warn("No active Revit document.", title='3D Viewer')
             return
         path = self._export_path(doc)
         if not os.path.isfile(path):
-            dbhms_ui.info(
+            dbhms_ui.warn(
                 "No previous export found for this model.\n\nRun "
                 "Export & Load Model first.", title='3D Viewer')
             return
         if self._load_into_panel(path):
             try:
+                import json as _json
                 mb = os.path.getsize(path) / (1024.0 * 1024.0)
-                self.txt_stats.Text = "Loaded last export ({0:.1f} MB).".format(mb)
+                self._post("stats:" + _json.dumps({"mb": round(mb, 1)}))
             except Exception:
                 pass
-            self.txt_status.Text = "Model loaded. Press F to fly, or drag to look."
+            self._post("exportstate:done")
         else:
-            dbhms_ui.info(
+            dbhms_ui.warn(
                 "The 3D panel isn't ready yet. Give it a moment after opening "
                 "the tool, then try again.", title='3D Viewer')
 
@@ -850,18 +825,19 @@ class ViewerForm(forms.WPFWindow):
                 pass
             return os.path.join(local, name)
 
-    def _on_share(self, sender, args):
+    def _on_share(self):
         """Package the last export + this project's clashes into one
         self-contained HTML a PM can double-click in any browser (no Revit, no
-        server, no internet) and walk the clashes from."""
+        server, no internet) and walk the clashes from. Driven by the page's
+        Share button (`share` message)."""
         from pyrevit import revit
         doc = revit.doc
         if doc is None:
-            dbhms_ui.info("No active Revit document.", title='Share to browser')
+            dbhms_ui.warn("No active Revit document.", title='Share to browser')
             return
         glb = self._export_path(doc)
         if not os.path.isfile(glb):
-            dbhms_ui.info(
+            dbhms_ui.warn(
                 "Export the model first.\n\nClick \"Export & Load Model\" (or "
                 "\"Load Last Export\"), then Open in Browser.",
                 title='Share to browser')
@@ -909,12 +885,16 @@ class ViewerForm(forms.WPFWindow):
 
         if error is not None:
             _log("share: EXCEPTION\n{0}".format(error))
-            dbhms_ui.info("Couldn't build the shareable file:\n\n{0}".format(error),
-                          title='Share to browser')
+            dbhms_ui.error("Couldn't build the shareable file:\n\n{0}".format(error),
+                           title='Share to browser')
             return
 
         out_mb = nbytes / (1024.0 * 1024.0)
-        self.txt_status.Text = "Shareable file saved ({0:.0f} MB).".format(out_mb)
+        try:
+            import json as _json
+            self._post("sharedone:" + _json.dumps({"mb": round(out_mb), "rows": len(rows)}))
+        except Exception:
+            pass
         dbhms_ui.info(
             "Saved a self-contained 3D viewer that opens in any web browser - no "
             "Revit, no internet.\n\n"
@@ -956,7 +936,6 @@ class ViewerForm(forms.WPFWindow):
                     b64 = b64.decode('ascii')
                 wv.CoreWebView2.PostWebMessageAsString("b64:" + b64)
                 _log("load_into_panel: posted base64 ({0} bytes)".format(len(data)))
-            self._push_tuning()
             return True
         except Exception:
             _log("load_into_panel: EXCEPTION\n{0}".format(traceback.format_exc()))
@@ -1027,106 +1006,10 @@ class ViewerForm(forms.WPFWindow):
         self._post("ku:" + wk)
         e.Handled = True
 
-    def _push_tuning(self):
-        """Push the current speed/look slider values to the render."""
-        try:
-            self._post("speed:{0:.2f}".format(self.sl_speed.Value))
-            self._post("look:{0:.3f}".format(self.sl_look.Value))
-        except Exception:
-            pass
-
-    def _refresh_tuning_labels(self):
-        try:
-            self.txt_speed_val.Text = "{0:.1f} m/s".format(self.sl_speed.Value)
-            self.txt_look_val.Text = "{0:.2f}".format(self.sl_look.Value)
-        except Exception:
-            pass
-
-    def _on_speed_changed(self, sender, args):
-        self.txt_speed_val.Text = "{0:.1f} m/s".format(self.sl_speed.Value)
-        self._post("speed:{0:.2f}".format(self.sl_speed.Value))
-
-    def _on_look_changed(self, sender, args):
-        self.txt_look_val.Text = "{0:.2f}".format(self.sl_look.Value)
-        self._post("look:{0:.3f}".format(self.sl_look.Value))
-
-    def _push_sun(self):
-        """Push the environment sun to the render as 'sun:<elevation>,<azimuth>,
-        <strength0..1>'. The Time-of-day slider is remapped so MOST of its travel
-        positions the sun during the DAY: the middle ~76% sweeps sunrise -> noon ->
-        sunset (the part actually used), and only the outer ~12% on each end dips
-        through twilight to full night (pre-dawn on the left, after dusk on the right).
-        It still reaches complete night at both extremes, just without spending half
-        the slider there. 'Sun direction' sets the noon bearing; time sweeps the sun
-        E -> S -> W across the daytime span."""
-        try:
-            import math
-            sl = self.sl_time_of_day
-            lo = float(sl.Minimum); hi = float(sl.Maximum)
-            p = (float(sl.Value) - lo) / (hi - lo) if hi > lo else 0.5   # 0..1 slider position
-            EDGE = 0.12              # fraction of each end given to twilight -> night
-            NIGHT_DEPTH = 40.0       # how far below the horizon the very ends reach (deg)
-            PEAK = 78.0              # noon sun elevation
-            base_az = self.sl_sun_direction.Value
-            if p < EDGE:                                # pre-dawn: deep night -> sunrise
-                nf = p / EDGE                           # 0 at far left, 1 at sunrise
-                el = -NIGHT_DEPTH * (1.0 - nf)
-                az = base_az - 90.0
-            elif p > 1.0 - EDGE:                        # after dusk: sunset -> deep night
-                nf = (p - (1.0 - EDGE)) / EDGE          # 0 at sunset, 1 at far right
-                el = -NIGHT_DEPTH * nf
-                az = base_az + 90.0
-            else:                                       # daytime arc across the middle
-                df = (p - EDGE) / (1.0 - 2.0 * EDGE)    # 0 sunrise -> 1 sunset
-                el = math.sin(df * math.pi) * PEAK
-                az = base_az + (df - 0.5) * 180.0
-            strength = self.sl_sun_strength.Value / 100.0
-            self._post("sun:{0:.1f},{1:.1f},{2:.3f}".format(el, az, strength))
-        except Exception:
-            pass
-
-    def _on_sun_changed(self, sender, args):
-        self._push_sun()
-
-    def _push_edges(self):
-        try:
-            self._post("edges:" + ("1" if self.chk_edges.IsChecked else "0"))
-        except Exception:
-            pass
-
-    def _on_edges_changed(self, sender, args):
-        self._push_edges()
-
-    def _push_perf(self):
-        try:
-            self._post("perf:" + ("1" if self.chk_perf.IsChecked else "0"))
-        except Exception:
-            pass
-
-    def _on_perf_changed(self, sender, args):
-        self._push_perf()
-
-    def _push_ground(self):
-        try:
-            self._post("ground:" + ("1" if self.chk_ground.IsChecked else "0"))
-        except Exception:
-            pass
-
-    def _on_ground_changed(self, sender, args):
-        self._push_ground()
-
-    def _push_minimap(self):
-        try:
-            self._post("minimap:" + ("1" if self.chk_minimap.IsChecked else "0"))
-        except Exception:
-            pass
-
-    def _on_minimap_changed(self, sender, args):
-        self._push_minimap()
 
     # --- Pop-out / full screen ----------------------------------------
 
-    def _on_popout(self, sender, args):
+    def _on_popout(self):
         if self._popout is not None:
             self._dock_render()
         else:
@@ -1151,10 +1034,8 @@ class ViewerForm(forms.WPFWindow):
             win.Show()
             win.Activate()
             self._show_viewport_message(
-                "Render is in its own window.\n\nDrag it to your share screen, "
-                "then click Full Screen. Click \"Dock Render\" to bring it back.")
-            self.btn_popout.Content = "Dock Render"
-            self.btn_fullscreen.IsEnabled = True
+                "The 3D view is in its own window.\n\nDrag it to your share "
+                "screen. Click \"Pop out\" again to bring it back.")
         except Exception:
             _log("pop_out: EXCEPTION\n{0}".format(traceback.format_exc()))
             self._reclaim_webview()
@@ -1178,9 +1059,6 @@ class ViewerForm(forms.WPFWindow):
         except Exception:
             pass
         self._fs = False
-        self.btn_popout.Content = "Pop Out Render"
-        self.btn_fullscreen.Content = "Full Screen"
-        self.btn_fullscreen.IsEnabled = False
 
     def _on_popout_closed(self, sender, args):
         # User closed the pop-out window directly: bring the render home.
@@ -1193,9 +1071,6 @@ class ViewerForm(forms.WPFWindow):
         self._popout = None
         self._reclaim_webview()
         self._fs = False
-        self.btn_popout.Content = "Pop Out Render"
-        self.btn_fullscreen.Content = "Full Screen"
-        self.btn_fullscreen.IsEnabled = False
 
     def _reclaim_webview(self):
         try:
@@ -1204,7 +1079,7 @@ class ViewerForm(forms.WPFWindow):
         except Exception:
             _log("reclaim_webview: EXCEPTION\n{0}".format(traceback.format_exc()))
 
-    def _on_fullscreen(self, sender, args):
+    def _on_fullscreen(self):
         if self._fs:
             self._exit_fullscreen()
         else:
@@ -1220,7 +1095,6 @@ class ViewerForm(forms.WPFWindow):
             win.ResizeMode = ResizeMode.NoResize
             win.WindowState = WindowState.Maximized
             self._fs = True
-            self.btn_fullscreen.Content = "Exit Full Screen"
         except Exception:
             _log("enter_fullscreen: EXCEPTION\n{0}".format(traceback.format_exc()))
 
@@ -1237,7 +1111,6 @@ class ViewerForm(forms.WPFWindow):
             win.WindowStyle = WindowStyle.SingleBorderWindow
             win.ResizeMode = ResizeMode.CanResize
             self._fs = False
-            self.btn_fullscreen.Content = "Full Screen"
             try:
                 win.Activate()
             except Exception:
@@ -1277,254 +1150,64 @@ class ViewerForm(forms.WPFWindow):
             except Exception:
                 pass
             return
+        if msg == "ready":
+            # The page shell booted. Push this model's saved views + the user's global
+            # appearance/nav prefs so they're restored immediately (both persist to disk).
+            try:
+                import json as _json
+                self._post("views:" + _json.dumps(self._read_views_data()))
+                self._post("prefs:" + _json.dumps(self._read_prefs()))
+            except Exception:
+                pass
+            return
+        if msg.startswith("saveviews:"):
+            # Page is authoritative for the saved-views list; the host just persists it.
+            try:
+                import json as _json
+                self._write_views_data(_json.loads(msg[len("saveviews:"):]))
+            except Exception:
+                _log("saveviews: {0}".format(traceback.format_exc()))
+            return
+        if msg.startswith("prefs:"):
+            # Page-authoritative appearance/nav prefs; host persists them globally.
+            try:
+                import json as _json
+                self._write_prefs(_json.loads(msg[len("prefs:"):]))
+            except Exception:
+                _log("prefs: {0}".format(traceback.format_exc()))
+            return
+        if msg.startswith("export:"):
+            pick = False
+            try:
+                import json as _json
+                pick = bool(_json.loads(msg[len("export:"):]).get("picksubcats"))
+            except Exception:
+                pick = False
+            self._on_export(pick_subcats=pick)
+            return
+        if msg == "loadlast":
+            self._on_load_last()
+            return
+        if msg == "share":
+            self._on_share()
+            return
+        if msg == "popout":
+            self._on_popout()
+            return
+        if msg == "fullscreen":
+            self._on_fullscreen()
+            return
         if msg.startswith("filters:"):
-            # Model finished loading (offset is known); build the tree and load
-            # the project's clashes + saved viewpoints now that transforms work.
-            self._build_filter_ui(msg[len("filters:"):])
-            self._load_clashes()
-            self._build_viewpoints_list()
-            self._push_quality()   # re-sync the tier in case it changed pre-load
-            self._push_sun()       # apply the current time-of-day / sun settings
-            self._push_edges()     # apply the current edges toggle
-            self._push_ground()    # apply the current ground toggle
-            self._push_perf()      # apply the current performance-mode toggle
-            self._push_minimap()   # apply the current floor-plan minimap toggle
+            # Model finished loading. The page now owns visibility, clashes,
+            # quality, sun, etc. outright, so the host no longer rebuilds any WPF
+            # UI here -- the message survives only as a load-complete signal.
             return
 
     # --- render quality -----------------------------------------------
 
-    def _quality_name(self):
-        try:
-            item = self.cmb_quality.SelectedItem
-            return str(item.Content).strip().lower() if item is not None else "shaded"
-        except Exception:
-            return "shaded"
-
-    def _push_quality(self):
-        self._post("quality:" + self._quality_name())
-
-    def _on_quality_changed(self, sender, args):
-        self._push_quality()
 
     # --- clashes ------------------------------------------------------
 
-    # Clash kinds in display order (stored lowercase in the data).
-    _KIND_LABELS = [("hard", "Hard"), ("soft", "Soft"), ("clearance", "Clearance")]
-    # Cap on how many list rows we render at once (markers still show all).
-    _CLASH_LIST_CAP = 500
-
-    def _load_clashes(self):
-        """Read every clash for this project into memory, build the
-        trade/status/type filter checkboxes, and render the filtered list.
-        Markers are pushed to the viewer only when the user turns them on."""
-        self._clash_rows = []
-        folder_ok = True
-        try:
-            from pyrevit import revit
-            from clash_core import persistence, binding, browser_filters
-            doc = revit.doc
-            folder = binding.folder_for(doc) if doc is not None else None
-            data = persistence.read_clashes_at(folder) if folder else {"clashes": []}
-            # Test-name lookup so the search box can also match by test name.
-            names = {}
-            try:
-                lib = persistence.read_global_test_library()
-                for t in (lib.get("tests") or []):
-                    if t.get("id"):
-                        names[t["id"]] = t.get("name", "")
-            except Exception:
-                pass
-            for i, c in enumerate(data.get("clashes") or []):
-                mp = c.get("midpoint")
-                if not mp or len(mp) < 3:
-                    continue
-                a = (c.get("ref_a") or {}).get("category") or "?"
-                b = (c.get("ref_b") or {}).get("category") or "?"
-                seq = c.get("seq") or (i + 1)
-                status = c.get("status") or "Open"
-                label = "#{0}  {1} x {2}  -  {3}".format(seq, a, b, status)
-                self._clash_rows.append({
-                    "label":   label,
-                    "point":   [float(mp[0]), float(mp[1]), float(mp[2])],
-                    "trade":   c.get("assignee") or "-",
-                    "status":  status,
-                    "kind":    (c.get("kind") or "hard").lower(),
-                    "haystack": browser_filters.build_search_haystack(
-                        c, names.get(c.get("test_id"), "")),
-                })
-        except persistence.SharedFolderNotConfigured:
-            folder_ok = False
-        except Exception:
-            _log("load_clashes: {0}".format(traceback.format_exc()))
-
-        if not folder_ok:
-            self._show_clash_message(
-                "Set the shared clash folder in Settings to see this "
-                "project's clashes here.")
-            return
-        if not self._clash_rows:
-            self._show_clash_message(
-                "No clashes for this project yet (run a clash test).")
-            return
-
-        self._build_clash_filter_checkboxes()
-        self.sp_clash_filters.Visibility = Visibility.Visible
-        self._apply_clash_filters()
-
-    def _show_clash_message(self, text):
-        """Collapse the filters and show one explanatory line in the list box."""
-        try:
-            self.sp_clash_filters.Visibility = Visibility.Collapsed
-        except Exception:
-            pass
-        tb = TextBlock()
-        tb.Text = text
-        tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
-        tb.FontSize = 11
-        tb.TextWrapping = TextWrapping.Wrap
-        try:
-            self.brd_clashes.Child = tb
-        except Exception:
-            pass
-
-    def _build_clash_filter_checkboxes(self):
-        """Fill the Trade / Status / Type groups with one (checked) checkbox per
-        value that actually occurs in this project's clashes."""
-        trade_order = ["Mechanical", "Electrical", "Plumbing", "Fire Protection",
-                       "Technology", "Architectural", "Structural", "-"]
-        status_order = ["Open", "Reviewed", "Approved", "Resolved"]
-        present_trades = set(r["trade"] for r in self._clash_rows)
-        present_status = set(r["status"] for r in self._clash_rows)
-        present_kinds  = set(r["kind"] for r in self._clash_rows)
-
-        def ordered(order, present):
-            return ([v for v in order if v in present]
-                    + sorted(v for v in present if v not in order))
-
-        self._trade_chks = self._fill_filter_group(
-            self.sp_clash_trades,
-            [(v, ("Unassigned" if v == "-" else v))
-             for v in ordered(trade_order, present_trades)])
-        self._status_chks = self._fill_filter_group(
-            self.sp_clash_status,
-            [(v, v) for v in ordered(status_order, present_status)])
-        self._kind_chks = self._fill_filter_group(
-            self.sp_clash_kind,
-            [(k, lbl) for k, lbl in self._KIND_LABELS if k in present_kinds])
-
-    def _fill_filter_group(self, container, value_label_pairs):
-        """Reset `container`, add a checked CheckBox per (value, label), wire the
-        re-filter handler, and return the list of checkboxes."""
-        container.Children.Clear()
-        chks = []
-        for value, label in value_label_pairs:
-            chk = CheckBox()
-            chk.Content = label
-            chk.Tag = value
-            chk.IsChecked = True
-            chk.FontSize = 11
-            chk.Margin = Thickness(0, 1, 0, 1)
-            chk.Checked += self._on_clash_filter_changed
-            chk.Unchecked += self._on_clash_filter_changed
-            container.Children.Add(chk)
-            chks.append(chk)
-        return chks
-
-    def _checked_values(self, chks):
-        return set(c.Tag for c in chks if c.IsChecked)
-
-    def _filtered_clashes(self):
-        """Apply the current trade/status/type/search filters (AND across
-        dimensions) to the in-memory clash rows."""
-        trades   = self._checked_values(self._trade_chks)
-        statuses = self._checked_values(self._status_chks)
-        kinds    = self._checked_values(self._kind_chks)
-        try:
-            needle = (self.txt_clash_search.Text or "").lower().strip()
-        except Exception:
-            needle = ""
-        out = []
-        for r in self._clash_rows:
-            if r["trade"] not in trades:
-                continue
-            if r["status"] not in statuses:
-                continue
-            if r["kind"] not in kinds:
-                continue
-            if needle and needle not in r["haystack"]:
-                continue
-            out.append(r)
-        return out
-
-    def _on_clash_filter_changed(self, sender, args):
-        self._apply_clash_filters()
-
-    def _apply_clash_filters(self):
-        """Re-render the list from the current filter state, and (only when the
-        markers checkbox is on) push the filtered midpoints to the viewer."""
-        filtered = self._filtered_clashes()
-        self._build_clash_list(filtered)
-        markers_on = False
-        try:
-            markers_on = bool(self.chk_clash_markers.IsChecked)
-        except Exception:
-            pass
-        if markers_on:
-            try:
-                import json as _json
-                self._post("clashes:" + _json.dumps([r["point"] for r in filtered]))
-                self._post("showmarkers:1")
-            except Exception:
-                _log("apply_clash_filters: {0}".format(traceback.format_exc()))
-        else:
-            self._post("showmarkers:0")
-
-    def _build_clash_list(self, rows):
-        panel = StackPanel()
-        shown = rows[:self._CLASH_LIST_CAP]
-        for r in shown:
-            btn = Button()
-            btn.Content = r["label"]
-            btn.HorizontalAlignment = HorizontalAlignment.Stretch
-            btn.HorizontalContentAlignment = HorizontalAlignment.Left
-            btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
-            btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
-            btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
-            btn.BorderThickness = Thickness(1)
-            btn.Padding = Thickness(8, 4, 8, 4)
-            btn.Margin = Thickness(0, 0, 0, 3)
-            btn.FontSize = 11
-            btn.Cursor = Cursors.Hand
-            p = r["point"]
-            btn.Click += (lambda s, a, pt=p:
-                          self._post("flytopoint:{0},{1},{2}".format(pt[0], pt[1], pt[2])))
-            panel.Children.Add(btn)
-        if not shown:
-            tb = TextBlock()
-            tb.Text = "No clashes match the current filters."
-            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
-            tb.FontSize = 11
-            tb.TextWrapping = TextWrapping.Wrap
-            panel.Children.Add(tb)
-        sv = ScrollViewer()
-        sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-        sv.MaxHeight = 240
-        sv.Content = panel
-        try:
-            self.brd_clashes.Child = sv
-        except Exception:
-            _log("build_clash_list: {0}".format(traceback.format_exc()))
-        try:
-            total = len(self._clash_rows)
-            n = len(rows)
-            if n > self._CLASH_LIST_CAP:
-                self.lbl_clash_count.Text = (
-                    "Showing first {0} of {1} matching ({2} total) - "
-                    "refine filters to narrow.".format(self._CLASH_LIST_CAP, n, total))
-            else:
-                self.lbl_clash_count.Text = "Showing {0} of {1} clashes.".format(n, total)
-        except Exception:
-            pass
 
     # --- saved viewpoints ---------------------------------------------
 
@@ -1542,255 +1225,62 @@ class ViewerForm(forms.WPFWindow):
             pass
         return os.path.join(d, title + ".json")
 
-    def _read_viewpoints(self):
+    def _read_views_data(self):
+        """Full saved-views record for this model: {"viewpoints":[...], "home": id|None}.
+        Tolerates the legacy bare-list and {"viewpoints":[...]} formats."""
         import json
         p = self._viewpoints_path()
         if not os.path.isfile(p):
-            return []
+            return {"viewpoints": [], "home": None}
         try:
             with open(p, 'r') as f:
-                return (json.load(f) or {}).get("viewpoints") or []
+                d = json.load(f)
+            if isinstance(d, list):
+                return {"viewpoints": d, "home": None}
+            d = d or {}
+            return {"viewpoints": d.get("viewpoints") or [], "home": d.get("home")}
         except Exception:
-            return []
+            return {"viewpoints": [], "home": None}
 
-    def _write_viewpoints(self, vps):
+    def _write_views_data(self, data):
+        """Persist the page-authoritative saved-views record (viewpoints + home)."""
         import json
         try:
+            payload = {"viewpoints": (data or {}).get("viewpoints") or [],
+                       "home": (data or {}).get("home")}
             with open(self._viewpoints_path(), 'w') as f:
-                json.dump({"viewpoints": vps}, f, indent=2)
+                json.dump(payload, f, indent=2)
         except Exception:
-            _log("write_viewpoints: {0}".format(traceback.format_exc()))
+            _log("write_views: {0}".format(traceback.format_exc()))
 
-    def _on_save_viewpoint(self, sender, args):
-        if self._last_cam is None:
-            dbhms_ui.info("Load a model and move the view a moment first, "
-                          "then save.", title='Viewpoints')
-            return
-        vps = self._read_viewpoints()
-        name = forms.ask_for_string(
-            default='View {0}'.format(len(vps) + 1),
-            prompt='Name this viewpoint:', title='Save viewpoint')
-        if not name:
-            return
-        vps.append({"name": name, "pos": self._last_cam.get("pos"),
-                    "yaw": self._last_cam.get("yaw"),
-                    "pitch": self._last_cam.get("pitch")})
-        self._write_viewpoints(vps)
-        self._build_viewpoints_list()
+    def _read_viewpoints(self):
+        """Just the viewpoints list (used by share-to-browser)."""
+        return self._read_views_data()["viewpoints"]
 
-    def _build_viewpoints_list(self):
+    # --- appearance / nav prefs (global, not per-model) ---------------
+
+    def _prefs_path(self):
+        return os.path.join(_DATA_ROOT, "prefs.json")
+
+    def _read_prefs(self):
         import json
-        vps = self._read_viewpoints()
-        panel = StackPanel()
-        if not vps:
-            tb = TextBlock()
-            tb.Text = "No saved viewpoints yet."
-            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
-            tb.FontSize = 11
-            panel.Children.Add(tb)
-        else:
-            for index, vp in enumerate(vps):
-                name = vp.get("name") or "View"
-                # row: fly-to button (fills) + a small delete (X) button on the right
-                row = WpfGrid()
-                row.Margin = Thickness(0, 0, 0, 3)
-                c0 = ColumnDefinition(); c0.Width = GridLength(1, GridUnitType.Star)
-                c1 = ColumnDefinition(); c1.Width = GridLength.Auto
-                row.ColumnDefinitions.Add(c0)
-                row.ColumnDefinitions.Add(c1)
-
-                btn = Button()
-                btn.Content = name
-                btn.HorizontalAlignment = HorizontalAlignment.Stretch
-                btn.HorizontalContentAlignment = HorizontalAlignment.Left
-                btn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
-                btn.Foreground = SolidColorBrush(Color.FromRgb(0x2D, 0x37, 0x48))
-                btn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
-                btn.BorderThickness = Thickness(1)
-                btn.Padding = Thickness(8, 4, 8, 4)
-                btn.Margin = Thickness(0, 0, 4, 0)
-                btn.FontSize = 11
-                btn.Cursor = Cursors.Hand
-                payload = json.dumps({"pos": vp.get("pos"), "yaw": vp.get("yaw"),
-                                      "pitch": vp.get("pitch")})
-                btn.Click += (lambda s, a, pl=payload: self._post("viewpose:" + pl))
-                WpfGrid.SetColumn(btn, 0)
-                row.Children.Add(btn)
-
-                dbtn = Button()
-                dbtn.Content = "X"   # delete glyph (ASCII-safe)
-                dbtn.ToolTip = "Delete this saved view"
-                dbtn.Width = 26
-                dbtn.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
-                dbtn.Foreground = SolidColorBrush(Color.FromRgb(0x9B, 0x2C, 0x2C))
-                dbtn.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
-                dbtn.BorderThickness = Thickness(1)
-                dbtn.Padding = Thickness(0, 4, 0, 4)
-                dbtn.FontSize = 11
-                dbtn.Cursor = Cursors.Hand
-                dbtn.Click += (lambda s, a, i=index, nm=name: self._on_delete_viewpoint(i, nm))
-                WpfGrid.SetColumn(dbtn, 1)
-                row.Children.Add(dbtn)
-
-                panel.Children.Add(row)
+        p = self._prefs_path()
+        if not os.path.isfile(p):
+            return {}
         try:
-            self.brd_viewpoints.Child = panel
+            with open(p, 'r') as f:
+                return json.load(f) or {}
         except Exception:
-            _log("build_viewpoints_list: {0}".format(traceback.format_exc()))
+            return {}
 
-    def _on_delete_viewpoint(self, index, name):
-        if not forms.alert("Delete the saved view '{0}'?".format(name),
-                           title='Delete saved view', yes=True, no=True):
-            return
-        vps = self._read_viewpoints()
-        if 0 <= index < len(vps):
-            del vps[index]
-            self._write_viewpoints(vps)
-            self._build_viewpoints_list()
-
-    def _build_filter_ui(self, json_text):
-        """Build the model -> categories visibility tree from what the render
-        reports after a model loads. Runs on the UI thread."""
+    def _write_prefs(self, d):
         import json
         try:
-            data = json.loads(json_text)
+            with open(self._prefs_path(), 'w') as f:
+                json.dump(d or {}, f, indent=2)
         except Exception:
-            _log("build_filter_ui: bad json\n{0}".format(traceback.format_exc()))
-            return
-        self._build_models_tree(data.get("models") or [])
+            _log("write_prefs: {0}".format(traceback.format_exc()))
 
-    def _build_models_tree(self, models):
-        """models = [{"name", "categories":[...], "worksets":[...]}, ...].
-        Each model gets its own blue box: a whole-model on/off checkbox plus
-        an Edit button that opens a popup to toggle that model's categories
-        and worksets. The host model is marked '(this model)'."""
-        self._models = {}
-        self._hidden_models = set()
-        self._hidden_cats = set()
-        self._hidden_ws = set()
-
-        host_title = None
-        try:
-            from pyrevit import revit
-            host_title = revit.doc.Title if revit.doc is not None else None
-        except Exception:
-            host_title = None
-
-        panel = StackPanel()
-        if not models:
-            tb = TextBlock()
-            tb.Text = "No models reported."
-            tb.Foreground = SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96))
-            tb.FontSize = 11
-            panel.Children.Add(tb)
-        for entry in models:
-            name = entry.get("name") or "Model"
-            self._models[name] = {
-                "categories": entry.get("categories") or [],
-                "worksets": entry.get("worksets") or [],
-            }
-            panel.Children.Add(self._model_box(name, name == host_title))
-        try:
-            self.brd_models.Child = panel
-        except Exception:
-            _log("build_models_tree: failed\n{0}".format(traceback.format_exc()))
-
-    def _model_box(self, name, is_host):
-        """One per-model blue box: [on/off checkbox] [name]  [Edit...]."""
-        box = Border()
-        # dbHMS highlight blue (matches the multi-select highlight used elsewhere)
-        box.Background = SolidColorBrush(Color.FromRgb(0xEB, 0xF8, 0xFF))
-        box.BorderBrush = SolidColorBrush(Color.FromRgb(0x31, 0x82, 0xCE))
-        box.BorderThickness = Thickness(1)
-        box.CornerRadius = CornerRadius(4)
-        box.Padding = Thickness(8)
-        box.Margin = Thickness(0, 0, 0, 6)
-
-        grid = WpfGrid()
-        from System.Windows.Controls import ColumnDefinition
-        from System.Windows import GridLength
-        c0 = ColumnDefinition(); c0.Width = self._star_width()
-        c1 = ColumnDefinition(); c1.Width = GridLength(72)
-        grid.ColumnDefinitions.Add(c0)
-        grid.ColumnDefinitions.Add(c1)
-
-        chk = CheckBox()
-        chk.Content = name + (" (this model)" if is_host else "")
-        chk.IsChecked = True
-        chk.FontWeight = FontWeights.SemiBold
-        chk.VerticalAlignment = VerticalAlignment.Center
-        chk.Checked   += (lambda s, a, n=name: self._on_model_toggle(n, True))
-        chk.Unchecked += (lambda s, a, n=name: self._on_model_toggle(n, False))
-        WpfGrid.SetColumn(chk, 0)
-        grid.Children.Add(chk)
-
-        edit = Button()
-        edit.Content = "Edit..."
-        edit.Padding = Thickness(8, 2, 8, 2)
-        edit.Background = SolidColorBrush(Color.FromRgb(0xED, 0xF2, 0xF7))
-        edit.BorderBrush = SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE0))
-        edit.Cursor = self._hand_cursor()
-        edit.VerticalAlignment = VerticalAlignment.Center
-        edit.Click += (lambda s, a, n=name: self._open_model_dialog(n))
-        WpfGrid.SetColumn(edit, 1)
-        grid.Children.Add(edit)
-
-        box.Child = grid
-        return box
-
-    @staticmethod
-    def _star_width():
-        from System.Windows import GridLength, GridUnitType
-        return GridLength(1, GridUnitType.Star)
-
-    @staticmethod
-    def _hand_cursor():
-        try:
-            from System.Windows.Input import Cursors as _C
-            return _C.Hand
-        except Exception:
-            return None
-
-    def _on_model_toggle(self, name, shown):
-        if shown:
-            self._hidden_models.discard(name)
-        else:
-            self._hidden_models.add(name)
-        self._post("vis:model:{0}:{1}".format(1 if shown else 0, name))
-
-    def _open_model_dialog(self, name):
-        info = self._models.get(name)
-        if not info:
-            return
-        cats = info["categories"]
-        ws = info["worksets"]
-        cat_hidden = set(c for c in cats if (name + "||" + c) in self._hidden_cats)
-        ws_hidden = set(w for w in ws if (name + "||" + w) in self._hidden_ws)
-        dlg = ModelVisibilityForm(name, cats, ws, cat_hidden, ws_hidden)
-        try:
-            dlg.Owner = self
-        except Exception:
-            pass
-        if not dlg.ShowDialog():
-            return
-        for cat, checked in dlg.cat_states.items():
-            key = name + "||" + cat
-            hidden = key in self._hidden_cats
-            if checked and hidden:
-                self._hidden_cats.discard(key)
-                self._post("vis:cat:1:" + key)
-            elif (not checked) and (not hidden):
-                self._hidden_cats.add(key)
-                self._post("vis:cat:0:" + key)
-        for w, checked in dlg.ws_states.items():
-            key = name + "||" + w
-            hidden = key in self._hidden_ws
-            if checked and hidden:
-                self._hidden_ws.discard(key)
-                self._post("vis:ws:1:" + key)
-            elif (not checked) and (not hidden):
-                self._hidden_ws.add(key)
-                self._post("vis:ws:0:" + key)
 
     def _export_path(self, doc):
         try:
@@ -1800,7 +1290,10 @@ class ViewerForm(forms.WPFWindow):
             pass
         return os.path.join(MODELS_DIR, _safe_title(doc) + '.glb')
 
-    def _on_close(self, sender, args):
+    def _on_window_closed(self, sender, args):
+        """Window is closing (title-bar X or programmatic). Tear down the
+        pop-out window and dispose the WebView2. Wired to the Window.Closed
+        event now that the footer Close button is gone."""
         if self._popout is not None:
             win = self._popout
             self._popout = None
@@ -1821,66 +1314,6 @@ class ViewerForm(forms.WPFWindow):
                 self._webview.Dispose()
         except Exception:
             pass
-        self.Close()
-
-
-class ModelVisibilityForm(forms.WPFWindow):
-    """Popup editor for one model's category + workset visibility. Collects
-    checkbox states on Apply; the caller reads cat_states / ws_states and
-    pushes the changes to the render."""
-
-    def __init__(self, model_name, categories, worksets, cat_hidden, ws_hidden):
-        forms.WPFWindow.__init__(self, MODEL_VIS_XAML)
-        self.cat_states = {}
-        self.ws_states = {}
-        self._cat_checks = {}
-        self._ws_checks = {}
-        try:
-            self.txt_title.Text = model_name
-        except Exception:
-            pass
-        self._populate(self.sp_cats, categories, cat_hidden, self._cat_checks,
-                       "No model categories.")
-        self._populate(self.sp_ws, worksets, ws_hidden, self._ws_checks,
-                       "No worksets (model not workshared).")
-        self.btn_cats_all.Click  += (lambda s, a: self._set_all(self._cat_checks, True))
-        self.btn_cats_none.Click += (lambda s, a: self._set_all(self._cat_checks, False))
-        self.btn_ws_all.Click    += (lambda s, a: self._set_all(self._ws_checks, True))
-        self.btn_ws_none.Click   += (lambda s, a: self._set_all(self._ws_checks, False))
-        self.btn_apply.Click  += self._on_apply
-        self.btn_cancel.Click += self._on_cancel
-
-    def _populate(self, panel, items, hidden, store, empty_msg):
-        if not items:
-            tb = TextBlock()
-            tb.Text = empty_msg
-            tb.Foreground = SolidColorBrush(Color.FromRgb(0xA0, 0xAE, 0xC0))
-            tb.FontSize = 11
-            panel.Children.Add(tb)
-            return
-        for name in items:
-            chk = CheckBox()
-            chk.Content = name
-            chk.IsChecked = (name not in hidden)
-            panel.Children.Add(chk)
-            store[name] = chk
-
-    @staticmethod
-    def _set_all(store, state):
-        for chk in store.values():
-            chk.IsChecked = state
-
-    def _on_apply(self, sender, args):
-        self.cat_states = dict((n, bool(c.IsChecked))
-                               for n, c in self._cat_checks.items())
-        self.ws_states = dict((n, bool(c.IsChecked))
-                              for n, c in self._ws_checks.items())
-        self.DialogResult = True
-        self.Close()
-
-    def _on_cancel(self, sender, args):
-        self.DialogResult = False
-        self.Close()
 
 
 def _gather_host_subcategories(doc):

@@ -30,7 +30,7 @@
   /* ---- floor-plan minimap (bottom-left, above the dbHMS badge; grows up + right) ---- */
   /* transparent: the light "paper" plan is drawn into the canvas underneath; a coloured panel
      background here would tint the plan (that was the "not lighter" bug). Border only, for framing. */
-  #mm { position: fixed; left: 12px; bottom: 76px; width: 240px; height: 172px; display: none;
+  #mm { position: fixed; right: 12px; bottom: 20px; width: 240px; height: 172px; display: none;
         background: transparent; border: 1px solid rgba(45,55,72,0.45);
         border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); user-select: none;
         overflow: hidden; z-index: 9; }
@@ -42,11 +42,11 @@
   /* camera position + heading marker */
   #mm_cam { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none;
             border-left: 7px solid transparent; border-right: 7px solid transparent;
-            border-bottom: 14px solid #00BFFF; filter: drop-shadow(0 0 2px rgba(0,0,0,0.7));
+            border-bottom: 14px solid #2B6CB0; filter: drop-shadow(0 0 2px rgba(0,0,0,0.7));
             transform: translate(-50%,-50%); }
   /* resize grip (top-right corner): triangle of dots, matching the WPF tools' drag-to-resize grip */
-  #mm_grip { position: absolute; right: 1px; top: 1px; width: 16px; height: 16px;
-             cursor: nesw-resize; pointer-events: auto; }
+  #mm_grip { position: absolute; left: 1px; top: 1px; width: 16px; height: 16px;
+             cursor: nwse-resize; pointer-events: auto; }
   /* ---- standalone (plain-browser) share overlay: hidden inside Revit, where the
          WPF panel provides these controls. Shown only when the page runs in a normal
          browser (no WebView2 host) so a PM has a clash list + visibility on screen. ---- */
@@ -86,6 +86,137 @@
                   border: none; border-radius: 4px; padding: 8px 13px; font: 600 12px Segoe UI, sans-serif;
                   cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.3); display: none; }
   #share_toggle.show { display: block; }
+
+  /* ================= redesigned in-page shell (Phase 1) =================
+     Fixed OVERLAYS over the full-window canvas. #c stays 100vw/100vh and the
+     renderer is never reflowed (render-pipeline rule + keeps the WebView2 DPI
+     surface path unchanged). #shell is pointer-events:none so clicks fall
+     through to the canvas everywhere except on its own controls. Hidden in
+     BUNDLE (share) files, where the legacy standalone overlay owns the UI. */
+  body[data-mode="bundle"] #shell { display: none; }
+  #shell { position: fixed; inset: 0; z-index: 15; pointer-events: none;
+           font: 13px "Segoe UI", system-ui, sans-serif; color: #2D3748; }
+  #shell button { font: inherit; }
+  #sh-hdr { position: absolute; top: 0; left: 0; right: 0; height: 54px; pointer-events: auto;
+            display: flex; align-items: center; gap: 16px; padding: 0 16px; color: #F2F7FC;
+            border-bottom: 3px solid #EE8A34;
+            background:
+              linear-gradient(180deg, rgba(11,29,52,0) 55%, rgba(11,29,52,.55) 100%),
+              radial-gradient(rgba(214,236,255,.15) 1.1px, transparent 1.6px) 0 0/16px 16px,
+              linear-gradient(135deg,#143257 0%, #0F2748 55%, #0B1D34 100%); }
+  #sh-hdr .brand { height: 30px; display: block; }
+  #sh-hdr .ti { line-height: 1.15; }
+  #sh-hdr .ti .t { font-size: 14px; font-weight: 600; color: #F2F7FC; }
+  #sh-hdr .ti .s { font-size: 10.5px; color: #A9C2D8; }
+  #sh-tabs { display: flex; gap: 2px; margin: 0 auto; background: rgba(255,255,255,.08);
+             border: 1px solid rgba(255,255,255,.14); border-radius: 9px; padding: 3px; }
+  #sh-tabs .tab { font-size: 13px; font-weight: 600; color: #A9C2D8; padding: 6px 20px;
+                  border-radius: 7px; cursor: pointer; background: none; border: 0; }
+  #sh-tabs .tab:hover { color: #fff; }
+  #sh-tabs .tab.on { background: #2B6CB0; color: #fff; }
+  #sh-actions { display: flex; gap: 8px; }
+  #sh-actions button { font-size: 12px; font-weight: 600; color: #E7F0F9; background: transparent;
+                       border: 1px solid rgba(255,255,255,.3); border-radius: 7px; padding: 5px 12px; cursor: pointer; }
+  #sh-actions button:hover { background: rgba(255,255,255,.12); }
+  #sh-actions button.pri { background: #2B6CB0; border-color: #2B6CB0; }
+  #sh-actions button.pri:hover { background: #2461a0; }
+  #sh-left { position: absolute; top: 66px; left: 12px; width: 300px; max-height: calc(100% - 132px);
+             pointer-events: auto; display: flex; flex-direction: column; gap: 10px;
+             overflow-y: auto; padding-right: 2px; }
+  #shell.lcol #sh-left { display: none; }
+  /* thin modern scrollbars (no chunky track / white box) */
+  #sh-left::-webkit-scrollbar, .sh-vrows::-webkit-scrollbar { width: 8px; height: 8px; }
+  #sh-left::-webkit-scrollbar-track, .sh-vrows::-webkit-scrollbar-track { background: transparent; }
+  #sh-left::-webkit-scrollbar-thumb, .sh-vrows::-webkit-scrollbar-thumb {
+    background: rgba(45,55,72,.22); border-radius: 4px; }
+  #sh-left::-webkit-scrollbar-thumb:hover, .sh-vrows::-webkit-scrollbar-thumb:hover {
+    background: rgba(45,55,72,.42); }
+  #sh-lreopen { position: absolute; top: 74px; left: 0; pointer-events: auto; display: none;
+                background: #fff; border: 1px solid #E2E8F0; border-left: 0; border-radius: 0 8px 8px 0;
+                padding: 9px 7px; cursor: pointer; color: #2B6CB0; font-weight: 700;
+                box-shadow: 2px 2px 8px rgba(10,20,40,.12); }
+  #shell.lcol #sh-lreopen { display: block; }
+  .sh-card { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; padding: 12px 13px;
+             box-shadow: 0 2px 10px rgba(10,20,40,.08); }
+  .sh-ch { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .sh-ch .tick { width: 3px; height: 14px; border-radius: 2px; background: #2B6CB0; flex-shrink: 0; }
+  .sh-ch .tick.o { background: #EE8A34; }
+  .sh-ch .t { font-size: 13px; font-weight: 600; color: #1A365D; }
+  .sh-ch .r { margin-left: auto; font-size: 11px; color: #2B6CB0; cursor: pointer; }
+  .sh-seg { display: flex; border: 1px solid #CBD5E0; border-radius: 7px; overflow: hidden; margin: 6px 0; }
+  .sh-seg button { flex: 1; font-size: 11.5px; font-weight: 600; color: #4A5568; padding: 5px 0;
+                   cursor: pointer; background: #fff; border: 0; border-right: 1px solid #E2E8F0; }
+  .sh-seg button:last-child { border-right: 0; }
+  .sh-seg button.on { background: #2B6CB0; color: #fff; }
+  .sh-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #2D3748; padding: 4px 1px; cursor: pointer; }
+  .sh-row input { margin: 0; }
+  .sh-lbl { display: flex; justify-content: space-between; font-size: 11px; color: #718096; margin-top: 6px; }
+  .sh-slider { width: 100%; margin: 3px 0; accent-color: #2B6CB0; }
+  .sh-mode { display: none; flex-direction: column; gap: 10px; }
+  .sh-mode.on { display: flex; }
+  .sh-empty { font-size: 12px; color: #718096; line-height: 1.5; }
+  #sh-toolbar { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+                pointer-events: auto; display: flex; align-items: center; gap: 3px; background: #fff;
+                border: 1px solid #E2E8F0; border-radius: 22px; box-shadow: 0 4px 16px rgba(10,20,40,.18);
+                padding: 5px 8px; }
+  #sh-toolbar .seg { display: flex; border: 1px solid #CBD5E0; border-radius: 14px; overflow: hidden; margin-right: 4px; }
+  #sh-toolbar .seg button { font-size: 11.5px; font-weight: 600; color: #4A5568; padding: 4px 12px;
+                            cursor: pointer; background: #fff; border: 0; }
+  #sh-toolbar .seg button.on { background: #2B6CB0; color: #fff; }
+  #sh-toolbar .tb { font-size: 11.5px; font-weight: 600; color: #4A5568; background: none; border: 0;
+                    border-radius: 12px; padding: 5px 11px; cursor: pointer; }
+  #sh-toolbar .tb:hover:not(:disabled) { background: #F7FAFC; }
+  #sh-toolbar .tb.on { background: #EBF3FB; color: #185FA5; }
+  #sh-toolbar .tb:disabled { opacity: .4; cursor: default; }
+  #sh-toolbar .sep { width: 1px; height: 16px; background: #E2E8F0; margin: 0 3px; }
+  #sh-insp { position: absolute; top: 66px; right: 12px; width: 380px; max-height: calc(100% - 132px);
+             pointer-events: auto; background: #fff; border: 1px solid #E2E8F0; border-radius: 10px;
+             box-shadow: 0 2px 12px rgba(10,20,40,.12); overflow: auto; display: none; }
+  #sh-insp.on { display: block; }
+  #sh-insp .sh-insp-hd { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #E2E8F0; }
+  #sh-insp .sh-insp-hd .t { font-size: 14px; font-weight: 700; color: #1A365D; flex: 1; min-width: 0;
+                            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sh-insp .sh-insp-x { cursor: pointer; color: #A0AEC0; font-size: 18px; line-height: 1; flex-shrink: 0; }
+  #sh-insp .sh-insp-x:hover { color: #2D3748; }
+  #sh-insp .sh-insp-bd { padding: 8px 14px 12px; }
+  #sh-insp .sh-irow { display: flex; gap: 10px; font-size: 12px; padding: 5px 0; border-bottom: 1px solid #EDF2F7; }
+  #sh-insp .sh-irow:last-child { border-bottom: 0; }
+  #sh-insp .sh-irow b { color: #718096; font-weight: 600; width: 74px; flex-shrink: 0; }
+  #sh-insp .sh-irow span { color: #2D3748; overflow-wrap: anywhere; }
+  .sh-menu { position: fixed; z-index: 30; background: #fff; border: 1px solid #E2E8F0;
+             border-radius: 10px; box-shadow: 0 8px 24px rgba(10,20,40,.22); padding: 6px;
+             width: 244px; pointer-events: auto; }
+  .sh-menu .sh-mi { display: block; width: 100%; text-align: left; background: none; border: 0;
+                    border-radius: 6px; padding: 8px 12px; font-size: 12.5px; color: #2D3748; cursor: pointer; }
+  .sh-menu .sh-mi:hover { background: #EBF3FB; color: #185FA5; }
+  .sh-menu .sh-mi.pri { color: #2B6CB0; font-weight: 600; }
+  .sh-menu-note { font-size: 11px; color: #718096; padding: 4px 12px 6px; line-height: 1.4; }
+  .sh-menu-stat { font-size: 11px; color: #2D3748; padding: 6px 12px 2px; margin-top: 4px;
+                  border-top: 1px solid #EDF2F7; }
+  .sh-vmodel { border: 1px solid #E2E8F0; border-radius: 8px; padding: 8px 9px; margin-bottom: 8px; background: #F7FAFC; }
+  .sh-vmodel:last-child { margin-bottom: 0; }
+  .sh-vmhead { display: flex; align-items: center; gap: 6px; }
+  .sh-vmname { font-weight: 600; color: #1A365D; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sh-vlink { font-size: 10.5px; color: #2B6CB0; cursor: pointer; }
+  .sh-vlink:hover { text-decoration: underline; }
+  .sh-vseg { margin: 6px 0 5px; }
+  .sh-vsearch { width: 100%; box-sizing: border-box; padding: 4px 8px; border: 1px solid #CBD5E0;
+                border-radius: 6px; font: 11px "Segoe UI"; margin-bottom: 4px; }
+  .sh-vrows { max-height: 168px; overflow-y: auto; }
+  .sh-vrows .sh-row { padding: 2px 1px; font-size: 11.5px; }
+  .sh-vrows .sh-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sh-savebtn { width: 100%; padding: 7px; border: 1px solid #CBD5E0; background: #EDF2F7; color: #2D3748;
+                border-radius: 7px; font: 600 12px "Segoe UI"; cursor: pointer; }
+  .sh-savebtn:hover { border-color: #2B6CB0; color: #2B6CB0; }
+  .sh-vrow { display: flex; align-items: center; gap: 7px; padding: 4px 2px; border-radius: 6px; }
+  .sh-vrow:hover { background: #F1F6FB; }
+  .sh-vstar { cursor: pointer; font-size: 13px; color: #CBD5E0; flex-shrink: 0; }
+  .sh-vstar.on { color: #E7B183; }
+  .sh-vname { flex: 1; min-width: 0; font-size: 12px; color: #2B6CB0; cursor: pointer;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sh-vname:hover { text-decoration: underline; }
+  .sh-vdel { color: #A0AEC0; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 3px; flex-shrink: 0; }
+  .sh-vdel:hover { color: #E53E3E; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -98,7 +229,6 @@
 </head>
 <body>
 <canvas id="c" tabindex="0"></canvas>
-<div id="badge"><span style="color:#00BFFF">db</span><span style="color:#7A8FA6"> | </span><span style="color:#00BFFF">HMS</span></div>
 <div id="minbtn" title="Exit the enlarged view">minimize</div>
 <div id="hint">Loading viewer…</div>
 <div id="props"></div>
@@ -108,11 +238,11 @@
   <div id="mm_cam"></div>
   <div id="mm_grip" title="Drag to resize">
     <svg viewBox="0 0 16 16" width="16" height="16">
-      <!-- dotted grip (triangle pointing into the top-right corner), matching the WPF tools' resize grip -->
+      <!-- dotted grip (triangle pointing into the top-left corner) -->
       <g fill="rgba(45,55,72,0.75)">
-        <circle cx="13" cy="3"  r="1.15"/>
-        <circle cx="13" cy="7"  r="1.15"/><circle cx="9" cy="3" r="1.15"/>
-        <circle cx="13" cy="11" r="1.15"/><circle cx="9" cy="7" r="1.15"/><circle cx="5" cy="3" r="1.15"/>
+        <circle cx="3"  cy="3"  r="1.15"/>
+        <circle cx="3"  cy="7"  r="1.15"/><circle cx="7" cy="3" r="1.15"/>
+        <circle cx="3"  cy="11" r="1.15"/><circle cx="7" cy="7" r="1.15"/><circle cx="11" cy="3" r="1.15"/>
       </g>
     </svg>
   </div>
@@ -146,6 +276,11 @@ function showHint(t, fadeMs) {
 const BUILD = '0629d-draglook';
 let lastRawMove = [0, 0];   // raw e.movementX/Y from the most recent locked mousemove
 const diagEl = document.createElement('div'); diagEl.id = 'diag';
+// Phase 1: the diag ribbon is dev-only chrome now -- hidden by default, shown with
+// ?debug in the URL (or a debug:1 host message). Kept, not deleted: it reports
+// dpr/canvas/buffer sizes, the exact instrumentation the high-DPI corner-render fix
+// (Track D) is verified against on a 150% machine.
+if (!/[?&]debug\b/.test(location.search)) diagEl.style.display = 'none';
 document.body.appendChild(diagEl);
 function updateDiag(){
   const r = canvas.getBoundingClientRect();
@@ -674,10 +809,11 @@ let mergedMeshes = [];           // the fused THREE.Mesh list
 let mergedRoot = null;           // group holding mergedMeshes
 let bounds = null;               // {center:THREE.Vector3, radius}
 let assetExtras = {};
-const hiddenModel = {}, hiddenCat = {}, hiddenWs = {};
+const hiddenModel = {}, hiddenCat = {}, hiddenWs = {}, hiddenLevel = {};
 const SEP = '||';
 function catKey(e){ return e.model + SEP + e.category; }
 function wsKey(e){ return e.model + SEP + e.workset; }
+function levelKey(e){ return e.model + SEP + ((e.meta && e.meta.level) || ''); }
 
 function disposeModel(){
   // interior reflection probe: drop the per-model reflective set + its env texture (the
@@ -1174,7 +1310,7 @@ function recomputeVisibility(){
     const dirty = new Set();
     for (const e of elements){
       if (e.mergedMesh === undefined || e.mergedMesh === null) continue;
-      const v = (hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)]) ? 0 : 1;
+      const v = (hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)] || hiddenLevel[levelKey(e)]) ? 0 : 1;
       const arr = e.mergedMesh.geometry.attributes._vis.array;
       let changed = false;
       for (let k = 0; k < e.vCount; k++){ const j = e.vStart + k; if (arr[j] !== v){ arr[j] = v; changed = true; } }
@@ -1184,7 +1320,7 @@ function recomputeVisibility(){
     return;
   }
   for (const e of elements){
-    e.obj.visible = !(hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)]);
+    e.obj.visible = !(hiddenModel[e.model] || hiddenCat[catKey(e)] || hiddenWs[wsKey(e)] || hiddenLevel[levelKey(e)]);
   }
 }
 function reportFilters(){
@@ -1200,7 +1336,10 @@ function reportFilters(){
   post('filters:' + JSON.stringify({ models: models }));
   // Standalone (plain browser): no WPF panel to receive `filters:`, so fill the
   // in-page show/hide list + enable the minimap now that the glb is loaded.
-  if (typeof STANDALONE !== 'undefined' && STANDALONE) shareOnModelLoaded(models);
+  // the new shell fills its own Visibility card from this; the legacy standalone
+  // overlay (BUNDLE share files) still uses shareOnModelLoaded.
+  if (window.__shellOnModelLoaded) window.__shellOnModelLoaded(models);
+  else if (typeof STANDALONE !== 'undefined' && STANDALONE) shareOnModelLoaded(models);
 }
 
 // ---------- selection (raycasting) ----------
@@ -1301,12 +1440,32 @@ function showSelected(e, px, py){ const m=e.meta;
     row('Model',m.model)+row('Level',m.level)+row('Workset',m.workset)+row('Placed by',m.creator)+
     row('Id',m.element_id)+'<div class="r" style="color:#A0AEC0">Esc to deselect</div>'; posProps(px,py); }
 function refreshSel(px, py){
-  if (pinnedEl){ setHighlight(pinnedEl); showSelected(pinnedEl, px, py); }
+  if (pinnedEl){ setHighlight(pinnedEl); showElementInspector(pinnedEl); }
   else if (hoverEl){ setHighlight(hoverEl); showHover(hoverEl, px, py); }
-  else { setHighlight(null); props.style.display='none'; }
+  else { setHighlight(null); props.style.display='none'; hideElementInspector(); }
 }
 function clearHover(){ hoverEl = null; if (!pinnedEl){ setHighlight(null); props.style.display='none'; } }
-function clearSelection(){ hoverEl = null; pinnedEl = null; setHighlight(null); props.style.display='none'; }
+function clearSelection(){ hoverEl = null; pinnedEl = null; setHighlight(null); props.style.display='none'; hideElementInspector(); }
+// Clicking an element opens its details in the right inspector panel (the shell); the
+// small hover tooltip stays for hover-only. In BUNDLE/standalone (no shell) fall back
+// to the old cursor-pinned card.
+function irow(l, v){ return v ? ('<div class="sh-irow"><b>' + esc(l) + '</b><span>' + esc(v) + '</span></div>') : ''; }
+function showElementInspector(e){
+  const insp = document.getElementById('sh-insp');
+  if (!insp){ showSelected(e, window.innerWidth / 2, window.innerHeight / 2); return; }
+  const m = e.meta || {};
+  insp.innerHTML =
+      '<div class="sh-insp-hd"><span class="t">' + esc(m.category || 'Element') + '</span>'
+    + '<span class="sh-insp-x" title="Close (Esc)">×</span></div>'
+    + '<div class="sh-insp-bd">'
+    + irow('Family', m.family) + irow('Name', m.name) + irow('Model', m.model)
+    + irow('Level', m.level) + irow('Workset', m.workset) + irow('Placed by', m.creator)
+    + irow('Id', m.element_id) + '</div>';
+  insp.classList.add('on');
+  insp.querySelector('.sh-insp-x').addEventListener('click', clearSelection);
+  props.style.display = 'none';   // the hover tooltip yields to the pinned inspector
+}
+function hideElementInspector(){ const insp = document.getElementById('sh-insp'); if (insp) insp.classList.remove('on'); }
 
 // ---------- clash markers + fly-to ----------
 let markers = null;
@@ -1477,6 +1636,22 @@ function handleMessage(data){
     else if (cmd==='minimap'){ setMinimap(arg==='1'); }
     else if (cmd==='kd'){ navKeyDown(arg); }   // nav key forwarded from the WPF host
     else if (cmd==='ku'){ navKeyUp(arg); }
+    // ---- host -> shell status (Phase 1) ----
+    else if (cmd==='exportstate'){
+      if (arg==='started') showHint('Exporting the model… this can take a moment.');
+      else if (arg==='done') showHint('');
+      else if (arg.slice(0,4)==='fail') showHint('Export failed. ' + (arg.slice(5) || ''), 5000);
+    }
+    else if (cmd==='views'){
+      try { const d = JSON.parse(arg); savedViews = d.viewpoints || []; homeViewId = (d.home != null ? d.home : null); renderSavedViews(); }
+      catch(_e){}
+    }
+    else if (cmd==='prefs'){ try { applyPrefs(JSON.parse(arg)); } catch(_e){} }
+    else if (cmd==='stats'){ try { modelStats = JSON.parse(arg); } catch(_e){} }
+    else if (cmd==='sharedone'){
+      try { const s=JSON.parse(arg); showHint('Shareable file saved (' + s.mb + ' MB). Opening it in your browser…', 4000); }
+      catch(_e){ showHint('Shareable file saved.', 3000); }
+    }
   } catch(err){ showHint('Error: '+(err&&err.message?err.message:err)); }
 }
 if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', e => handleMessage(e.data));
@@ -1822,7 +1997,7 @@ function setMinimap(on){
   mmGrip.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation();
     drag = { x:e.clientX, y:e.clientY, w:mm.clientWidth, h:mm.clientHeight }; });
   window.addEventListener('mousemove', e => { if (!drag) return;
-    const asp = drag.w/drag.h, dx = e.clientX-drag.x, dy = drag.y-e.clientY;   // up = larger
+    const asp = drag.w/drag.h, dx = drag.x-e.clientX, dy = drag.y-e.clientY;   // grip is top-left: up/left = larger
     let w = drag.w + Math.max(dx, dy*asp);
     w = Math.max(160, Math.min(w, Math.min(window.innerWidth*0.6, window.innerHeight*0.6)));
     mm.style.width = w+'px'; mm.style.height = (w/asp)+'px'; markPlanDirty(); });
@@ -2087,7 +2262,381 @@ function bootStandalone(){
   else { showHint('This file has no embedded model.'); }
 }
 
-if (STANDALONE) bootStandalone();
+// ======================= redesigned in-page shell (Phase 1) =======================
+// The whole tool UI now lives in the page. buildShell() adds the header + mode tabs +
+// collapsible left panel + bottom toolbar + inspector mount as fixed OVERLAYS over the
+// full-window canvas; the canvas + renderer are untouched. HOSTED (inside Revit) and
+// DEV (plain browser) boot the shell; BUNDLE (share files) keeps the legacy standalone
+// overlay until Phase 5 rebuilds it on this same shell.
+const VIEWER_MODE = (window.chrome && window.chrome.webview) ? 'hosted'
+                  : (window.__DBHMS_BUNDLE ? 'bundle' : 'dev');
+let shellTab = 'explore';
+function shEl(tag, cls, html){ const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+
+function buildShell(){
+  const shell = document.createElement('div'); shell.id = 'shell';
+  shell.innerHTML =
+      '<div id="sh-hdr">'
+    +   '<img class="brand" src="dbhms_logo.png" alt="dbHMS" onerror="this.style.display=\'none\'">'
+    +   '<div class="ti"><div class="t">3D Viewer</div><div class="s" id="sh-sub">Fly, review, mark up — no Enscape, no leaving Revit</div></div>'
+    +   '<div id="sh-tabs">'
+    +     '<button class="tab on" data-tab="explore">Explore</button>'
+    +     '<button class="tab" data-tab="clashes">Clashes</button>'
+    +     '<button class="tab" data-tab="markups">Markups</button>'
+    +   '</div>'
+    +   '<div id="sh-actions">'
+    +     '<button id="sh-model">Model ▾</button>'
+    +     '<button id="sh-share">Share</button>'
+    +     '<button id="sh-present" class="pri">Present</button>'
+    +     '<button id="sh-popout">Pop out</button>'
+    +   '</div>'
+    + '</div>'
+    + '<button id="sh-lreopen" title="Show panel">›</button>'
+    + '<div id="sh-left"></div>'
+    + '<div id="sh-insp"></div>'
+    + '<div id="sh-toolbar"></div>';
+  document.body.appendChild(shell);
+  buildLeftPanel();
+  buildToolbar();
+  shell.querySelectorAll('#sh-tabs .tab').forEach(t => t.addEventListener('click', () => setShellTab(t.dataset.tab)));
+  document.getElementById('sh-lreopen').addEventListener('click', () => shell.classList.remove('lcol'));
+  document.getElementById('sh-popout').addEventListener('click', () => post('popout'));
+  document.getElementById('sh-share').addEventListener('click', () => post('share'));
+  document.getElementById('sh-present').addEventListener('click', () => showHint('Present mode ships in Phase 3.', 2500));
+  document.getElementById('sh-model').addEventListener('click', (e) => { e.stopPropagation(); toggleModelMenu(e.currentTarget); });
+  window.__shellOnModelLoaded = shellOnModelLoaded;
+}
+
+// Model menu: export a fresh glb from the active Revit 3D view, or reload the last
+// one. Posts export:/loadlast to the host; in DEV (plain browser) there is no host,
+// so these are inert and a hint explains it.
+function toggleModelMenu(btn){
+  const existing = document.getElementById('sh-modelmenu');
+  if (existing){ existing.remove(); return; }
+  let statLine = '';
+  if (modelStats){
+    const n = (x) => (x == null ? 0 : x).toLocaleString();
+    if (modelStats.triangles != null)
+      statLine = '<div class="sh-menu-stat">' + n(modelStats.host) + ' host + ' + n(modelStats.link)
+               + ' linked · ' + n(modelStats.triangles) + ' triangles · ' + modelStats.mb + ' MB</div>';
+    else if (modelStats.mb != null)
+      statLine = '<div class="sh-menu-stat">Loaded · ' + modelStats.mb + ' MB</div>';
+  }
+  const m = document.createElement('div'); m.id = 'sh-modelmenu'; m.className = 'sh-menu';
+  m.innerHTML =
+      '<button class="sh-mi pri" data-a="export">Export &amp; Load Model</button>'
+    + '<button class="sh-mi" data-a="loadlast">Load Last Export</button>'
+    + '<label class="sh-row" style="padding:6px 12px 2px"><input type="checkbox" id="sh-subcats"> Choose subcategories to hide</label>'
+    + statLine
+    + '<div class="sh-menu-note">Export the active Revit 3D view once, then fly through it here. Turn on subcategories to hide things like equipment clearances.</div>';
+  document.body.appendChild(m);
+  const r = btn.getBoundingClientRect();
+  m.style.top = (r.bottom + 6) + 'px';
+  m.style.left = Math.max(8, Math.round(r.right - 244)) + 'px';
+  const dev = (VIEWER_MODE === 'dev');
+  m.querySelector('[data-a="export"]').addEventListener('click', () => {
+    const pick = document.getElementById('sh-subcats').checked;
+    if (dev) showHint('Export runs inside Revit; this is the browser preview.', 3000);
+    else post('export:' + JSON.stringify({ picksubcats: pick ? 1 : 0 }));
+    m.remove();
+  });
+  m.querySelector('[data-a="loadlast"]').addEventListener('click', () => {
+    if (dev) showHint('Load runs inside Revit; this is the browser preview.', 3000);
+    else post('loadlast');
+    m.remove();
+  });
+  setTimeout(() => {
+    const away = (ev) => { if (!m.contains(ev.target) && ev.target !== btn){ m.remove(); document.removeEventListener('mousedown', away); } };
+    document.addEventListener('mousedown', away);
+  }, 0);
+}
+
+function setShellTab(tab){
+  shellTab = tab;
+  document.querySelectorAll('#sh-tabs .tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+  document.querySelectorAll('#sh-left .sh-mode').forEach(p => p.classList.toggle('on', p.dataset.tab === tab));
+  // toolbar reskin, filmstrip, and per-mode inspector arrive with Phases 2-4.
+}
+
+function buildLeftPanel(){
+  document.getElementById('sh-left').innerHTML =
+      '<div class="sh-mode on" data-tab="explore" id="sh-explore"></div>'
+    + '<div class="sh-mode" data-tab="clashes"><div class="sh-card">'
+    +   '<div class="sh-ch"><span class="tick"></span><span class="t">Clashes</span></div>'
+    +   '<div class="sh-empty">Clash review moves into this tab in Phase 2: the filtered list, prev/next flip-through, band-colored pins, and status write-back to the same clash database the Clash Detection tool uses. For now, review clashes over there.</div>'
+    + '</div></div>'
+    + '<div class="sh-mode" data-tab="markups"><div class="sh-card">'
+    +   '<div class="sh-ch"><span class="tick o"></span><span class="t">Markups</span></div>'
+    +   '<div class="sh-empty">QA/QC markup sessions land in Phase 4 — drop a pin, draw over the view, add a note, and flip through a review walk.</div>'
+    + '</div></div>';
+  buildExploreCards();
+}
+
+function buildExploreCards(){
+  const E = document.getElementById('sh-explore');
+
+  const app = shEl('div', 'sh-card');
+  app.innerHTML =
+      '<div class="sh-ch"><span class="tick"></span><span class="t">Appearance</span></div>'
+    + '<div class="sh-seg" id="sh-quality"><button data-q="draft">Draft</button><button data-q="shaded" class="on">Shaded</button><button data-q="realistic">Realistic</button></div>'
+    + '<label class="sh-row"><input type="checkbox" id="sh-edges"> Edges</label>'
+    + '<label class="sh-row"><input type="checkbox" id="sh-ground"> Ground shadow</label>'
+    + '<label class="sh-row"><input type="checkbox" id="sh-perf"> Performance mode</label>';
+  E.appendChild(app);
+  app.querySelectorAll('#sh-quality button').forEach(b => b.addEventListener('click', () => {
+    app.querySelectorAll('#sh-quality button').forEach(x => x.classList.toggle('on', x === b));
+    setQuality(b.dataset.q); persistPrefs();
+  }));
+  document.getElementById('sh-edges').addEventListener('change', e => { setEdges(e.target.checked); persistPrefs(); });
+  document.getElementById('sh-ground').addEventListener('change', e => { setGround(e.target.checked); persistPrefs(); });
+  document.getElementById('sh-perf').addEventListener('change', e => { perfMode = e.target.checked; persistPrefs(); });
+
+  const nav = shEl('div', 'sh-card');
+  nav.innerHTML =
+      '<div class="sh-ch"><span class="tick"></span><span class="t">Navigation</span></div>'
+    + '<div class="sh-lbl"><span>Walk speed</span><span id="sh-speed-v"></span></div>'
+    + '<input type="range" class="sh-slider" id="sh-speed" min="0.5" max="12" step="0.1">'
+    + '<div class="sh-lbl"><span>Look sensitivity</span><span id="sh-look-v"></span></div>'
+    + '<input type="range" class="sh-slider" id="sh-look" min="0.02" max="0.6" step="0.01">'
+    + '<label class="sh-row" style="margin-top:6px"><input type="checkbox" id="sh-gamepad" checked> Xbox controller</label>'
+    + '<label class="sh-row"><input type="checkbox" id="sh-minimap" checked> Floor-plan minimap</label>';
+  E.appendChild(nav);
+  const spd = document.getElementById('sh-speed'), lk = document.getElementById('sh-look');
+  spd.value = userSpeed; lk.value = userLook;
+  const updNav = () => {
+    document.getElementById('sh-speed-v').textContent = (+spd.value).toFixed(1) + ' m/s';
+    document.getElementById('sh-look-v').textContent = (+lk.value).toFixed(2) + '°/px';
+  };
+  spd.addEventListener('input', () => { userSpeed = +spd.value; updNav(); persistPrefs(); });
+  lk.addEventListener('input', () => { userLook = +lk.value; updNav(); persistPrefs(); });
+  document.getElementById('sh-gamepad').addEventListener('change', e => { padUseEnabled = e.target.checked; persistPrefs(); });
+  document.getElementById('sh-minimap').addEventListener('change', e => { setMinimap(e.target.checked); persistPrefs(); });
+  updNav();
+
+  const vis = shEl('div', 'sh-card');
+  vis.innerHTML =
+      '<div class="sh-ch"><span class="tick"></span><span class="t">Visibility</span><span class="r" id="sh-vis-all">Show all</span></div>'
+    + '<div id="sh-vis-body"><div class="sh-empty">Load a model to turn categories, worksets, and levels on or off. Instant — nothing re-exports.</div></div>';
+  E.appendChild(vis);
+  document.getElementById('sh-vis-all').addEventListener('click', showEverything);
+
+  const views = shEl('div', 'sh-card');
+  views.innerHTML =
+      '<div class="sh-ch"><span class="tick"></span><span class="t">Saved views</span></div>'
+    + '<button class="sh-savebtn" id="sh-saveview">Save current view</button>'
+    + '<div id="sh-views-list" style="margin-top:8px"></div>'
+    + '<div class="sh-empty" style="margin-top:6px">Click a view to fly there. ★ sets Home (the toolbar Home button). Double-click a name to rename.</div>';
+  E.appendChild(views);
+  document.getElementById('sh-saveview').addEventListener('click', saveCurrentView);
+  renderSavedViews();
+}
+
+// Turn every model / category / workset / level back on.
+function showEverything(){
+  [hiddenModel, hiddenCat, hiddenWs, hiddenLevel].forEach(m => { for (const k in m) delete m[k]; });
+  recomputeVisibility();
+  if (window.__lastVisModels) shellOnModelLoaded(window.__lastVisModels);
+}
+
+// ---- appearance / navigation prefs (global, persisted by the host) ----
+// Programmatically setting .checked/.value does NOT fire change/input, so applyPrefs
+// never loops back into persistPrefs; only real user interaction persists.
+function currentPrefs(){
+  const q = document.querySelector('#sh-quality button.on');
+  const g = (id) => { const el = document.getElementById(id); return el ? el.checked : undefined; };
+  return { quality: q ? q.dataset.q : 'shaded', edges: g('sh-edges'), ground: g('sh-ground'),
+           perf: g('sh-perf'), speed: userSpeed, look: userLook,
+           gamepad: g('sh-gamepad'), minimap: g('sh-minimap') };
+}
+let _prefsTimer = null;
+function persistPrefs(){
+  if (VIEWER_MODE !== 'hosted') return;              // only the Revit host persists
+  clearTimeout(_prefsTimer);
+  _prefsTimer = setTimeout(() => post('prefs:' + JSON.stringify(currentPrefs())), 400);
+}
+function applyPrefs(p){
+  if (!p) return;
+  const set = (id, on) => { const el = document.getElementById(id); if (el && typeof on === 'boolean') el.checked = on; };
+  if (p.quality){ document.querySelectorAll('#sh-quality button').forEach(b => b.classList.toggle('on', b.dataset.q === p.quality)); setQuality(p.quality); }
+  if (typeof p.edges === 'boolean'){ set('sh-edges', p.edges); setEdges(p.edges); }
+  if (typeof p.ground === 'boolean'){ set('sh-ground', p.ground); setGround(p.ground); }
+  if (typeof p.perf === 'boolean'){ set('sh-perf', p.perf); perfMode = p.perf; }
+  set('sh-gamepad', p.gamepad); if (typeof p.gamepad === 'boolean') padUseEnabled = p.gamepad;
+  set('sh-minimap', p.minimap);   // applied on model load via shellOnModelLoaded
+  if (typeof p.speed === 'number'){ userSpeed = p.speed; const s = document.getElementById('sh-speed'); if (s) s.value = p.speed; }
+  if (typeof p.look === 'number'){ userLook = p.look; const l = document.getElementById('sh-look'); if (l) l.value = p.look; }
+  const sv = document.getElementById('sh-speed-v'); if (sv) sv.textContent = userSpeed.toFixed(1) + ' m/s';
+  const lv = document.getElementById('sh-look-v'); if (lv) lv.textContent = userLook.toFixed(2) + '°/px';
+}
+
+// ---- saved views (persisted by the host per model; the page is authoritative) ----
+let savedViews = [], homeViewId = null, modelStats = null;
+function persistViews(){ post('saveviews:' + JSON.stringify({ viewpoints: savedViews, home: homeViewId })); }
+function saveCurrentView(){
+  const v = { id: 'v' + Date.now(), name: 'View ' + (savedViews.length + 1),
+              pos: cam.pos.slice(), yaw: cam.yaw, pitch: cam.pitch };
+  savedViews.push(v); persistViews(); renderSavedViews();
+}
+function renderSavedViews(){
+  const box = document.getElementById('sh-views-list');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!savedViews.length){ box.innerHTML = '<div class="sh-empty" style="padding:2px 0">No saved views yet — frame a shot and click Save current view.</div>'; return; }
+  savedViews.forEach(v => {
+    const r = shEl('div', 'sh-vrow');
+    r.innerHTML = '<span class="sh-vstar' + (v.id === homeViewId ? ' on' : '') + '" title="Set as Home">'
+                + (v.id === homeViewId ? '★' : '☆') + '</span>'
+                + '<span class="sh-vname" title="Fly to this view"></span>'
+                + '<span class="sh-vdel" title="Delete">×</span>';
+    r.querySelector('.sh-vname').textContent = v.name;
+    r.querySelector('.sh-vname').addEventListener('click', () => startFly(v.pos, v.yaw, v.pitch));
+    r.querySelector('.sh-vname').addEventListener('dblclick', () => renameView(v, r));
+    r.querySelector('.sh-vstar').addEventListener('click', () => {
+      homeViewId = (homeViewId === v.id ? null : v.id); persistViews(); renderSavedViews();
+    });
+    r.querySelector('.sh-vdel').addEventListener('click', () => {
+      savedViews = savedViews.filter(x => x.id !== v.id);
+      if (homeViewId === v.id) homeViewId = null;
+      persistViews(); renderSavedViews();
+    });
+    box.appendChild(r);
+  });
+}
+function renameView(v, row){
+  const span = row.querySelector('.sh-vname');
+  const inp = document.createElement('input'); inp.className = 'sh-vsearch'; inp.value = v.name;
+  inp.style.margin = '0'; inp.style.flex = '1';
+  span.replaceWith(inp); inp.focus(); inp.select();
+  const commit = () => { v.name = (inp.value || '').trim() || v.name; persistViews(); renderSavedViews(); };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter'){ e.preventDefault(); commit(); }
+    else if (e.key === 'Escape'){ renderSavedViews(); }
+  });
+}
+
+function buildToolbar(){
+  document.getElementById('sh-toolbar').innerHTML =
+      '<div class="seg" id="sh-nav"><button class="on" data-nav="orbit">Orbit</button><button data-nav="walk">Walk</button></div>'
+    + '<button class="tb" id="sh-home">Home</button>'
+    + '<button class="tb" id="sh-fit">Fit</button>'
+    + '<span class="sep"></span>'
+    + '<button class="tb" disabled title="Distance measure ships in Phase 6">Measure</button>'
+    + '<span class="sep"></span>'
+    + '<button class="tb" id="sh-vis">Visibility</button>'
+    + '<button class="tb" id="sh-help" title="Keyboard shortcuts">?</button>';
+  const fit = () => { if (root || mergedRoot) frameCamera(); };
+  document.getElementById('sh-home').addEventListener('click', () => {
+    const h = savedViews.find(v => v.id === homeViewId);   // Home flies to the starred view if set
+    if (h) startFly(h.pos, h.yaw, h.pitch); else fit();
+  });
+  document.getElementById('sh-fit').addEventListener('click', fit);
+  document.getElementById('sh-vis').addEventListener('click', () => { document.getElementById('shell').classList.remove('lcol'); setShellTab('explore'); });
+  document.getElementById('sh-help').addEventListener('click', () => showHint('Drag to look · W A S D move · Q / E down / up · F mouselook · Shift faster · click to select', 5000));
+  const seg = document.getElementById('sh-nav');
+  seg.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    // one nav scheme in the engine today; the Walk/Orbit split is wired in a later slice.
+  }));
+}
+
+// Post-model-load hook for the shell: build the Visibility card's per-model
+// category / workset / level tree from the loaded `elements`. Drives the engine's
+// hiddenModel/Cat/Ws/Level maps + recomputeVisibility directly (no host round-trip).
+function shellOnModelLoaded(models){
+  window.__lastVisModels = models;
+  const body = document.getElementById('sh-vis-body');
+  if (!body) return;
+  const map = {};
+  for (const e of elements){
+    const m = map[e.model] || (map[e.model] = { cats: {}, ws: {}, lv: {} });
+    if (e.category) m.cats[e.category] = true;
+    if (e.workset) m.ws[e.workset] = true;
+    const lv = e.meta && e.meta.level; if (lv) m.lv[lv] = true;
+  }
+  body.innerHTML = '';
+  const names = Object.keys(map).sort();
+  if (!names.length){ body.innerHTML = '<div class="sh-empty">No elements in this export.</div>'; }
+  else names.forEach(name => body.appendChild(buildVisModel(name, map[name])));
+  // the floor-plan minimap builds its floors lazily from loaded geometry, so
+  // (re)apply the toggle now that a model is in.
+  const mmt = document.getElementById('sh-minimap');
+  if (mmt && mmt.checked) setMinimap(true);
+}
+
+function buildVisModel(name, dims){
+  const box = shEl('div', 'sh-vmodel');
+  box.innerHTML =
+      '<div class="sh-vmhead"><label class="sh-row" style="flex:1;min-width:0;margin:0"><input type="checkbox" class="sh-vm"><span class="sh-vmname"></span></label>'
+    + '<span class="sh-vlink sh-vall">All</span><span class="sh-vlink sh-vnone">None</span></div>'
+    + '<div class="sh-seg sh-vseg"><button class="on" data-dim="cats">Categories</button><button data-dim="ws">Worksets</button><button data-dim="lv">Levels</button></div>'
+    + '<input class="sh-vsearch" placeholder="Search…">'
+    + '<div class="sh-vrows"></div>';
+  box.querySelector('.sh-vmname').textContent = name;
+  const mchk = box.querySelector('.sh-vm');
+  mchk.checked = !hiddenModel[name];
+  mchk.addEventListener('change', () => {
+    if (mchk.checked) delete hiddenModel[name]; else hiddenModel[name] = true;
+    recomputeVisibility();
+  });
+  const HIDDEN = { cats: hiddenCat, ws: hiddenWs, lv: hiddenLevel };
+  const rows = box.querySelector('.sh-vrows');
+  const search = box.querySelector('.sh-vsearch');
+  let dim = 'cats';
+  function render(){
+    const values = Object.keys(dims[dim]).sort();
+    const q = (search.value || '').toLowerCase().trim();
+    const hid = HIDDEN[dim];
+    rows.innerHTML = '';
+    const shown = values.filter(v => !q || v.toLowerCase().indexOf(q) >= 0);
+    if (!shown.length){ rows.innerHTML = '<div class="sh-empty" style="padding:2px 0">' + (values.length ? 'No match.' : 'None in this model.') + '</div>'; return; }
+    shown.forEach(v => {
+      const key = name + SEP + v;
+      const r = shEl('label', 'sh-row');
+      const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !hid[key];
+      c.addEventListener('change', () => { if (c.checked) delete hid[key]; else hid[key] = true; recomputeVisibility(); });
+      const s = document.createElement('span'); s.textContent = v;
+      r.appendChild(c); r.appendChild(s); rows.appendChild(r);
+    });
+  }
+  box.querySelectorAll('.sh-vseg button').forEach(b => b.addEventListener('click', () => {
+    box.querySelectorAll('.sh-vseg button').forEach(x => x.classList.toggle('on', x === b));
+    dim = b.dataset.dim; render();
+  }));
+  search.addEventListener('input', render);
+  const setAll = (show) => {
+    const hid = HIDDEN[dim];
+    Object.keys(dims[dim]).forEach(v => { const key = name + SEP + v; if (show) delete hid[key]; else hid[key] = true; });
+    recomputeVisibility(); render();
+  };
+  box.querySelector('.sh-vall').addEventListener('click', () => setAll(true));
+  box.querySelector('.sh-vnone').addEventListener('click', () => setAll(false));
+  render();
+  return box;
+}
+
+// ---- boot ----
+document.body.setAttribute('data-mode', VIEWER_MODE);
+if (VIEWER_MODE === 'bundle') {
+  bootStandalone();
+} else {
+  buildShell();
+  setShellTab('explore');
+  if (VIEWER_MODE === 'dev') {
+    // plain-browser dev harness so the whole shell + Explore is testable with no Revit:
+    // ?model=<url> loads a glb, or drag-drop one onto the page; default = the sample.
+    const murl = new URLSearchParams(location.search).get('model') || 'test_meta.glb';
+    loadFromUrl(murl);
+    window.addEventListener('dragover', e => e.preventDefault());
+    window.addEventListener('drop', e => {
+      e.preventDefault();
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) f.arrayBuffer().then(buf => loadFromBuffer(buf)).catch(err => showHint('Drop load failed: ' + err));
+    });
+  } else {
+    post('ready');   // host replies with url:/prefs:/views: (wired host-side in a later slice)
+  }
+}
 </script>
 <style>
   /* Window resize affordance: WebView2 paints over WPF's native grip

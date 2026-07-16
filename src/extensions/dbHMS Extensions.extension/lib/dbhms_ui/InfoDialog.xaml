@@ -30,12 +30,11 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <!-- Green checkmark — explicitly says "this worked,"
-                     more friendly than the warning-triangle that
-                     pyRevit's forms.alert paints by default and
-                     warmer than a neutral info glyph. Color is
-                     dbHMS green (#48BB78). -->
-                <TextBlock Grid.Column="0" Text="✓"
+                <!-- Status glyph. Default green check (success), swapped in
+                     code to a red X (error) or amber ! (warn) by dialog kind
+                     so a FAILURE never shows the "this worked" check. See
+                     dialogs._ICONS. -->
+                <TextBlock x:Name="txt_icon" Grid.Column="0" Text="✓"
                            Foreground="#48BB78" FontSize="24"
                            FontWeight="Bold" VerticalAlignment="Center"
                            Margin="0,0,12,0"/>
